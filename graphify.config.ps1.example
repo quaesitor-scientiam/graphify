@@ -1,0 +1,10 @@
+# graphify local config — copy this file to graphify.config.ps1 and edit the
+# values for your machine. graphify.config.ps1 is gitignored (per-machine,
+# not committed); this .example file is the template that ships in the repo.
+
+# The external repo these scripts track (update-vlang-graph.ps1,
+# switch-vlang-graph.ps1, and extract_bench.ps1's default -Source).
+$GraphifyVlangRepo = 'S:\repo\vlang'
+
+# Central store for extracted graphs — one subdirectory per project/branch.
+$GraphifyStore = 'S:\graph_data'

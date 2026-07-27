@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "graphify": {
+      "command": "S:\\vProjects\\graphify\\bin\\graphify-mcp.exe",
+      "args": ["S:\\vProjects\\graphify\\graphify-out\\graph.json"]
+    }
+  }
+}

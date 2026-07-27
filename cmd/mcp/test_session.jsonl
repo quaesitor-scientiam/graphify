@@ -1,0 +1,6 @@
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{}}}
+{"jsonrpc":"2.0","method":"notifications/initialized"}
+{"jsonrpc":"2.0","id":2,"method":"tools/list"}
+{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"query_graph","arguments":{"text":"shortest path","budget":250}}}
+{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"shortest_path","arguments":{"a":"build_graph","b":"emit_skeleton"}}}
+{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"get_neighbors","arguments":{"node":"index"}}}
