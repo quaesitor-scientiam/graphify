@@ -155,9 +155,21 @@ Smoke-test the protocol without Claude: `Get-Content cmd/mcp/test_session.jsonl 
 ## Operational scripts
 
 Beyond the `graphify` CLI itself, `bin/` and `bench/` hold PowerShell helpers
-built for running this against a large external repo (vlang) day to day. They
-have `S:\repo\vlang` / `S:\graph_data` hardcoded as defaults — adjust those
-paths for your own setup.
+built for running this against a large external repo (vlang) day to day.
+
+**One-time setup:** copy `graphify.config.ps1.example` to `graphify.config.ps1`
+(repo root) and edit the two paths for your machine:
+
+```
+$GraphifyVlangRepo = 'S:\repo\vlang'   # the external repo these scripts track
+$GraphifyStore     = 'S:\graph_data'   # central store for extracted graphs
+```
+
+`graphify.config.ps1` is gitignored — each machine keeps its own copy, and
+`update-vlang-graph.ps1`, `switch-vlang-graph.ps1`, and `extract_bench.ps1`
+(its default `-Source`) all read from it. If the file is missing, each script
+errors with a pointer back to the `.example` template instead of silently
+using the wrong paths.
 
 ### `bin/update-vlang-graph.ps1` — daily graph refresh
 
