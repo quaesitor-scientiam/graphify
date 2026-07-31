@@ -6,6 +6,7 @@ import runtime
 struct WorkItem {
 	path string
 	rel  string
+	hash string // sha256 of the file's content, for the next run's cache
 }
 
 // BatchJob pairs a slice of queued files with the temp files and live worker
@@ -23,14 +24,20 @@ mut:
 // running up to nr_cpus() of them concurrently (each parses its own batch),
 // so a file that makes V's parser panic is skipped and reported instead of
 // aborting the whole run. Only when a batch's worker crashes is the offending
-// file isolated and the rest of that batch requeued for a later wave. Returns
+// file isolated and the rest of that batch requeued for a later wave.
+//
+// Files whose content hash matches `out_dir`'s cache from the previous run
+// are reused directly, skipping re-parsing entirely — see cache.v. Returns
 // the graph and the list of files that failed to parse.
-pub fn build_graph_resilient(root string, worker_exe string) (Graph, []string) {
+pub fn build_graph_resilient(root string, worker_exe string, out_dir string) (Graph, []string) {
 	abs_root := os.real_path(root)
 	mut g := Graph{
 		root: abs_root
 	}
 	mut failed := []string{}
+	// save_cache below needs out_dir to exist; write_bundle also creates it
+	// later, but that's after this function returns.
+	os.mkdir_all(out_dir) or {}
 
 	files := if os.is_dir(abs_root) {
 		find_source_files(abs_root, ['v'])
@@ -40,11 +47,27 @@ pub fn build_graph_resilient(root string, worker_exe string) (Graph, []string) {
 			lang: 'v'
 		}]
 	}
+
+	old_cache := load_cache(out_dir)
+	mut new_cache := []CacheEntry{cap: files.len}
+
 	mut queue := []WorkItem{}
 	for f in files {
+		rel := rel_path(abs_root, f.path)
+		hash := file_hash(f.path)
+		if hash != '' && rel in old_cache && old_cache[rel].hash == hash {
+			// unchanged since the last extract — reuse its symbols/edges
+			// instead of spending a worker parsing it again.
+			cached := old_cache[rel]
+			g.symbols << cached.fr.symbols
+			g.edges << cached.fr.edges
+			new_cache << cached
+			continue
+		}
 		queue << WorkItem{
 			path: f.path
-			rel:  rel_path(abs_root, f.path)
+			rel:  rel
+			hash: hash
 		}
 	}
 
@@ -94,15 +117,23 @@ pub fn build_graph_resilient(root string, worker_exe string) (Graph, []string) {
 			job.proc.wait()
 			job.proc.close()
 
-			// each completed file wrote one NDJSON line of its FileResult
+			// each completed file wrote one NDJSON line of its FileResult, in
+			// the same order as job.batch, so index i pairs with job.batch[i].
 			results := os.read_lines(job.outfile) or { []string{} }
-			for line in results {
+			for i, line in results {
 				if line.trim_space() == '' {
 					continue
 				}
 				fr := decode_file_result(line)
 				g.symbols << fr.symbols
 				g.edges << fr.edges
+				if i < job.batch.len {
+					new_cache << CacheEntry{
+						rel:  job.batch[i].rel
+						hash: job.batch[i].hash
+						fr:   fr
+					}
+				}
 			}
 			completed := results.len
 			n := job.batch.len
@@ -123,6 +154,7 @@ pub fn build_graph_resilient(root string, worker_exe string) (Graph, []string) {
 		}
 	}
 
+	save_cache(out_dir, new_cache)
 	resolve_edges(mut g)
 	return g, failed
 }

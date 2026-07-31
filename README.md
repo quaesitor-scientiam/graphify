@@ -100,6 +100,10 @@ Resolution order: `--graph` > `GRAPHIFY_GRAPH` > `GRAPHIFY_STORE`/<cwd-name> > `
 - `graph.json` — persistent, queryable graph (read by query/path/explain)
 - `GRAPH_REPORT.md` — counts, most-connected symbols, suggested queries
 - `manifest.json` — metadata + counts
+- `.gf_cache.ndjson` — incremental cache: each file's content hash plus its
+  extracted symbols/edges. A file whose hash matches the cache is reused
+  as-is on the next `extract` instead of being reparsed — only new/changed
+  files hit the parser. Safe to delete to force a full reparse.
 
 Library:
 
@@ -266,9 +270,10 @@ Phase 1 (engine) — done; V only.
 - [x] V backend: module, imports, structs, enums, interfaces, consts, fns/methods, body-less signatures, call edges
 - [x] `graphify-out/` bundle: `graph.json`, `GRAPH_REPORT.md`, `manifest.json`
 - [x] `extract` / `query` (BFS/DFS + token budget) / `path` / `explain` / `body` / `skeleton`
-- [x] **resilient extraction** — files parsed in worker-process batches, so a file that panics V's parser is skipped + reported, not fatal. Torture-tested on the full V compiler repo: 5593 files → 89,368 symbols in ~111s, 3 unparseable files isolated.
+- [x] **resilient extraction** — files parsed in worker-process batches across `nr_cpus()` concurrent workers, so a file that panics V's parser is skipped + reported, not fatal. Torture-tested on the full V compiler repo: 103,253 symbols in ~11s cold, 3 unparseable files isolated.
 - [x] Phase 2: MCP server (`query_graph`, `get_node`, `get_neighbors`, `shortest_path`) + `.mcp.json`
 - [x] Phase 3: Claude Code wiring — `SKILL.md`, `/graphify`, `SessionStart` + `PreToolUse` hooks, git rebuild hook
-- [ ] Phase 4: doc/rationale capture, edge provenance (`EXTRACTED`/`INFERRED`), SHA256 incremental cache, other languages via tree-sitter
+- [x] **SHA256 incremental cache** (`.gf_cache.ndjson`) — a file whose content hash is unchanged since the last `extract` is reused as-is; only new/changed files are reparsed (~11s → ~4s on a full no-op re-run of the V compiler repo)
+- [ ] Phase 4 remaining: doc/rationale capture, edge provenance (`EXTRACTED`/`INFERRED`), other languages via tree-sitter
 - [ ] share one `ast.Table` across files for accurate cross-file call resolution
 - [ ] Phase 5: Leiden communities, `merge-graphs`, GraphML/Cypher/SVG, `graph.html`

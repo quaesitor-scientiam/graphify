@@ -64,10 +64,12 @@ fn main() {
 
 fn cmd_extract(args []string) {
 	path := positional(args, 0) or { '.' }
+	out := resolve_out(args, path)
 	// parse each file in its own worker process, so one file that panics V's
 	// parser is skipped (and reported) rather than aborting the whole extract.
-	g, failed := graphify.build_graph_resilient(path, os.executable())
-	out := resolve_out(args, path)
+	// Files unchanged since the last extract to `out` are reused from its
+	// cache instead of being reparsed.
+	g, failed := graphify.build_graph_resilient(path, os.executable(), out)
 	graphify.write_bundle(g, out) or { fail('write failed: ${err}') }
 	println('extracted ${g.symbols.len} symbols, ${g.edges.len} edges')
 	if failed.len > 0 {
