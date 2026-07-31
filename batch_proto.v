@@ -9,7 +9,7 @@ module graphify
 //   sym_section : sym\x02sym\x02...   (empty if no symbols)
 //   edge_section: edge\x02edge\x02... (empty if no edges)
 //   sym  : id\x01name\x01kind_int\x01sig\x01file\x01line\x01end_line\x01is_pub\x01parent\x01doc
-//   edge : from\x01to\x01kind_int
+//   edge : from\x01to\x01kind_int\x01is_method
 //
 // \x01 = field sep, \x02 = record sep, \x03 = section sep.
 // Signatures and doc strings may contain any printable char; the only chars
@@ -33,7 +33,11 @@ pub fn encode_file_result(fr FileResult) string {
 	}
 	mut edge_parts := []string{cap: fr.edges.len}
 	for e in fr.edges {
-		edge_parts << '${bp_clean(e.from)}${bp_fs}${bp_clean(e.to)}${bp_fs}${int(e.kind)}'
+		edge_parts << '${bp_clean(e.from)}${bp_fs}${bp_clean(e.to)}${bp_fs}${int(e.kind)}${bp_fs}${if e.is_method {
+			'1'
+		} else {
+			'0'
+		}}'
 	}
 	return sym_parts.join(bp_rs) + bp_ss + edge_parts.join(bp_rs)
 }
@@ -72,6 +76,9 @@ pub fn decode_file_result(line string) FileResult {
 				from: f[0]
 				to:   f[1]
 				kind: unsafe { EdgeKind(f[2].int()) }
+				// tolerate the older 3-field form, so a cache written by a
+				// previous build decodes instead of panicking on f[3]
+				is_method: f.len > 3 && f[3] == '1'
 			}
 		}
 	}

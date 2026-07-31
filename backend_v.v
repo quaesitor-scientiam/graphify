@@ -372,9 +372,10 @@ fn walk_call(ce ast.CallExpr, from string, mut edges []Edge, mut seen map[string
 	if ce.name != '' && ce.name !in seen {
 		seen[ce.name] = true
 		edges << Edge{
-			from: from
-			to:   ce.name
-			kind: .calls
+			from:      from
+			to:        ce.name
+			kind:      .calls
+			is_method: ce.is_method
 		}
 	}
 	walk_expr(ce.left, from, mut edges, mut seen)

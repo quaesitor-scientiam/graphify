@@ -46,6 +46,11 @@ pub:
 	from string
 	to   string // resolved symbol id, or a raw name when unresolved
 	kind EdgeKind
+	// is_method marks a `calls` edge that came from `x.foo()` rather than
+	// `foo()`. It is an extraction-time hint consumed by resolve_edges to
+	// narrow candidates; it is deliberately not written to graph.json, since
+	// once resolution has run it carries no further meaning.
+	is_method bool
 }
 
 // FileResult is one file's extracted symbols and edges — the unit passed back

@@ -209,32 +209,145 @@ pub fn build_graph(opts Options) Graph {
 	return g
 }
 
+// CallCand is one declaration that a raw callee name could refer to.
+struct CallCand {
+	id        string
+	is_method bool
+	mod       string // module the declaration lives in
+	file      string
+}
+
+// DeclSite is where a declaration lives, used to score candidates by locality.
+struct DeclSite {
+	mod  string
+	file string
+}
+
 // resolve_edges turns raw callee names on `calls` edges into symbol ids when a
-// matching symbol exists in the graph. Unresolved names are left as-is so the
-// caller can still see external/unknown calls.
+// single matching declaration can be identified. Names that stay ambiguous are
+// left as-is, so the caller can still see external/unknown/undecided calls.
 fn resolve_edges(mut g Graph) {
-	mut by_name := map[string][]string{}
+	mut by_name := map[string][]CallCand{}
+	mut site_of := map[string]DeclSite{}
+	mut id_count := map[string]int{}
 	for s in g.symbols {
 		if s.kind == .function || s.kind == .method {
-			by_name[s.name] << s.id
+			by_name[s.name] << CallCand{
+				id:        s.id
+				is_method: s.kind == .method
+				mod:       s.parent // fn/method symbols hang off their module
+				file:      s.file
+			}
+			id_count[s.id]++
+			site_of[s.id] = DeclSite{
+				mod:  s.parent
+				file: s.file
+			}
+		}
+	}
+	// Ids are not unique across a repo: every standalone program declares
+	// `main.main`, so one id can name thousands of unrelated declarations.
+	// Such an id pins down no single location, and guessing one would invent
+	// edges between unrelated files — drop them so locality is only ever
+	// applied to a caller whose position is actually known.
+	for id, n in id_count {
+		if n > 1 {
+			site_of.delete(id)
 		}
 	}
 	mut resolved := []Edge{cap: g.edges.len}
 	for e in g.edges {
 		if e.kind == .calls {
-			ids := by_name[e.to] or { []string{} }
-			if ids.len == 1 {
-				resolved << Edge{
-					from: e.from
-					to:   ids[0]
-					kind: .calls
+			// An id shared by several declarations cannot address any one of
+			// them: pointing an edge at `main.get_value` when nine files
+			// declare it sends every consumer to whichever happens to be
+			// first. Keep the raw name instead — it is honestly ambiguous
+			// rather than falsely precise.
+			if id := resolve_callee(e, by_name, site_of) {
+				if id_count[id] == 1 {
+					resolved << Edge{
+						from:      e.from
+						to:        id
+						kind:      .calls
+						is_method: e.is_method
+					}
+					continue
 				}
-				continue
 			}
 		}
 		resolved << e
 	}
 	g.edges = resolved
+}
+
+// resolve_callee picks the one declaration a call edge refers to, or none when
+// the raw name stays ambiguous. Narrowing is progressive, strongest signal
+// first: a globally unique name wins outright; then candidates of the matching
+// kind (`x.foo()` can only be a method, `foo()` only a plain function); then
+// the caller's own file; then its module. A step that would eliminate *every*
+// candidate is skipped rather than applied, so a weaker signal can never
+// discard what a stronger one kept.
+//
+// Precision is preferred over recall throughout: an edge pointing at the wrong
+// declaration sends a reader somewhere false, which is worse than leaving the
+// raw name for them to search on.
+//
+// Note what this deliberately does not attempt: picking between same-named
+// methods on different receivers (`str` has ~300 declarations in the V repo).
+// That needs the receiver's resolved type, which only the checker computes —
+// see the call-edge disambiguation note in README's Status section.
+fn resolve_callee(e Edge, by_name map[string][]CallCand, site_of map[string]DeclSite) ?string {
+	cands := by_name[e.to] or { return none }
+	if cands.len == 0 {
+		return none
+	}
+	if cands.len == 1 {
+		return cands[0].id
+	}
+	mut narrowed := []CallCand{}
+	for c in cands {
+		if c.is_method == e.is_method {
+			narrowed << c
+		}
+	}
+	if narrowed.len == 1 {
+		return narrowed[0].id
+	}
+	if narrowed.len == 0 {
+		// the kind filter matched nothing, which is not evidence about any
+		// candidate — put them all back rather than resolving to nothing
+		for c in cands {
+			narrowed << c
+		}
+	}
+	// no known caller location (unknown or duplicated id) means no locality
+	// signal is trustworthy, so stop here rather than guess
+	caller := site_of[e.from] or { return none }
+	mut same_file := []CallCand{}
+	for c in narrowed {
+		if c.file == caller.file {
+			same_file << c
+		}
+	}
+	if same_file.len == 1 {
+		return same_file[0].id
+	}
+	// Same-module is only evidence for a *real* module. `main` is the implicit
+	// module of every standalone program, so a repo can contain thousands of
+	// mutually unrelated `main` files; matching on it links programs that have
+	// nothing to do with each other.
+	if caller.mod != '' && caller.mod != 'main' {
+		mut same_mod := []CallCand{}
+		for c in narrowed {
+			if c.mod == caller.mod {
+				same_mod << c
+			}
+		}
+		if same_mod.len == 1 {
+			return same_mod[0].id
+		}
+	}
+	return none
 }
 
 fn rel_path(root string, path string) string {
