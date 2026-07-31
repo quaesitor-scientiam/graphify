@@ -209,6 +209,25 @@ pub fn build_graph(opts Options) Graph {
 	return g
 }
 
+// only_id returns the id that every candidate shares, or none if they disagree.
+// Counting candidates would call a name ambiguous whenever a function is
+// declared once per platform — `os.setenv` exists in both environment.c.v and
+// environment.js.v — even though those are one logical function that the id
+// addresses perfectly well. What matters is how many distinct *ids* remain,
+// not how many symbols.
+fn only_id(cands []CallCand) ?string {
+	if cands.len == 0 {
+		return none
+	}
+	id := cands[0].id
+	for c in cands[1..] {
+		if c.id != id {
+			return none
+		}
+	}
+	return id
+}
+
 // CallCand is one declaration that a raw callee name could refer to.
 struct CallCand {
 	id        string
@@ -230,7 +249,13 @@ fn resolve_edges(mut g Graph) {
 	mut by_name := map[string][]CallCand{}
 	mut site_of := map[string]DeclSite{}
 	mut id_count := map[string]int{}
+	mut id_mod := map[string]string{}
+	mut id_files := map[string][]string{}
+	mut imports_of := map[string][]string{} // file -> modules it imports
 	for s in g.symbols {
+		if s.kind == .import_ {
+			imports_of[s.file] << s.name
+		}
 		if s.kind == .function || s.kind == .method {
 			by_name[s.name] << CallCand{
 				id:        s.id
@@ -239,10 +264,38 @@ fn resolve_edges(mut g Graph) {
 				file:      s.file
 			}
 			id_count[s.id]++
+			id_mod[s.id] = s.parent
+			id_files[s.id] << s.file
 			site_of[s.id] = DeclSite{
 				mod:  s.parent
 				file: s.file
 			}
+		}
+	}
+	// An id names more than one real function only when its declarations sit in
+	// separate *build units* that happen to share a module name: every
+	// standalone `main` program, and every `_test.v` file, which V compiles as
+	// its own executable. Repeats inside one ordinary module cannot be distinct
+	// functions — V would reject the redeclaration — so they are per-platform
+	// variants (`os.setenv` in environment.c.v and environment.js.v) that the
+	// shared id addresses correctly.
+	mut unaddressable := map[string]bool{}
+	for id, n in id_count {
+		if n < 2 {
+			continue
+		}
+		if id_mod[id] or { '' } == 'main' {
+			unaddressable[id] = true
+			continue
+		}
+		mut tests := []string{}
+		for f in id_files[id] or { []string{} } {
+			if f.ends_with('_test.v') && f !in tests {
+				tests << f
+			}
+		}
+		if tests.len > 1 {
+			unaddressable[id] = true
 		}
 	}
 	// Ids are not unique across a repo: every standalone program declares
@@ -258,13 +311,12 @@ fn resolve_edges(mut g Graph) {
 	mut resolved := []Edge{cap: g.edges.len}
 	for e in g.edges {
 		if e.kind == .calls {
-			// An id shared by several declarations cannot address any one of
-			// them: pointing an edge at `main.get_value` when nine files
-			// declare it sends every consumer to whichever happens to be
-			// first. Keep the raw name instead — it is honestly ambiguous
-			// rather than falsely precise.
-			if id := resolve_callee(e, by_name, site_of) {
-				if id_count[id] == 1 {
+			// Refuse an id that cannot address one function (see above): an
+			// edge to it would send every consumer to whichever declaration
+			// happened to be indexed first. The raw name is honestly
+			// ambiguous rather than falsely precise.
+			if id := resolve_callee(e, by_name, site_of, imports_of) {
+				if !unaddressable[id] {
 					resolved << Edge{
 						from:      e.from
 						to:        id
@@ -296,13 +348,13 @@ fn resolve_edges(mut g Graph) {
 // methods on different receivers (`str` has ~300 declarations in the V repo).
 // That needs the receiver's resolved type, which only the checker computes —
 // see the call-edge disambiguation note in README's Status section.
-fn resolve_callee(e Edge, by_name map[string][]CallCand, site_of map[string]DeclSite) ?string {
+fn resolve_callee(e Edge, by_name map[string][]CallCand, site_of map[string]DeclSite, imports_of map[string][]string) ?string {
 	cands := by_name[e.to] or { return none }
 	if cands.len == 0 {
 		return none
 	}
-	if cands.len == 1 {
-		return cands[0].id
+	if id := only_id(cands) {
+		return id
 	}
 	mut narrowed := []CallCand{}
 	for c in cands {
@@ -310,8 +362,8 @@ fn resolve_callee(e Edge, by_name map[string][]CallCand, site_of map[string]Decl
 			narrowed << c
 		}
 	}
-	if narrowed.len == 1 {
-		return narrowed[0].id
+	if id := only_id(narrowed) {
+		return id
 	}
 	if narrowed.len == 0 {
 		// the kind filter matched nothing, which is not evidence about any
@@ -329,8 +381,8 @@ fn resolve_callee(e Edge, by_name map[string][]CallCand, site_of map[string]Decl
 			same_file << c
 		}
 	}
-	if same_file.len == 1 {
-		return same_file[0].id
+	if id := only_id(same_file) {
+		return id
 	}
 	// Same-module is only evidence for a *real* module. `main` is the implicit
 	// module of every standalone program, so a repo can contain thousands of
@@ -343,9 +395,26 @@ fn resolve_callee(e Edge, by_name map[string][]CallCand, site_of map[string]Decl
 				same_mod << c
 			}
 		}
-		if same_mod.len == 1 {
-			return same_mod[0].id
+		if id := only_id(same_mod) {
+			return id
 		}
+	}
+	// Last, V's own visibility rule: a file can only call what it imports,
+	// plus its own module and the auto-imported `builtin`. If exactly one
+	// candidate is reachable from this file at all, that is the one the
+	// compiler would bind, whichever module it lives in. `main` is left out
+	// of the own-module part for the same reason as above — thousands of
+	// unrelated programs share it, so it grants no real visibility.
+	imports := imports_of[caller.file] or { []string{} }
+	mut visible := []CallCand{}
+	for c in narrowed {
+		if c.mod == 'builtin' || c.mod in imports
+			|| (c.mod == caller.mod && caller.mod != 'main') {
+			visible << c
+		}
+	}
+	if id := only_id(visible) {
+		return id
 	}
 	return none
 }
