@@ -1,10 +1,17 @@
 param([switch]$NoPull)
 
 $ErrorActionPreference = 'Stop'
-$vlang   = 'S:\repo\vlang'
-$graphify = 'S:\vProjects\graphify\bin\graphify.exe'
-$store   = 'S:\graph_data'
-$log     = 'S:\graph_data\update.log'
+$configPath = Join-Path $PSScriptRoot '..\graphify.config.ps1'
+if (-not (Test-Path $configPath)) {
+  Write-Error "Missing config: $configPath`nCopy graphify.config.ps1.example to graphify.config.ps1 and edit it for your setup."
+  exit 1
+}
+. $configPath
+
+$vlang    = $GraphifyVlangRepo
+$graphify = Join-Path $PSScriptRoot 'graphify.exe'
+$store    = $GraphifyStore
+$log      = Join-Path $GraphifyStore 'update.log'
 
 function Log($msg) {
   $line = "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')  $msg"

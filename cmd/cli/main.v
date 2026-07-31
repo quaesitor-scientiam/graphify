@@ -1,7 +1,6 @@
 module main
 
 import os
-import time
 import graphify
 
 const usage = 'graphify - build a queryable code graph to cut AI token usage
@@ -56,9 +55,6 @@ fn main() {
 		'_parse-batch' {
 			cmd_parse_batch(rest)
 		}
-		'_bench-save' {
-			cmd_bench_save(rest)
-		}
 		else {
 			eprintln('unknown command: ' + cmd)
 			fail(usage)
@@ -107,41 +103,6 @@ fn cmd_parse_batch(args []string) {
 		f.flush()
 	}
 	f.close()
-}
-
-// cmd_bench_save builds a synthetic graph in-memory (no parsing, no worker
-// processes) and times just save_graph — isolates the encoder's own cost from
-// batch/parse overhead so iteration is fast.
-fn cmd_bench_save(args []string) {
-	n := if args.len > 0 { args[0].int() } else { 16628 }
-	mut g := graphify.Graph{
-		root: 'S:/repo/vlang'
-	}
-	for i in 0 .. n {
-		g.symbols << graphify.Symbol{
-			id:        'v3.transform.Transformer.scan_for_in_escape_pass_${i}'
-			name:      'scan_for_in_escape_pass_${i}'
-			kind:      graphify.SymbolKind.method
-			signature: 'pub fn (mut t Transformer) scan_for_in_escape_pass_${i}(node ast.Node) ast.Node'
-			file:      'v3/transform/transformer_${i % 300}.v'
-			line:      i * 3 + 1
-			end_line:  i * 3 + 40
-			is_pub:    i % 2 == 0
-			parent:    'v3.transform.Transformer'
-			doc:       'scan_for_in_escape_pass walks the AST looking for for-in loops whose index variable escapes into a closure.'
-		}
-	}
-	for i in 0 .. n * 6 {
-		g.edges << graphify.Edge{
-			from: 'v3.transform.Transformer.scan_for_in_escape_pass_${i % n}'
-			to:   'v3.transform.Transformer.scan_for_in_escape_pass_${(i + 1) % n}'
-			kind: graphify.EdgeKind.calls
-		}
-	}
-	println('built synthetic graph: ${g.symbols.len} symbols, ${g.edges.len} edges')
-	t0 := time.now()
-	graphify.save_graph(g, os.join_path(os.temp_dir(), 'gf_bench_save.json')) or { fail('save failed: ${err}') }
-	eprintln('save_graph: ${(time.now() - t0).seconds()}s')
 }
 
 fn cmd_query(args []string) {

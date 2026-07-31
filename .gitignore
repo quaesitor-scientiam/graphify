@@ -2,3 +2,4 @@ bin/*.exe
 graphify-out/
 .idea/
 *.log
+graphify.config.ps1

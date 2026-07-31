@@ -3,7 +3,7 @@ param(
   [switch]$IncludeBench
 )
 
-$projectsDir = 'C:\Users\john3\.claude\projects'
+$projectsDir = Join-Path $env:USERPROFILE '.claude\projects'
 $cutoff = (Get-Date).AddDays(-$Days)
 
 # Collect all main session jsonl files

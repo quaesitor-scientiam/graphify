@@ -23,16 +23,9 @@ struct Manifest {
 //   manifest.json     metadata + counts
 pub fn write_bundle(g Graph, out_dir string) ! {
 	os.mkdir_all(out_dir)!
-	t0 := time.now()
 	save_graph(g, os.join_path(out_dir, 'graph.json'))!
-	t1 := time.now()
-	eprintln('  save_graph: ${(t1 - t0).seconds()}s')
-	report_str := g.report()
-	t2 := time.now()
-	eprintln('  report: ${(t2 - t1).seconds()}s')
-	os.write_file(os.join_path(out_dir, 'GRAPH_REPORT.md'), report_str)!
+	os.write_file(os.join_path(out_dir, 'GRAPH_REPORT.md'), g.report())!
 	os.write_file(os.join_path(out_dir, 'manifest.json'), g.manifest_json())!
-	eprintln('  manifest: ${(time.now() - t2).seconds()}s')
 }
 
 // report renders GRAPH_REPORT.md: counts, the most-connected nodes, and a few

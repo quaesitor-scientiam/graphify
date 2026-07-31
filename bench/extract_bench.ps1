@@ -1,18 +1,31 @@
 # bench/extract_bench.ps1 — time a full extraction run against a target repo
 #
 # Usage:
-#   .\extract_bench.ps1                        # defaults: vlang repo, temp out dir
+#   .\extract_bench.ps1                        # defaults: configured repo, temp out dir
 #   .\extract_bench.ps1 -Source S:\repo\vlang -Runs 3
 #   .\extract_bench.ps1 -Source S:\myproject -Out S:\temp\gf-bench-myproject
 #
 # Output: one result line per run, then a summary with min/avg/max.
 
 param(
-    [string]$Source = 'S:\repo\vlang',
+    [string]$Source = $null,
     [string]$Out    = 'S:\temp\gf-bench',
-    [string]$Exe    = 'S:\vProjects\graphify\bin\graphify.exe',
+    [string]$Exe    = $null,
     [int]   $Runs   = 1
 )
+
+if (-not $Exe) {
+    $Exe = Join-Path $PSScriptRoot '..\bin\graphify.exe'
+}
+if (-not $Source) {
+    $configPath = Join-Path $PSScriptRoot '..\graphify.config.ps1'
+    if (-not (Test-Path $configPath)) {
+        Write-Error "No -Source given and missing config: $configPath`nCopy graphify.config.ps1.example to graphify.config.ps1 and edit it, or pass -Source explicitly."
+        exit 1
+    }
+    . $configPath
+    $Source = $GraphifyVlangRepo
+}
 
 if (-not (Test-Path $Exe)) {
     Write-Error "graphify.exe not found at: $Exe"

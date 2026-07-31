@@ -5,9 +5,16 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$vlang    = 'S:\repo\vlang'
-$graphify = 'S:\vProjects\graphify\bin\graphify.exe'
-$store    = 'S:\graph_data'
+$configPath = Join-Path $PSScriptRoot '..\graphify.config.ps1'
+if (-not (Test-Path $configPath)) {
+  Write-Error "Missing config: $configPath`nCopy graphify.config.ps1.example to graphify.config.ps1 and edit it for your setup."
+  exit 1
+}
+. $configPath
+
+$vlang    = $GraphifyVlangRepo
+$graphify = Join-Path $PSScriptRoot 'graphify.exe'
+$store    = $GraphifyStore
 $claudeJson = "$env:USERPROFILE\.claude.json"
 
 # Resolve branch

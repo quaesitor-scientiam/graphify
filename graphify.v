@@ -1,17 +1,30 @@
 module graphify
 
 import os
+import runtime
 
 struct WorkItem {
 	path string
 	rel  string
 }
 
+// BatchJob pairs a slice of queued files with the temp files and live worker
+// process handling them, so a wave of jobs can be spawned concurrently and
+// harvested afterward.
+struct BatchJob {
+	batch    []WorkItem
+	listfile string
+	outfile  string
+mut:
+	proc &os.Process = unsafe { nil }
+}
+
 // build_graph_resilient builds a graph by parsing files in *worker processes*,
+// running up to nr_cpus() of them concurrently (each parses its own batch),
 // so a file that makes V's parser panic is skipped and reported instead of
-// aborting the whole run. Files are parsed in batches (fast); only when a batch
-// worker crashes is the offending file isolated and the rest of the batch
-// resumed. Returns the graph and the list of files that failed to parse.
+// aborting the whole run. Only when a batch's worker crashes is the offending
+// file isolated and the rest of that batch requeued for a later wave. Returns
+// the graph and the list of files that failed to parse.
 pub fn build_graph_resilient(root string, worker_exe string) (Graph, []string) {
 	abs_root := os.real_path(root)
 	mut g := Graph{
@@ -36,53 +49,79 @@ pub fn build_graph_resilient(root string, worker_exe string) (Graph, []string) {
 	}
 
 	batch_size := 200
-	listfile := os.join_path(os.temp_dir(), 'gf_list_${os.getpid()}.txt')
-	outfile := os.join_path(os.temp_dir(), 'gf_out_${os.getpid()}.ndjson')
+	parallel := if runtime.nr_cpus() > 0 { runtime.nr_cpus() } else { 1 }
+	pid := os.getpid()
+	mut batch_seq := 0
 
 	for queue.len > 0 {
-		n := if queue.len < batch_size { queue.len } else { batch_size }
-		batch := queue#[..n].clone()
-		mut lines := []string{}
-		for w in batch {
-			lines << '${w.path}\t${w.rel}'
-		}
-		os.write_file(listfile, lines.join('\n')) or {
-			for w in batch {
-				failed << w.rel
-			}
+		// slice off up to `parallel` batches and spawn them all before waiting
+		// on any of them, so they run concurrently instead of one at a time.
+		mut jobs := []BatchJob{}
+		for jobs.len < parallel && queue.len > 0 {
+			n := if queue.len < batch_size { queue.len } else { batch_size }
+			batch := queue#[..n].clone()
 			queue = queue#[n..].clone()
-			continue
-		}
-		os.rm(outfile) or {}
-		os.execute('"${worker_exe}" _parse-batch "${listfile}" "${outfile}"')
 
-		// each completed file wrote one NDJSON line of its FileResult
-		results := os.read_lines(outfile) or { []string{} }
-		for line in results {
-			if line.trim_space() == '' {
+			batch_seq++
+			listfile := os.join_path(os.temp_dir(), 'gf_list_${pid}_${batch_seq}.txt')
+			outfile := os.join_path(os.temp_dir(), 'gf_out_${pid}_${batch_seq}.ndjson')
+
+			mut lines := []string{}
+			for w in batch {
+				lines << '${w.path}\t${w.rel}'
+			}
+			os.write_file(listfile, lines.join('\n')) or {
+				for w in batch {
+					failed << w.rel
+				}
 				continue
 			}
-			fr := decode_file_result(line)
-			g.symbols << fr.symbols
-			g.edges << fr.edges
-		}
-		completed := results.len
-		if completed >= n {
-			queue = queue#[n..].clone()
-		} else {
-			// the file at index `completed` crashed the worker — skip it and
-			// resume with the rest of the batch followed by the remaining queue.
-			failed << batch[completed].rel
-			mut rest := []WorkItem{}
-			for i := completed + 1; i < n; i++ {
-				rest << batch[i]
+
+			mut p := os.new_process(worker_exe)
+			p.set_args(['_parse-batch', listfile, outfile])
+			p.run()
+			jobs << BatchJob{
+				batch:    batch
+				listfile: listfile
+				outfile:  outfile
+				proc:     p
 			}
-			rest << queue#[n..]
-			queue = rest.clone()
+		}
+
+		// wait for the whole wave, then harvest + recover each job on its own
+		mut retry := []WorkItem{}
+		for mut job in jobs {
+			job.proc.wait()
+			job.proc.close()
+
+			// each completed file wrote one NDJSON line of its FileResult
+			results := os.read_lines(job.outfile) or { []string{} }
+			for line in results {
+				if line.trim_space() == '' {
+					continue
+				}
+				fr := decode_file_result(line)
+				g.symbols << fr.symbols
+				g.edges << fr.edges
+			}
+			completed := results.len
+			n := job.batch.len
+			if completed < n {
+				// the file at index `completed` crashed this worker — skip it
+				// and requeue the rest of the batch for the next wave.
+				failed << job.batch[completed].rel
+				for i := completed + 1; i < n; i++ {
+					retry << job.batch[i]
+				}
+			}
+			os.rm(job.listfile) or {}
+			os.rm(job.outfile) or {}
+		}
+		if retry.len > 0 {
+			retry << queue
+			queue = retry.clone()
 		}
 	}
-	os.rm(listfile) or {}
-	os.rm(outfile) or {}
 
 	resolve_edges(mut g)
 	return g, failed
