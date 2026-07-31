@@ -58,7 +58,7 @@ Pipeline: `walk files -> backend.extract(file) -> []Symbol + []Edge -> Graph -> 
 
 ### Model
 
-- `Symbol{ id, name, kind, signature, file, line, is_pub, parent }`
+- `Symbol{ id, name, kind, signature, file, line, end_line, is_pub, parent }` — `end_line` is what lets `get_body` read one declaration instead of a whole file
 - `Edge{ from, to, kind }` — kinds: `defines`, `calls`, `imports`, `implements`, `embeds`, `references`
 
 ### Emitters
@@ -270,12 +270,13 @@ Phase 1 (engine) — done; V only.
 - [x] V backend: module, imports, structs, enums, interfaces, consts, fns/methods, body-less signatures, call edges
 - [x] `graphify-out/` bundle: `graph.json`, `GRAPH_REPORT.md`, `manifest.json`
 - [x] `extract` / `query` (BFS/DFS + token budget) / `path` / `explain` / `body` / `skeleton`
-- [x] **resilient extraction** — files parsed in worker-process batches across `nr_cpus()` concurrent workers, so a file that panics V's parser is skipped + reported, not fatal. Torture-tested on the full V compiler repo: 103,253 symbols in ~11s cold, 3 unparseable files isolated.
+- [x] **resilient extraction** — files parsed in worker-process batches across `nr_cpus()` concurrent workers, so a file that panics V's parser is skipped + reported, not fatal. Torture-tested on the full V compiler repo: 103,253 symbols in ~12s cold, 3 unparseable files isolated.
+- [x] **extraction performance** — the full V compiler repo went 616s → ~12s, via two independent fixes. (1) `graphify.exe` is built `-gc none`: V's default Boehm GC costs roughly 590µs *per call* on the repeated small `strings.Builder` appends that writing `graph.json` is made of, which is not an allocation problem — isolated benchmarks showed the same loop run instantly with the writes stripped. Safe because the CLI is a one-shot process that exits; `graphify-mcp.exe` deliberately keeps the GC, being long-lived. (2) batch workers run concurrently rather than one at a time (32s → 12s), verified byte-identical against the sequential path.
 - [x] Phase 2: MCP server (`query_graph`, `get_node`, `get_neighbors`, `shortest_path`) + `.mcp.json`
 - [x] Phase 3: Claude Code wiring — `SKILL.md`, `/graphify`, `SessionStart` + `PreToolUse` hooks, git rebuild hook
 - [x] **SHA256 incremental cache** (`.gf_cache.ndjson`) — a file whose content hash is unchanged since the last `extract` is reused as-is; only new/changed files are reparsed (~11s → ~4s on a full no-op re-run of the V compiler repo)
-- [ ] Phase 4 remaining: doc/rationale capture, edge provenance (`EXTRACTED`/`INFERRED`), other languages via tree-sitter
 - [x] **call-edge disambiguation (partial).** Call edges record the raw callee name and are matched to a declaration afterwards (`resolve_edges`). Ambiguity — not missing data — is the limit: of 167.6k call edges on the V compiler repo, 94% of the unresolved ones have *more than one* candidate declaration. Resolution narrows progressively — globally unique name, then method-vs-function (`x.foo()` can only be a method), then the caller's own file, then its module — taking **53.7% → 65.9%**. Two deliberate refusals keep it honest: `main` is excluded from the module rule (it is the implicit module of every standalone program, so a repo holds thousands of unrelated `main` files), and an edge is never pointed at an id shared by several declarations, since `main.get_value` cannot address any one of the nine files declaring it.
+- [ ] Phase 4 remaining: doc/rationale capture, edge provenance (`EXTRACTED`/`INFERRED`), other languages via tree-sitter
 - [ ] **remaining call-edge ambiguity.**
   What is left needs real receiver types (`str` alone has 300 candidate declarations), and that is a **checker** job, not a parser one: `CallExpr.left_type`/`receiver_type` are populated in `v/checker`, never in `v/parser`. Sharing one `ast.Table` across files — the obvious-looking fix — only improves `type_to_str` rendering in signatures; it does not resolve method calls. A real fix means running the checker over the whole project in a single process, which collides with worker-process crash isolation (V's parser *panics* on some files, uncatchably), with parallel batch dispatch, and with the per-file cache (a file's output would depend on global table state, so an unchanged hash could serve stale results). It would also restrict graphify to projects that typecheck, when navigating half-broken code is exactly when it is most useful. If wanted, this belongs behind an opt-in `--deep` mode, not in the default path.
   Unattributed call sites are at least no longer *silent*. `index()` drops any edge whose raw callee name matches several declarations, which used to make a heavily-called function look uncalled — `builtin.string.starts_with` reported no callers at all while 1,854 call sites referred to it. `explain` / `get_node` now list those under `possibly called by`, together with the declaration count that makes them uncertain.
