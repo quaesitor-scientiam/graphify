@@ -241,6 +241,33 @@ pub fn (g Graph) explain(node string) string {
 	if called_by.len > 0 {
 		out << 'called by     : ${uniq(called_by).join(', ')}'
 	}
+	// A call whose name matches several declarations cannot be attributed to
+	// one of them, so index() drops it and the `called by` line above silently
+	// looks complete when it is not. Surface those call sites separately and
+	// say plainly why they are uncertain — a short hedged list beats claiming
+	// a symbol has no callers when it has dozens.
+	if s.kind in [SymbolKind.function, .method] {
+		same_name := idx.by_name[s.name] or { []string{} }
+		if same_name.len > 1 {
+			mut maybe := []string{}
+			for e in g.edges {
+				if e.kind == .calls && e.to == s.name && e.from in idx.by_id {
+					maybe << label(idx, e.from)
+				}
+			}
+			maybe = uniq(maybe)
+			if maybe.len > 0 {
+				shown := if maybe.len > 10 { maybe[..10] } else { maybe }
+				more := if maybe.len > shown.len {
+					' (+${maybe.len - shown.len} more)'
+				} else {
+					''
+				}
+				out << 'possibly called by: ${shown.join(', ')}${more}' +
+					'\n  ^ `${s.name}` has ${same_name.len} declarations, so these call sites could not be attributed to one of them'
+			}
+		}
+	}
 	if s.kind in [SymbolKind.function, .method, .struct_] {
 		out << '(use `get_body ${s.name}` to read its source)'
 	}
