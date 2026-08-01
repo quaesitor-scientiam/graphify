@@ -104,7 +104,15 @@ fn extract_from_ast(file &ast.File, mut table ast.Table, rel string) ([]Symbol, 
 					add_ref(id, base_type_name(table, stmt.return_type, mod_id), mut edges, mut
 						rseen)
 				}
-				collect_calls(stmt.stmts, id, mut edges)
+				collect_calls(stmt.stmts, CallCtx{
+					from:      id
+					recv_name: if stmt.is_method { stmt.receiver.name } else { '' }
+					recv_type: if stmt.is_method {
+						'${mod_id}.' + clean_type(table, stmt.receiver.typ, mod_id).trim_left('&')
+					} else {
+						''
+					}
+				}, mut edges)
 			}
 			ast.StructDecl {
 				short := stmt.name.all_after_last('.')
@@ -305,224 +313,246 @@ fn add_ref(from string, typename string, mut edges []Edge, mut seen map[string]b
 	}
 }
 
+// CallCtx is what the call walkers need to know about the function being
+// walked: who is calling, and -- when it is a method -- the name and type of
+// its own receiver, so `t.foo()` can be attributed without type inference.
+struct CallCtx {
+	from      string
+	recv_name string // receiver variable, '' when the caller is not a method
+	recv_type string // id of the receiver's type, e.g. `v3.transform.Transformer`
+}
+
 // collect_calls records one `calls` edge per *distinct* callee invoked anywhere
 // in a function body. It walks the full statement/expression tree — if/match/for
 // bodies, or-blocks, call args, index/infix/selector chains, string
 // interpolation, array/map/struct initializers, and nested closures — so the
 // call graph has high recall. Callees are recorded by raw name, resolved later.
-fn collect_calls(stmts []ast.Stmt, from string, mut edges []Edge) {
+fn collect_calls(stmts []ast.Stmt, ctx CallCtx, mut edges []Edge) {
 	mut seen := map[string]bool{}
-	walk_stmts(stmts, from, mut edges, mut seen)
+	walk_stmts(stmts, ctx, mut edges, mut seen)
 }
 
-fn walk_stmts(stmts []ast.Stmt, from string, mut edges []Edge, mut seen map[string]bool) {
+fn walk_stmts(stmts []ast.Stmt, ctx CallCtx, mut edges []Edge, mut seen map[string]bool) {
 	for stmt in stmts {
-		walk_stmt(stmt, from, mut edges, mut seen)
+		walk_stmt(stmt, ctx, mut edges, mut seen)
 	}
 }
 
-fn walk_stmt(stmt ast.Stmt, from string, mut edges []Edge, mut seen map[string]bool) {
+fn walk_stmt(stmt ast.Stmt, ctx CallCtx, mut edges []Edge, mut seen map[string]bool) {
 	match stmt {
 		ast.ExprStmt {
-			walk_expr(stmt.expr, from, mut edges, mut seen)
+			walk_expr(stmt.expr, ctx, mut edges, mut seen)
 		}
 		ast.Return {
 			for e in stmt.exprs {
-				walk_expr(e, from, mut edges, mut seen)
+				walk_expr(e, ctx, mut edges, mut seen)
 			}
 		}
 		ast.AssignStmt {
 			for e in stmt.left {
-				walk_expr(e, from, mut edges, mut seen)
+				walk_expr(e, ctx, mut edges, mut seen)
 			}
 			for e in stmt.right {
-				walk_expr(e, from, mut edges, mut seen)
+				walk_expr(e, ctx, mut edges, mut seen)
 			}
 		}
 		ast.AssertStmt {
-			walk_expr(stmt.expr, from, mut edges, mut seen)
-			walk_expr(stmt.extra, from, mut edges, mut seen)
+			walk_expr(stmt.expr, ctx, mut edges, mut seen)
+			walk_expr(stmt.extra, ctx, mut edges, mut seen)
 		}
 		ast.ForStmt {
-			walk_expr(stmt.cond, from, mut edges, mut seen)
-			walk_stmts(stmt.stmts, from, mut edges, mut seen)
+			walk_expr(stmt.cond, ctx, mut edges, mut seen)
+			walk_stmts(stmt.stmts, ctx, mut edges, mut seen)
 		}
 		ast.ForInStmt {
-			walk_expr(stmt.cond, from, mut edges, mut seen)
-			walk_expr(stmt.high, from, mut edges, mut seen)
-			walk_stmts(stmt.stmts, from, mut edges, mut seen)
+			walk_expr(stmt.cond, ctx, mut edges, mut seen)
+			walk_expr(stmt.high, ctx, mut edges, mut seen)
+			walk_stmts(stmt.stmts, ctx, mut edges, mut seen)
 		}
 		ast.ForCStmt {
-			walk_stmt(stmt.init, from, mut edges, mut seen)
-			walk_expr(stmt.cond, from, mut edges, mut seen)
-			walk_stmt(stmt.inc, from, mut edges, mut seen)
-			walk_stmts(stmt.stmts, from, mut edges, mut seen)
+			walk_stmt(stmt.init, ctx, mut edges, mut seen)
+			walk_expr(stmt.cond, ctx, mut edges, mut seen)
+			walk_stmt(stmt.inc, ctx, mut edges, mut seen)
+			walk_stmts(stmt.stmts, ctx, mut edges, mut seen)
 		}
 		ast.Block {
-			walk_stmts(stmt.stmts, from, mut edges, mut seen)
+			walk_stmts(stmt.stmts, ctx, mut edges, mut seen)
 		}
 		ast.DeferStmt {
-			walk_stmts(stmt.stmts, from, mut edges, mut seen)
+			walk_stmts(stmt.stmts, ctx, mut edges, mut seen)
 		}
 		else {}
 	}
 }
 
-fn walk_call(ce ast.CallExpr, from string, mut edges []Edge, mut seen map[string]bool) {
+fn walk_call(ce ast.CallExpr, ctx CallCtx, mut edges []Edge, mut seen map[string]bool) {
 	if ce.name != '' && ce.name !in seen {
 		seen[ce.name] = true
+		// `t.foo()` inside `fn (t &Transformer) ...` needs no inference: the
+		// receiver's type is written on the enclosing declaration. Any other
+		// receiver shape is left blank rather than guessed at.
+		mut rt := ''
+		if ce.is_method && ctx.recv_name != '' {
+			left := ce.left
+			if left is ast.Ident {
+				if left.name == ctx.recv_name {
+					rt = ctx.recv_type
+				}
+			}
+		}
 		edges << Edge{
-			from:      from
+			from:      ctx.from
 			to:        ce.name
 			kind:      .calls
 			is_method: ce.is_method
+			recv_type: rt
 		}
 	}
-	walk_expr(ce.left, from, mut edges, mut seen)
+	walk_expr(ce.left, ctx, mut edges, mut seen)
 	for arg in ce.args {
-		walk_expr(arg.expr, from, mut edges, mut seen)
+		walk_expr(arg.expr, ctx, mut edges, mut seen)
 	}
-	walk_stmts(ce.or_block.stmts, from, mut edges, mut seen)
+	walk_stmts(ce.or_block.stmts, ctx, mut edges, mut seen)
 }
 
-fn walk_expr(expr ast.Expr, from string, mut edges []Edge, mut seen map[string]bool) {
+fn walk_expr(expr ast.Expr, ctx CallCtx, mut edges []Edge, mut seen map[string]bool) {
 	match expr {
 		ast.CallExpr {
-			walk_call(expr, from, mut edges, mut seen)
+			walk_call(expr, ctx, mut edges, mut seen)
 		}
 		ast.InfixExpr {
-			walk_expr(expr.left, from, mut edges, mut seen)
-			walk_expr(expr.right, from, mut edges, mut seen)
-			walk_stmts(expr.or_block.stmts, from, mut edges, mut seen)
+			walk_expr(expr.left, ctx, mut edges, mut seen)
+			walk_expr(expr.right, ctx, mut edges, mut seen)
+			walk_stmts(expr.or_block.stmts, ctx, mut edges, mut seen)
 		}
 		ast.PrefixExpr {
-			walk_expr(expr.right, from, mut edges, mut seen)
-			walk_stmts(expr.or_block.stmts, from, mut edges, mut seen)
+			walk_expr(expr.right, ctx, mut edges, mut seen)
+			walk_stmts(expr.or_block.stmts, ctx, mut edges, mut seen)
 		}
 		ast.PostfixExpr {
-			walk_expr(expr.expr, from, mut edges, mut seen)
+			walk_expr(expr.expr, ctx, mut edges, mut seen)
 		}
 		ast.ParExpr {
-			walk_expr(expr.expr, from, mut edges, mut seen)
+			walk_expr(expr.expr, ctx, mut edges, mut seen)
 		}
 		ast.SelectorExpr {
-			walk_expr(expr.expr, from, mut edges, mut seen)
-			walk_stmts(expr.or_block.stmts, from, mut edges, mut seen)
+			walk_expr(expr.expr, ctx, mut edges, mut seen)
+			walk_stmts(expr.or_block.stmts, ctx, mut edges, mut seen)
 		}
 		ast.IndexExpr {
-			walk_expr(expr.left, from, mut edges, mut seen)
-			walk_expr(expr.index, from, mut edges, mut seen)
-			walk_stmts(expr.or_expr.stmts, from, mut edges, mut seen)
+			walk_expr(expr.left, ctx, mut edges, mut seen)
+			walk_expr(expr.index, ctx, mut edges, mut seen)
+			walk_stmts(expr.or_expr.stmts, ctx, mut edges, mut seen)
 		}
 		ast.RangeExpr {
-			walk_expr(expr.low, from, mut edges, mut seen)
-			walk_expr(expr.high, from, mut edges, mut seen)
+			walk_expr(expr.low, ctx, mut edges, mut seen)
+			walk_expr(expr.high, ctx, mut edges, mut seen)
 		}
 		ast.CastExpr {
-			walk_expr(expr.expr, from, mut edges, mut seen)
-			walk_expr(expr.arg, from, mut edges, mut seen)
+			walk_expr(expr.expr, ctx, mut edges, mut seen)
+			walk_expr(expr.arg, ctx, mut edges, mut seen)
 		}
 		ast.AsCast {
-			walk_expr(expr.expr, from, mut edges, mut seen)
+			walk_expr(expr.expr, ctx, mut edges, mut seen)
 		}
 		ast.ConcatExpr {
 			for e in expr.vals {
-				walk_expr(e, from, mut edges, mut seen)
+				walk_expr(e, ctx, mut edges, mut seen)
 			}
 		}
 		ast.ArrayInit {
 			for e in expr.exprs {
-				walk_expr(e, from, mut edges, mut seen)
+				walk_expr(e, ctx, mut edges, mut seen)
 			}
-			walk_expr(expr.len_expr, from, mut edges, mut seen)
-			walk_expr(expr.cap_expr, from, mut edges, mut seen)
-			walk_expr(expr.init_expr, from, mut edges, mut seen)
+			walk_expr(expr.len_expr, ctx, mut edges, mut seen)
+			walk_expr(expr.cap_expr, ctx, mut edges, mut seen)
+			walk_expr(expr.init_expr, ctx, mut edges, mut seen)
 		}
 		ast.ArrayDecompose {
-			walk_expr(expr.expr, from, mut edges, mut seen)
+			walk_expr(expr.expr, ctx, mut edges, mut seen)
 		}
 		ast.MapInit {
 			for e in expr.keys {
-				walk_expr(e, from, mut edges, mut seen)
+				walk_expr(e, ctx, mut edges, mut seen)
 			}
 			for e in expr.vals {
-				walk_expr(e, from, mut edges, mut seen)
+				walk_expr(e, ctx, mut edges, mut seen)
 			}
 		}
 		ast.StructInit {
 			for f in expr.init_fields {
-				walk_expr(f.expr, from, mut edges, mut seen)
+				walk_expr(f.expr, ctx, mut edges, mut seen)
 			}
 			if expr.has_update_expr {
-				walk_expr(expr.update_expr, from, mut edges, mut seen)
+				walk_expr(expr.update_expr, ctx, mut edges, mut seen)
 			}
 		}
 		ast.StringInterLiteral {
 			for e in expr.exprs {
-				walk_expr(e, from, mut edges, mut seen)
+				walk_expr(e, ctx, mut edges, mut seen)
 			}
 		}
 		ast.IfExpr {
-			walk_expr(expr.left, from, mut edges, mut seen)
+			walk_expr(expr.left, ctx, mut edges, mut seen)
 			for b in expr.branches {
-				walk_expr(b.cond, from, mut edges, mut seen)
-				walk_stmts(b.stmts, from, mut edges, mut seen)
+				walk_expr(b.cond, ctx, mut edges, mut seen)
+				walk_stmts(b.stmts, ctx, mut edges, mut seen)
 			}
 		}
 		ast.IfGuardExpr {
-			walk_expr(expr.expr, from, mut edges, mut seen)
+			walk_expr(expr.expr, ctx, mut edges, mut seen)
 		}
 		ast.MatchExpr {
-			walk_expr(expr.cond, from, mut edges, mut seen)
+			walk_expr(expr.cond, ctx, mut edges, mut seen)
 			for b in expr.branches {
 				for e in b.exprs {
-					walk_expr(e, from, mut edges, mut seen)
+					walk_expr(e, ctx, mut edges, mut seen)
 				}
-				walk_stmts(b.stmts, from, mut edges, mut seen)
+				walk_stmts(b.stmts, ctx, mut edges, mut seen)
 			}
 		}
 		ast.OrExpr {
-			walk_stmts(expr.stmts, from, mut edges, mut seen)
+			walk_stmts(expr.stmts, ctx, mut edges, mut seen)
 		}
 		ast.UnsafeExpr {
-			walk_expr(expr.expr, from, mut edges, mut seen)
+			walk_expr(expr.expr, ctx, mut edges, mut seen)
 		}
 		ast.LockExpr {
-			walk_stmts(expr.stmts, from, mut edges, mut seen)
+			walk_stmts(expr.stmts, ctx, mut edges, mut seen)
 			for e in expr.lockeds {
-				walk_expr(e, from, mut edges, mut seen)
+				walk_expr(e, ctx, mut edges, mut seen)
 			}
 		}
 		ast.GoExpr {
-			walk_call(expr.call_expr, from, mut edges, mut seen)
+			walk_call(expr.call_expr, ctx, mut edges, mut seen)
 		}
 		ast.SpawnExpr {
-			walk_call(expr.call_expr, from, mut edges, mut seen)
+			walk_call(expr.call_expr, ctx, mut edges, mut seen)
 		}
 		ast.AnonFn {
-			walk_stmts(expr.decl.stmts, from, mut edges, mut seen)
+			walk_stmts(expr.decl.stmts, ctx, mut edges, mut seen)
 		}
 		ast.LambdaExpr {
-			walk_expr(expr.expr, from, mut edges, mut seen)
+			walk_expr(expr.expr, ctx, mut edges, mut seen)
 		}
 		ast.Likely {
-			walk_expr(expr.expr, from, mut edges, mut seen)
+			walk_expr(expr.expr, ctx, mut edges, mut seen)
 		}
 		ast.DumpExpr {
-			walk_expr(expr.expr, from, mut edges, mut seen)
+			walk_expr(expr.expr, ctx, mut edges, mut seen)
 		}
 		ast.SizeOf {
-			walk_expr(expr.expr, from, mut edges, mut seen)
+			walk_expr(expr.expr, ctx, mut edges, mut seen)
 		}
 		ast.IsRefType {
-			walk_expr(expr.expr, from, mut edges, mut seen)
+			walk_expr(expr.expr, ctx, mut edges, mut seen)
 		}
 		ast.TypeOf {
-			walk_expr(expr.expr, from, mut edges, mut seen)
+			walk_expr(expr.expr, ctx, mut edges, mut seen)
 		}
 		ast.Assoc {
 			for e in expr.exprs {
-				walk_expr(e, from, mut edges, mut seen)
+				walk_expr(e, ctx, mut edges, mut seen)
 			}
 		}
 		else {}

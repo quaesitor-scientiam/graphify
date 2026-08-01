@@ -356,6 +356,17 @@ fn resolve_callee(e Edge, by_name map[string][]CallCand, site_of map[string]Decl
 	if id := only_id(cands) {
 		return id
 	}
+	// A receiver the parser could type without inference pins the call down
+	// exactly — but only trust it when that method really exists, since the
+	// call may be to an embedded type's method or a function-typed field.
+	if e.recv_type != '' {
+		want := e.recv_type + '.' + e.to
+		for c in cands {
+			if c.id == want {
+				return c.id
+			}
+		}
+	}
 	mut narrowed := []CallCand{}
 	for c in cands {
 		if c.is_method == e.is_method {

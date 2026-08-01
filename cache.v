@@ -19,7 +19,7 @@ const cache_file_name = '.gf_cache.ndjson'
 // encoding of a cached FileResult changes (see batch_proto.v), so a cache
 // written by an older build is discarded rather than silently decoded into
 // results that are missing whatever the new format added.
-const cache_format = 'graphify-cache-v2'
+const cache_format = 'graphify-cache-v3'
 
 // file_hash returns the hex SHA256 of a file's content, or '' if it can't be
 // read (the caller then treats the file as uncached and reparses it).

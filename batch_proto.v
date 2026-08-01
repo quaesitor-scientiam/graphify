@@ -9,7 +9,7 @@ module graphify
 //   sym_section : sym\x02sym\x02...   (empty if no symbols)
 //   edge_section: edge\x02edge\x02... (empty if no edges)
 //   sym  : id\x01name\x01kind_int\x01sig\x01file\x01line\x01end_line\x01is_pub\x01parent\x01doc
-//   edge : from\x01to\x01kind_int\x01is_method
+//   edge : from\x01to\x01kind_int\x01is_method\x01recv_type
 //
 // \x01 = field sep, \x02 = record sep, \x03 = section sep.
 // Signatures and doc strings may contain any printable char; the only chars
@@ -37,7 +37,7 @@ pub fn encode_file_result(fr FileResult) string {
 			'1'
 		} else {
 			'0'
-		}}'
+		}}${bp_fs}${bp_clean(e.recv_type)}'
 	}
 	return sym_parts.join(bp_rs) + bp_ss + edge_parts.join(bp_rs)
 }
@@ -79,6 +79,7 @@ pub fn decode_file_result(line string) FileResult {
 				// tolerate the older 3-field form, so a cache written by a
 				// previous build decodes instead of panicking on f[3]
 				is_method: f.len > 3 && f[3] == '1'
+				recv_type: if f.len > 4 { f[4] } else { '' }
 			}
 		}
 	}

@@ -51,6 +51,12 @@ pub:
 	// narrow candidates; it is deliberately not written to graph.json, since
 	// once resolution has run it carries no further meaning.
 	is_method bool
+	// recv_type is the id of the receiver's type when the parser can see it
+	// without inference — currently `t.foo()` inside a method whose own
+	// receiver is `t`, where the type is written on the enclosing FnDecl.
+	// Empty whenever the receiver would need the checker to type. Like
+	// is_method, it is extraction-only and not persisted.
+	recv_type string
 }
 
 // FileResult is one file's extracted symbols and edges — the unit passed back
