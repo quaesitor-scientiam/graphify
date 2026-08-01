@@ -321,6 +321,17 @@ pub fn (g Graph) get_body(node string) string {
 			}
 		}
 		end = next - 1
+		// The gap before the next *extracted* symbol can hold blank lines, doc
+		// comments for the next declaration, and declarations graphify does not
+		// model at all (a `__global`, say) — all of which would be served as if
+		// they were part of this body. Trim back to this declaration's own
+		// closing brace, which vfmt puts alone on its line.
+		for e := end; e > start; e-- {
+			if lines[e - 1].trim_space() == '}' {
+				end = e
+				break
+			}
+		}
 	}
 	if end > lines.len {
 		end = lines.len
