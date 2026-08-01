@@ -11,19 +11,33 @@ module graphify
 //   sym  : id\x01name\x01kind_int\x01sig\x01file\x01line\x01end_line\x01is_pub\x01parent\x01doc
 //   edge : from\x01to\x01kind_int\x01is_method\x01recv_type
 //
-// \x01 = field sep, \x02 = record sep, \x03 = section sep.
-// Signatures and doc strings may contain any printable char; the only chars
-// scrubbed are \x01-\x03 (replaced with space, which never appear in V source).
+// \x01 = field sep, \x02 = record sep, \x03 = section sep, \x04 = encoded
+// newline. Signatures and doc strings may contain any printable char; the only
+// chars scrubbed are \x01-\x04 (replaced with space, none of which appear in V
+// source). Real newlines are encoded rather than scrubbed, so multi-line doc
+// comments survive a protocol that is otherwise one-record-per-line.
 
 const bp_fs = '\x01' // field separator
 const bp_rs = '\x02' // record separator
 const bp_ss = '\x03' // section separator
+// Encoded newline. Doc comments are multi-line, but this protocol is strictly
+// line-based -- the worker writes one line per FileResult and the parent reads
+// it back with read_lines. A raw newline would split one record into several,
+// silently truncating the doc AND inflating the line count the parent uses to
+// identify which file killed a crashed worker.
+const bp_nl = '\x04'
 
 fn bp_clean(s string) string {
-	if !s.contains_any('\x01\x02\x03') {
+	if !s.contains_any('\x01\x02\x03\x04\n\r') {
 		return s
 	}
-	return s.replace('\x01', ' ').replace('\x02', ' ').replace('\x03', ' ')
+	return s.replace('\x01', ' ').replace('\x02', ' ').replace('\x03', ' ').replace('\x04',
+		' ').replace('\r\n', bp_nl).replace('\n', bp_nl).replace('\r', bp_nl)
+}
+
+// bp_restore turns encoded newlines back into real ones on decode.
+fn bp_restore(s string) string {
+	return if s.contains(bp_nl) { s.replace(bp_nl, '\n') } else { s }
 }
 
 pub fn encode_file_result(fr FileResult) string {
@@ -56,13 +70,13 @@ pub fn decode_file_result(line string) FileResult {
 				id:        f[0]
 				name:      f[1]
 				kind:      unsafe { SymbolKind(f[2].int()) }
-				signature: f[3]
+				signature: bp_restore(f[3])
 				file:      f[4]
 				line:      f[5].int()
 				end_line:  f[6].int()
 				is_pub:    f[7] == '1'
 				parent:    f[8]
-				doc:       f[9]
+				doc:       bp_restore(f[9])
 			}
 		}
 	}

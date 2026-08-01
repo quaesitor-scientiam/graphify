@@ -1,5 +1,6 @@
 module graphify
 
+import os
 import v.ast
 import v.parser
 import v.pref
@@ -17,7 +18,8 @@ pub fn extract_v_file(path string, rel string) ([]Symbol, []Edge) {
 	mut table := ast.new_table()
 	pref_ := pref.new_preferences()
 	file := parser.parse_file(path, mut table, .skip_comments, pref_)
-	return extract_from_ast(file, mut table, rel)
+	src := os.read_file(path) or { '' }
+	return extract_from_ast(file, mut table, rel, src.split('\n'))
 }
 
 // extract_v_text is the same as extract_v_file but takes source directly,
@@ -26,10 +28,10 @@ pub fn extract_v_text(source string, rel string) ([]Symbol, []Edge) {
 	mut table := ast.new_table()
 	pref_ := pref.new_preferences()
 	file := parser.parse_text(source, rel, mut table, .skip_comments, pref_)
-	return extract_from_ast(file, mut table, rel)
+	return extract_from_ast(file, mut table, rel, source.split('\n'))
 }
 
-fn extract_from_ast(file &ast.File, mut table ast.Table, rel string) ([]Symbol, []Edge) {
+fn extract_from_ast(file &ast.File, mut table ast.Table, rel string, src []string) ([]Symbol, []Edge) {
 	mut syms := []Symbol{}
 	mut edges := []Edge{}
 
@@ -83,6 +85,7 @@ fn extract_from_ast(file &ast.File, mut table ast.Table, rel string) ([]Symbol, 
 					end_line:  end_of(stmt.body_pos)
 					is_pub:    stmt.is_pub
 					parent:    mod_id
+					doc:       doc_from(src, stmt.name_pos.line_nr + 1)
 				}
 				edges << Edge{
 					from: mod_id
@@ -127,6 +130,7 @@ fn extract_from_ast(file &ast.File, mut table ast.Table, rel string) ([]Symbol, 
 					end_line:  end_of(stmt.pos)
 					is_pub:    stmt.is_pub
 					parent:    mod_id
+					doc:       doc_from(src, stmt.pos.line_nr + 1)
 				}
 				edges << Edge{
 					from: mod_id
@@ -177,6 +181,7 @@ fn extract_from_ast(file &ast.File, mut table ast.Table, rel string) ([]Symbol, 
 					end_line:  end_of(stmt.pos)
 					is_pub:    stmt.is_pub
 					parent:    mod_id
+					doc:       doc_from(src, stmt.pos.line_nr + 1)
 				}
 				edges << Edge{
 					from: mod_id
@@ -197,6 +202,7 @@ fn extract_from_ast(file &ast.File, mut table ast.Table, rel string) ([]Symbol, 
 					end_line:  end_of(stmt.pos)
 					is_pub:    stmt.is_pub
 					parent:    mod_id
+					doc:       doc_from(src, stmt.pos.line_nr + 1)
 				}
 				edges << Edge{
 					from: mod_id
@@ -218,6 +224,7 @@ fn extract_from_ast(file &ast.File, mut table ast.Table, rel string) ([]Symbol, 
 						end_line:  end_of(cf.pos)
 						is_pub:    stmt.is_pub
 						parent:    mod_id
+						doc:       doc_from(src, stmt.pos.line_nr + 1)
 					}
 					edges << Edge{
 						from: mod_id
@@ -275,6 +282,34 @@ fn clean_type(table &ast.Table, typ ast.Type, mod_id string) string {
 	// drop the current module's prefix wherever it appears, so `&graphify.Graph`
 	// and `[]graphify.Symbol` read as `&Graph` and `[]Symbol`.
 	return table.type_to_str(typ).replace('${mod_id}.', '')
+}
+
+// doc_from collects the `//` block directly above `line` (1-based) from the
+// source text. It stops at a blank line or anything that is not a comment, so a
+// licence header, a section banner, or a note about the code *above* never gets
+// attached to the declaration below it.
+//
+// Read from source rather than from the AST on purpose: in `.toplevel_comments`
+// mode V surfaces only the *first* line of a contiguous block as a top-level
+// node, which silently truncated every multi-line doc to one line. Reading the
+// block directly is exact, and lets the parse stay in the cheaper
+// `.skip_comments` mode.
+fn doc_from(src []string, line int) string {
+	mut out := []string{}
+	mut i := line - 2 // 0-based index of the line above the declaration
+	for i >= 0 && i < src.len {
+		t := src[i].trim_space()
+		if t.starts_with('@[') {
+			i-- // attributes sit between the doc and the declaration
+			continue
+		}
+		if !t.starts_with('//') {
+			break
+		}
+		out.prepend(t.trim_string_left('//').trim_space())
+		i--
+	}
+	return out.join('\n').trim_space()
 }
 
 // end_of returns the 1-based end line of an ast node from its position's

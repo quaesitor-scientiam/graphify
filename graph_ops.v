@@ -193,6 +193,18 @@ pub fn (g Graph) explain(node string) string {
 	s := idx.by_id[id] or { return 'no symbol matches: ${node}' }
 
 	mut out := ['${s.kind.str()} ${s.name}  (${s.loc()})', s.render()]
+	// The doc comment is often the whole answer to "what does this do", which
+	// otherwise costs a file read. Capped so one rambling comment cannot blow
+	// the budget this tool exists to protect.
+	if s.doc != '' {
+		dlines := s.doc.split('\n')
+		shown := if dlines.len > 8 { dlines[..8] } else { dlines }
+		mut d := shown.map('  | ' + it).join('\n')
+		if dlines.len > shown.len {
+			d += '\n  | … (${dlines.len - shown.len} more lines — use get_body for the full source)'
+		}
+		out << d
+	}
 
 	mut calls := []string{}
 	mut called_by := []string{}
