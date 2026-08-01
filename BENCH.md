@@ -172,10 +172,69 @@ dedup also removed the duplicate-caller noise (`register_builtin_type_symbols`
 now listed once, not ~30×). graphify's call graph is now trustworthy for impact
 analysis, not just mapping.
 
+## 2026-07-31: re-measured on a multi-module corpus, with hooks isolated
+
+Everything above was measured on `vlib/v/ast` — **one module, 11–17 files**. That
+corpus cannot show cross-module work: all 10 of its imports point *outside* it, so
+nothing they name is even in the graph. After call resolution went 53.7% → 82.9%
+repo-wide, re-running there measured **+1.3 points** of that improvement. So the
+corpus was replaced with `vlib/v`: **2,885 `.v` files, 161 modules, 117 of 203
+imports resolvable in-corpus**, copied byte-identically into both arms.
+
+Two methodology fixes, both of which invalidate a naive comparison:
+
+- **Hooks were never isolated before.** The user-level `settings.json` registers a
+  `SessionStart` hook that injects graphify guidance into *every* session —
+  including the baseline. `--strict-mcp-config` isolates MCP servers but does
+  nothing about hooks; only `--safe-mode` does. To the extent that hook was
+  registered during earlier runs, those "unwired" baselines were being coached to
+  use the very thing they were the control for. Both arms now run `--safe-mode`,
+  which also stops either arm from silently running under a plugin agent.
+- `--safe-mode` also ignores `--mcp-config`, so the wired arm gets graphify via the
+  CLI plus an appended system prompt. Isolation is then identical on both sides and
+  exactly one thing differs: whether the graph is available.
+
+n=3 per task, opus, 0 failed commands, no contamination flags.
+
+| task | metric | runs | median |
+| --- | --- | --- | --- |
+| **nav** (map + cross-module callers) | unique-input | 1.35, 1.32, 1.09 | **1.32×** |
+| | total | 1.15, 2.39, 2.60 | 2.39× |
+| | turns | 1.16, 2.18, 2.25 | 2.18× |
+| **deep** (walk through two functions) | unique-input | 0.93, 0.79, 1.26 | **0.93×** |
+| | total | 0.93, 1.15, 1.91 | 1.15× |
+| | turns | 1.00, 1.20, 1.79 | 1.20× |
+
+Mechanism, summed over the three nav runs: baseline `Bash`×32 / `Grep`×3 /
+`Read`×6, wired `Bash`×20 / `Grep`×1 / `Read`×1. The wired arm largely stopped
+opening files. On deep both arms still read heavily (baseline `Read`×19, wired
+`Read`×13).
+
+**What to claim: ~1.3× fewer new tokens on structural questions, nothing on
+implementation walkthroughs.** The turn and total ratios look better (~2.2×) but
+range 1.15–2.60× across three runs and are inflated by cache-read accounting that
+grows with turn count; unique-input is the metric that stayed steady, and it is
+the conservative one.
+
+**The most useful result is a negative one.** Call resolution nearly doubled in
+accuracy this session (53.7% → 82.9%) and nav savings landed at ~1.3× — essentially
+the June figure. For these tasks the bottleneck was never resolution accuracy, so
+further work down that path has low expected return. That is direct evidence for
+leaving the checker / `--deep` path alone.
+
+Caveat in graphify's favour: this corpus resolves at **54.3%**, not the 82.9% seen
+across the whole repo, because 86 imported modules (`os`, `strings`, …) live
+outside `vlib/v`. A full-`vlib` corpus would likely read better.
+
+Harness: `S:\gf-bench2\run_bench.ps1` (corpus + runner are outside this repo).
+
 ## Verdict
 
-The premise **survives**: there is a real, measured **~10–20× reduction for the
-navigation/mapping use case** on real codebases. The headline should be
+The premise **survives, narrowly**. Two numbers that must not be conflated:
+the **~10–20× artifact ceiling** below is source-vs-skeleton, a theoretical
+maximum; live against a competent baseline it is **~1.3× fewer new tokens on
+navigation, and ~1× on implementation walkthroughs** (2026-07-31 section above).
+The ceiling is real but is not what a user gets. The headline should be
 "~10–20× for navigation", **not** the 70–79× the Python tool advertises (that
 figure reflects their whole-corpus, LLM-augmented case). graphify's value is
 concentrated in orientation and structure, weaker for single-symbol deep dives.

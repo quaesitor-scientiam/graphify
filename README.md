@@ -27,16 +27,23 @@ Benchmarked on real external V codebases (`vlib/v/ast`, `vlib/v/parser`, `c2v`)
 with [`cmd/bench`](cmd/bench/main.v) — see [BENCH.md](BENCH.md):
 
 - **Artifact ceiling: ~10–20× fewer tokens** for navigation/mapping (full source
-  vs skeleton, apples-to-apples) — 89–95% reduction.
-- **Live end-to-end** (real `claude -p` A/B, 3 runs, opus): **~1.5× fewer
-  unique-input and ~2.2× fewer total tokens**, in ~half the turns, vs. an
-  *efficient* grep-based baseline. The ceiling is theoretical max; this is what
-  actually lands against a competent baseline.
+  vs skeleton, apples-to-apples) — 89–95% reduction. This is a theoretical
+  maximum, not what a session gets.
+- **Live end-to-end** (real `claude -p` A/B, n=3 per task, opus, on a 2,885-file
+  / 161-module corpus, both arms `--safe-mode` so neither inherits the user's
+  graphify hooks): **~1.3× fewer unique-input tokens on structural questions**
+  — "where is X, what calls it, what's in this module" — and **no gain on
+  implementation walkthroughs**.
 
-That's the honest headline — **a real but modest ~1.5–2.2× live, not 70×.**
-Single-symbol deep dives save less; the figure depends on whether the model
-would otherwise have loaded a whole file. graphify's value is concentrated in
-"where is X / what connects to it / what's in here", not in reading bodies.
+That's the honest headline — **~1.3× on navigation, ~1× on "explain this code".**
+Turn count and total tokens looked better (median ~2.2×) but ranged 1.15–2.60×
+across runs, so unique-input is the number to quote. graphify's value is
+concentrated in orientation and structure: to explain what a function *does* you
+have to read it, and the graph is an extra hop first.
+
+Worth knowing before optimizing: call resolution went 53.7% → 82.9% and live
+savings did **not** move. For these tasks the bottleneck is not resolution
+accuracy.
 
 For the gold-standard test — real Claude Code sessions, same task wired vs. not,
 comparing actual API tokens — see [bench/live/PROTOCOL.md](bench/live/PROTOCOL.md)
