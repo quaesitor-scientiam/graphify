@@ -126,7 +126,13 @@ pub fn (g Graph) query(text string, budget int, dfs bool) string {
 	mut tokens := 0
 	for id in order {
 		s := idx.by_id[id] or { continue }
-		line := s.render()
+		mut line := s.render()
+		if s.doc != '' {
+			// One line, not explain's full excerpt: query already returns many
+			// symbols under a shared budget, so each one gets just enough doc to
+			// tell a caller whether it's worth an `explain`/`get_body` follow-up.
+			line += '\n  | ' + s.doc.split('\n')[0]
+		}
 		t := line.len / 4
 		if tokens + t > budget && lines.len > 0 {
 			break
