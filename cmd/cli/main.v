@@ -87,7 +87,27 @@ fn cmd_extract(args []string) {
 // <listfile>, writing one NDJSON FileResult per file to <outfile> and flushing
 // after each. If V's parser panics mid-batch, this process dies but the lines
 // already flushed survive, so the parent knows exactly which file crashed.
+fn C.freopen(&char, &char, &C.FILE) &C.FILE
+
+// silence_stderr points this process's stderr at the null device.
+//
+// Batch workers are spawned concurrently and inherit the parent's console, so
+// V's parser complaining about a script-mode file — or panicking outright on
+// one, which is expected and recovered from — floods the extract log with
+// pages of noise on every run. The parent detects a crashed worker from how
+// many lines reached <outfile>, never from stderr, so nothing is lost.
+//
+// Done here rather than by redirecting the child's pipes from the parent: with
+// nr_cpus() workers running at once, unread pipes fill and the child blocks on
+// write, which would hang the whole extract instead of merely being noisy.
+fn silence_stderr() {
+	unsafe {
+		C.freopen(&char(os.path_devnull.str), c'w', C.stderr)
+	}
+}
+
 fn cmd_parse_batch(args []string) {
+	silence_stderr()
 	if args.len < 2 {
 		exit(1)
 	}
