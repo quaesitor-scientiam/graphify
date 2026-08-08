@@ -40,25 +40,12 @@ pub fn (g Graph) report() string {
 		sym_kinds[s.kind.str()]++
 	}
 	mut edge_kinds := map[string]int{}
-	mut calls_extracted := 0
-	mut calls_inferred := 0
-	mut calls_unresolved := 0
 	for e in g.edges {
 		edge_kinds[edge_kind_str(e.kind)]++
-		if e.kind == .calls {
-			// provenance only means something once `to` is a real symbol id —
-			// an edge resolve_callee never pinned down keeps the zero-value
-			// `extracted` it was never actually given, so check resolution
-			// first or an unresolved call reads as unearned confidence.
-			if e.to !in idx.by_id {
-				calls_unresolved++
-			} else if e.provenance == .inferred {
-				calls_inferred++
-			} else {
-				calls_extracted++
-			}
-		}
 	}
+	calls_prov := count_provenance(idx, g.edges, .calls)
+	refs_prov := count_provenance(idx, g.edges, .references)
+	embeds_prov := count_provenance(idx, g.edges, .embeds)
 
 	mut b := []string{}
 	b << '# Graph report'
@@ -78,10 +65,11 @@ pub fn (g Graph) report() string {
 		b << '- ${k}: ${n}'
 	}
 	b << ''
-	b << '## Call edges by provenance'
-	b << '- extracted (unique name or a parser-typed receiver): ${calls_extracted}'
-	b << '- inferred (picked among several real candidates by locality/visibility): ${calls_inferred}'
-	b << '- unresolved (name stayed ambiguous or unknown): ${calls_unresolved}'
+	b << '## Edges by provenance'
+	b << '`extracted` = unique name or (calls only) a parser-typed receiver; `inferred` = picked among several real candidates by locality/visibility; `unresolved` = name stayed ambiguous or unknown.'
+	b << '- calls: extracted ${calls_prov.extracted}, inferred ${calls_prov.inferred}, unresolved ${calls_prov.unresolved}'
+	b << '- references: extracted ${refs_prov.extracted}, inferred ${refs_prov.inferred}, unresolved ${refs_prov.unresolved}'
+	b << '- embeds: extracted ${embeds_prov.extracted}, inferred ${embeds_prov.inferred}, unresolved ${embeds_prov.unresolved}'
 	b << ''
 	b << '## Most connected symbols'
 	for entry in top_by_degree(idx, 10) {
@@ -143,4 +131,33 @@ fn edge_kind_str(k EdgeKind) string {
 		.embeds { 'embeds' }
 		.references { 'references' }
 	}
+}
+
+struct ProvCounts {
+mut:
+	extracted  int
+	inferred   int
+	unresolved int
+}
+
+// count_provenance buckets every edge of `kind` by how (and whether) its `to`
+// was resolved. provenance only means something once `to` is a real symbol
+// id — an edge resolve_edges never pinned down keeps the zero-value
+// `extracted` it was never actually given, so resolution is checked first or
+// an unresolved edge would read as unearned confidence.
+fn count_provenance(idx Index, edges []Edge, kind EdgeKind) ProvCounts {
+	mut c := ProvCounts{}
+	for e in edges {
+		if e.kind != kind {
+			continue
+		}
+		if e.to !in idx.by_id {
+			c.unresolved++
+		} else if e.provenance == .inferred {
+			c.inferred++
+		} else {
+			c.extracted++
+		}
+	}
+	return c
 }

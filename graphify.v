@@ -242,6 +242,30 @@ struct DeclSite {
 	file string
 }
 
+// TypeCand is one declaration that a raw type name (on an `embeds` or
+// `references` edge) could refer to.
+struct TypeCand {
+	id   string
+	mod  string
+	file string
+}
+
+// only_type_id is only_id's counterpart for TypeCand -- V has no lightweight
+// way to share one generic across both without an interface, and two
+// three-line loops are cheaper to read than that indirection.
+fn only_type_id(cands []TypeCand) ?string {
+	if cands.len == 0 {
+		return none
+	}
+	id := cands[0].id
+	for c in cands[1..] {
+		if c.id != id {
+			return none
+		}
+	}
+	return id
+}
+
 // CallResolution is what resolve_callee found for one call edge: which
 // declaration it refers to, and whether picking it needed more than a name
 // (see resolve_callee's doc comment for which steps set `inferred`).
@@ -250,11 +274,14 @@ struct CallResolution {
 	inferred bool
 }
 
-// resolve_edges turns raw callee names on `calls` edges into symbol ids when a
-// single matching declaration can be identified. Names that stay ambiguous are
-// left as-is, so the caller can still see external/unknown/undecided calls.
+// resolve_edges turns raw names into symbol ids where a single matching
+// declaration can be identified: callee names on `calls` edges (via
+// resolve_callee), and type names on `embeds`/`references` edges (via
+// resolve_type_ref). Names that stay ambiguous are left as-is, so the caller
+// can still see external/unknown/undecided references.
 fn resolve_edges(mut g Graph) {
 	mut by_name := map[string][]CallCand{}
+	mut by_type_name := map[string][]TypeCand{}
 	mut site_of := map[string]DeclSite{}
 	mut id_count := map[string]int{}
 	mut id_mod := map[string]string{}
@@ -271,13 +298,39 @@ fn resolve_edges(mut g Graph) {
 				mod:       s.parent // fn/method symbols hang off their module
 				file:      s.file
 			}
-			id_count[s.id]++
-			id_mod[s.id] = s.parent
-			id_files[s.id] << s.file
+		}
+		if s.kind in [SymbolKind.struct_, .enum_, .interface_, .type_alias] {
+			by_type_name[s.name] << TypeCand{
+				id:   s.id
+				mod:  s.parent
+				file: s.file
+			}
+		}
+		// site_of answers "where does this edge's `from` live", so it only
+		// needs the kinds backend_v.v actually emits calls/embeds/references
+		// edges from: fn/method (calls, and param/receiver/return-type
+		// references) and struct (field-type references and embeds). Enums,
+		// interfaces, and type_aliases are only ever a `to`, never a `from`.
+		if s.kind in [SymbolKind.function, .method, .struct_] {
 			site_of[s.id] = DeclSite{
 				mod:  s.parent
 				file: s.file
 			}
+		}
+		// id_count/id_mod/id_files feed the build-unit-aware duplicate check
+		// below. It is shared, unqualified by kind, across every kind that
+		// can be a resolution target (calls' fn/method ids and type refs'
+		// struct/enum/interface/type_alias ids alike) rather than kept as
+		// parallel per-kind maps: an id colliding *across* kinds would need a
+		// function and a type to share an identifier in the same module,
+		// which V's own naming rules make vanishingly rare, and the failure
+		// mode of treating it as ambiguous anyway is losing one edge that
+		// could have resolved, not resolving one wrong — the same
+		// precision-over-recall direction this whole pass already takes.
+		if s.kind in [SymbolKind.function, .method, .struct_, .enum_, .interface_, .type_alias] {
+			id_count[s.id]++
+			id_mod[s.id] = s.parent
+			id_files[s.id] << s.file
 		}
 	}
 	// An id names more than one real function only when its declarations sit in
@@ -330,6 +383,22 @@ fn resolve_edges(mut g Graph) {
 						to:         res.id
 						kind:       .calls
 						is_method:  e.is_method
+						provenance: if res.inferred { .inferred } else { .extracted }
+					}
+					continue
+				}
+			}
+		}
+		if e.kind == .embeds || e.kind == .references {
+			// Same refusal as above, generalized to type ids: a struct named
+			// `Config` in one standalone `main` program is not the `Config`
+			// referenced by an unrelated one.
+			if res := resolve_type_ref(e, by_type_name, site_of, imports_of) {
+				if !unaddressable[res.id] {
+					resolved << Edge{
+						from:       e.from
+						to:         res.id
+						kind:       e.kind
 						provenance: if res.inferred { .inferred } else { .extracted }
 					}
 					continue
@@ -440,6 +509,58 @@ fn resolve_callee(e Edge, by_name map[string][]CallCand, site_of map[string]Decl
 		}
 	}
 	if id := only_id(visible) {
+		return CallResolution{ id: id, inferred: true }
+	}
+	return none
+}
+
+// resolve_type_ref picks the one declaration a raw type name (on an `embeds`
+// or `references` edge) refers to, or none when it stays ambiguous. Same
+// progressive-narrowing shape as resolve_callee -- unique name, then the
+// referencing declaration's own file, then its module, then V's visibility
+// rule -- minus the method-vs-function kind filter and the self-receiver
+// shortcut, which are calls-specific: a type name carries no notion of
+// "method vs function", and there is no receiver to type without inference.
+fn resolve_type_ref(e Edge, by_type_name map[string][]TypeCand, site_of map[string]DeclSite, imports_of map[string][]string) ?CallResolution {
+	cands := by_type_name[e.to] or { return none }
+	if cands.len == 0 {
+		return none
+	}
+	if id := only_type_id(cands) {
+		return CallResolution{ id: id, inferred: false }
+	}
+	// no known site for the referencing declaration means no locality signal
+	// is trustworthy, so stop here rather than guess
+	caller := site_of[e.from] or { return none }
+	mut same_file := []TypeCand{}
+	for c in cands {
+		if c.file == caller.file {
+			same_file << c
+		}
+	}
+	if id := only_type_id(same_file) {
+		return CallResolution{ id: id, inferred: true }
+	}
+	if caller.mod != '' && caller.mod != 'main' {
+		mut same_mod := []TypeCand{}
+		for c in cands {
+			if c.mod == caller.mod {
+				same_mod << c
+			}
+		}
+		if id := only_type_id(same_mod) {
+			return CallResolution{ id: id, inferred: true }
+		}
+	}
+	imports := imports_of[caller.file] or { []string{} }
+	mut visible := []TypeCand{}
+	for c in cands {
+		if c.mod == 'builtin' || c.mod in imports
+			|| (c.mod == caller.mod && caller.mod != 'main') {
+			visible << c
+		}
+	}
+	if id := only_type_id(visible) {
 		return CallResolution{ id: id, inferred: true }
 	}
 	return none

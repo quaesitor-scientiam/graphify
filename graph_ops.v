@@ -229,8 +229,14 @@ pub fn (g Graph) explain(node string) string {
 					any_inferred = any_inferred || e.provenance == .inferred
 				}
 				.defines { defines << label(idx, e.to) }
-				.references { references << label(idx, e.to) }
-				.embeds { embeds << label(idx, e.to) }
+				.references {
+					references << label(idx, e.to) + prov_suffix(e.provenance)
+					any_inferred = any_inferred || e.provenance == .inferred
+				}
+				.embeds {
+					embeds << label(idx, e.to) + prov_suffix(e.provenance)
+					any_inferred = any_inferred || e.provenance == .inferred
+				}
 				else {}
 			}
 		}
@@ -241,7 +247,10 @@ pub fn (g Graph) explain(node string) string {
 					any_inferred = any_inferred || e.provenance == .inferred
 				}
 				.defines { defined_in << label(idx, e.from) }
-				.references { referenced_by << label(idx, e.from) }
+				.references {
+					referenced_by << label(idx, e.from) + prov_suffix(e.provenance)
+					any_inferred = any_inferred || e.provenance == .inferred
+				}
 				else {}
 			}
 		}

@@ -167,6 +167,84 @@ fn test_resolve_edges_sets_edge_provenance() {
 	assert g.edges[0].provenance == .extracted
 }
 
+fn test_resolve_type_ref_provenance() {
+	// a globally unique type name: extracted, nothing to choose between.
+	mut unique_by_name := map[string][]TypeCand{}
+	unique_by_name['User'] = [TypeCand{ id: 'demo.User', mod: 'demo', file: 'demo.v' }]
+	e1 := Edge{
+		from: 'demo.greeting'
+		to:   'User'
+		kind: .references
+	}
+	res1 := resolve_type_ref(e1, unique_by_name, map[string]DeclSite{}, map[string][]string{}) or {
+		panic('expected User to resolve')
+	}
+	assert res1.id == 'demo.User'
+	assert res1.inferred == false
+
+	// two structs sharing a name, narrowed to one only by the referencing
+	// declaration's own file -- a genuine heuristic pick, so inferred.
+	mut file_by_name := map[string][]TypeCand{}
+	file_by_name['Config'] = [
+		TypeCand{
+			id:   'x.Config'
+			mod:  'x'
+			file: 'x.v'
+		},
+		TypeCand{
+			id:   'y.Config'
+			mod:  'y'
+			file: 'y.v'
+		},
+	]
+	mut site_of := map[string]DeclSite{}
+	site_of['x.Loader'] = DeclSite{
+		mod:  'x'
+		file: 'x.v'
+	}
+	e2 := Edge{
+		from: 'x.Loader'
+		to:   'Config'
+		kind: .embeds
+	}
+	res2 := resolve_type_ref(e2, file_by_name, site_of, map[string][]string{}) or {
+		panic('expected same-file narrowing to resolve Config')
+	}
+	assert res2.id == 'x.Config'
+	assert res2.inferred == true
+}
+
+fn test_resolve_edges_resolves_embeds() {
+	mut g := Graph{}
+	g.symbols = [
+		Symbol{
+			id:     'demo.Base'
+			name:   'Base'
+			kind:   .struct_
+			parent: 'demo'
+			file:   'demo.v'
+		},
+		Symbol{
+			id:     'demo.User'
+			name:   'User'
+			kind:   .struct_
+			parent: 'demo'
+			file:   'demo.v'
+		},
+	]
+	g.edges = [
+		Edge{
+			from: 'demo.User'
+			to:   'Base'
+			kind: .embeds
+		},
+	]
+	resolve_edges(mut g)
+	assert g.edges.len == 1
+	assert g.edges[0].to == 'demo.Base'
+	assert g.edges[0].provenance == .extracted
+}
+
 fn test_skeleton_is_bodyless() {
 	syms, _ := extract_v_text(sample, 'demo.v')
 	mut g := Graph{}
