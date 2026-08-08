@@ -26,9 +26,10 @@ pub fn (g Graph) index() Index {
 			continue // skip edges to externals/unknowns
 		}
 		idx.edges << Edge{
-			from: e.from
-			to:   to_id
-			kind: e.kind
+			from:       e.from
+			to:         to_id
+			kind:       e.kind
+			provenance: e.provenance
 		}
 		idx.adj[e.from] << to_id
 		idx.adj[to_id] << e.from
@@ -219,10 +220,14 @@ pub fn (g Graph) explain(node string) string {
 	mut references := []string{}
 	mut referenced_by := []string{}
 	mut embeds := []string{}
+	mut any_inferred := false
 	for e in idx.edges {
 		if e.from == id {
 			match e.kind {
-				.calls { calls << label(idx, e.to) }
+				.calls {
+					calls << label(idx, e.to) + prov_suffix(e.provenance)
+					any_inferred = any_inferred || e.provenance == .inferred
+				}
 				.defines { defines << label(idx, e.to) }
 				.references { references << label(idx, e.to) }
 				.embeds { embeds << label(idx, e.to) }
@@ -231,7 +236,10 @@ pub fn (g Graph) explain(node string) string {
 		}
 		if e.to == id {
 			match e.kind {
-				.calls { called_by << label(idx, e.from) }
+				.calls {
+					called_by << label(idx, e.from) + prov_suffix(e.provenance)
+					any_inferred = any_inferred || e.provenance == .inferred
+				}
 				.defines { defined_in << label(idx, e.from) }
 				.references { referenced_by << label(idx, e.from) }
 				else {}
@@ -258,6 +266,9 @@ pub fn (g Graph) explain(node string) string {
 	}
 	if called_by.len > 0 {
 		out << 'called by     : ${uniq(called_by).join(', ')}'
+	}
+	if any_inferred {
+		out << '  ^ [inferred] = picked among several same-named candidates by locality/visibility, not a name that was unambiguous outright — see the edge provenance note in README'
 	}
 	// A call whose name matches several declarations cannot be attributed to
 	// one of them, so index() drops it and the `called by` line above silently
@@ -301,6 +312,13 @@ fn name_of(idx Index, id string) string {
 fn label(idx Index, id string) string {
 	s := idx.by_id[id] or { return id }
 	return '${s.name} (${s.loc()})'
+}
+
+// prov_suffix marks a resolved `calls` edge that resolve_callee had to
+// disambiguate among several real candidates, rather than one whose name was
+// unambiguous outright (see EdgeProvenance).
+fn prov_suffix(p EdgeProvenance) string {
+	return if p == .inferred { ' [inferred]' } else { '' }
 }
 
 fn uniq(a []string) []string {
