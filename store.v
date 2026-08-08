@@ -72,6 +72,8 @@ fn graph_to_json(g Graph) string {
 		write_json_str(mut sb, e.to)
 		sb.write_string(',"kind":')
 		sb.write_decimal(i64(e.kind))
+		sb.write_string(',"provenance":')
+		sb.write_decimal(i64(e.provenance))
 		sb.write_u8(`}`)
 	}
 	sb.write_string(']}')

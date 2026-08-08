@@ -25,6 +25,19 @@ pub enum EdgeKind {
 	references // symbol -> type it mentions
 }
 
+// EdgeProvenance marks how confidently an edge's `to` was determined.
+// Meaningful only for `calls` edges: every other kind is read straight off
+// the AST (a declared id, an embedded field's type, an import's module name)
+// with no ambiguity to resolve, so they are always `extracted`. A `calls`
+// edge is `extracted` when the callee name was globally unique or its
+// receiver's type came straight from the parser (see resolve_callee's
+// self-receiver shortcut); it is `inferred` when several real declarations
+// shared the name and one was picked by a locality/visibility heuristic.
+pub enum EdgeProvenance {
+	extracted
+	inferred
+}
+
 // Symbol is one node in the graph: a single declaration.
 pub struct Symbol {
 pub mut:
@@ -46,6 +59,10 @@ pub:
 	from string
 	to   string // resolved symbol id, or a raw name when unresolved
 	kind EdgeKind
+	// provenance is only meaningful for a resolved `calls` edge — see
+	// EdgeProvenance. Every other edge keeps the zero value, `extracted`,
+	// which is simply true for them.
+	provenance EdgeProvenance
 	// is_method marks a `calls` edge that came from `x.foo()` rather than
 	// `foo()`. It is an extraction-time hint consumed by resolve_edges to
 	// narrow candidates; it is deliberately not written to graph.json, since

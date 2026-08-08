@@ -242,6 +242,14 @@ struct DeclSite {
 	file string
 }
 
+// CallResolution is what resolve_callee found for one call edge: which
+// declaration it refers to, and whether picking it needed more than a name
+// (see resolve_callee's doc comment for which steps set `inferred`).
+struct CallResolution {
+	id       string
+	inferred bool
+}
+
 // resolve_edges turns raw callee names on `calls` edges into symbol ids when a
 // single matching declaration can be identified. Names that stay ambiguous are
 // left as-is, so the caller can still see external/unknown/undecided calls.
@@ -315,13 +323,14 @@ fn resolve_edges(mut g Graph) {
 			// edge to it would send every consumer to whichever declaration
 			// happened to be indexed first. The raw name is honestly
 			// ambiguous rather than falsely precise.
-			if id := resolve_callee(e, by_name, site_of, imports_of) {
-				if !unaddressable[id] {
+			if res := resolve_callee(e, by_name, site_of, imports_of) {
+				if !unaddressable[res.id] {
 					resolved << Edge{
-						from:      e.from
-						to:        id
-						kind:      .calls
-						is_method: e.is_method
+						from:       e.from
+						to:         res.id
+						kind:       .calls
+						is_method:  e.is_method
+						provenance: if res.inferred { .inferred } else { .extracted }
 					}
 					continue
 				}
@@ -348,13 +357,19 @@ fn resolve_edges(mut g Graph) {
 // methods on different receivers (`str` has ~300 declarations in the V repo).
 // That needs the receiver's resolved type, which only the checker computes —
 // see the call-edge disambiguation note in README's Status section.
-fn resolve_callee(e Edge, by_name map[string][]CallCand, site_of map[string]DeclSite, imports_of map[string][]string) ?string {
+//
+// The returned `inferred` flag records which kind of step won: a globally
+// unique name or a parser-typed receiver leaves no real candidate to choose
+// between, so that is `extracted`; every later step chose among several real
+// declarations by locality/visibility, so that is `inferred` — see
+// EdgeProvenance.
+fn resolve_callee(e Edge, by_name map[string][]CallCand, site_of map[string]DeclSite, imports_of map[string][]string) ?CallResolution {
 	cands := by_name[e.to] or { return none }
 	if cands.len == 0 {
 		return none
 	}
 	if id := only_id(cands) {
-		return id
+		return CallResolution{ id: id, inferred: false }
 	}
 	// A receiver the parser could type without inference pins the call down
 	// exactly — but only trust it when that method really exists, since the
@@ -363,7 +378,7 @@ fn resolve_callee(e Edge, by_name map[string][]CallCand, site_of map[string]Decl
 		want := e.recv_type + '.' + e.to
 		for c in cands {
 			if c.id == want {
-				return c.id
+				return CallResolution{ id: c.id, inferred: false }
 			}
 		}
 	}
@@ -374,7 +389,7 @@ fn resolve_callee(e Edge, by_name map[string][]CallCand, site_of map[string]Decl
 		}
 	}
 	if id := only_id(narrowed) {
-		return id
+		return CallResolution{ id: id, inferred: true }
 	}
 	if narrowed.len == 0 {
 		// the kind filter matched nothing, which is not evidence about any
@@ -393,7 +408,7 @@ fn resolve_callee(e Edge, by_name map[string][]CallCand, site_of map[string]Decl
 		}
 	}
 	if id := only_id(same_file) {
-		return id
+		return CallResolution{ id: id, inferred: true }
 	}
 	// Same-module is only evidence for a *real* module. `main` is the implicit
 	// module of every standalone program, so a repo can contain thousands of
@@ -407,7 +422,7 @@ fn resolve_callee(e Edge, by_name map[string][]CallCand, site_of map[string]Decl
 			}
 		}
 		if id := only_id(same_mod) {
-			return id
+			return CallResolution{ id: id, inferred: true }
 		}
 	}
 	// Last, V's own visibility rule: a file can only call what it imports,
@@ -425,7 +440,7 @@ fn resolve_callee(e Edge, by_name map[string][]CallCand, site_of map[string]Decl
 		}
 	}
 	if id := only_id(visible) {
-		return id
+		return CallResolution{ id: id, inferred: true }
 	}
 	return none
 }

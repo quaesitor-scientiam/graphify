@@ -40,8 +40,24 @@ pub fn (g Graph) report() string {
 		sym_kinds[s.kind.str()]++
 	}
 	mut edge_kinds := map[string]int{}
+	mut calls_extracted := 0
+	mut calls_inferred := 0
+	mut calls_unresolved := 0
 	for e in g.edges {
 		edge_kinds[edge_kind_str(e.kind)]++
+		if e.kind == .calls {
+			// provenance only means something once `to` is a real symbol id —
+			// an edge resolve_callee never pinned down keeps the zero-value
+			// `extracted` it was never actually given, so check resolution
+			// first or an unresolved call reads as unearned confidence.
+			if e.to !in idx.by_id {
+				calls_unresolved++
+			} else if e.provenance == .inferred {
+				calls_inferred++
+			} else {
+				calls_extracted++
+			}
+		}
 	}
 
 	mut b := []string{}
@@ -61,6 +77,11 @@ pub fn (g Graph) report() string {
 	for k, n in edge_kinds {
 		b << '- ${k}: ${n}'
 	}
+	b << ''
+	b << '## Call edges by provenance'
+	b << '- extracted (unique name or a parser-typed receiver): ${calls_extracted}'
+	b << '- inferred (picked among several real candidates by locality/visibility): ${calls_inferred}'
+	b << '- unresolved (name stayed ambiguous or unknown): ${calls_unresolved}'
 	b << ''
 	b << '## Most connected symbols'
 	for entry in top_by_degree(idx, 10) {

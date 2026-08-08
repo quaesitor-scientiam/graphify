@@ -55,6 +55,118 @@ fn test_extracts_core_symbols() {
 	assert has_call
 }
 
+fn test_resolve_callee_provenance() {
+	// a globally unique name leaves no real candidate to choose between --
+	// extracted, not inferred, no matter how the rest of resolve_callee reads.
+	mut unique_by_name := map[string][]CallCand{}
+	unique_by_name['greet'] = [CallCand{ id: 'demo.greet', is_method: false, mod: 'demo', file: 'demo.v' }]
+	e1 := Edge{
+		from: 'demo.main'
+		to:   'greet'
+		kind: .calls
+	}
+	res1 := resolve_callee(e1, unique_by_name, map[string]DeclSite{}, map[string][]string{}) or {
+		panic('expected greet to resolve')
+	}
+	assert res1.id == 'demo.greet'
+	assert res1.inferred == false
+
+	// a receiver whose type the parser wrote on the enclosing declaration is
+	// syntactically certain, even with several same-named methods around --
+	// also extracted.
+	mut recv_by_name := map[string][]CallCand{}
+	recv_by_name['foo'] = [
+		CallCand{
+			id:        'a.Foo.foo'
+			is_method: true
+			mod:       'a'
+			file:      'a.v'
+		},
+		CallCand{
+			id:        'b.Bar.foo'
+			is_method: true
+			mod:       'b'
+			file:      'b.v'
+		},
+	]
+	e2 := Edge{
+		from:      'a.Foo.caller'
+		to:        'foo'
+		kind:      .calls
+		is_method: true
+		recv_type: 'a.Foo'
+	}
+	res2 := resolve_callee(e2, recv_by_name, map[string]DeclSite{}, map[string][]string{}) or {
+		panic('expected the self-receiver shortcut to resolve foo')
+	}
+	assert res2.id == 'a.Foo.foo'
+	assert res2.inferred == false
+
+	// two real candidates with the same name, narrowed to one only via the
+	// caller's own file -- a genuine heuristic pick, so inferred.
+	mut file_by_name := map[string][]CallCand{}
+	file_by_name['helper'] = [
+		CallCand{
+			id:        'x.helper'
+			is_method: false
+			mod:       'x'
+			file:      'x.v'
+		},
+		CallCand{
+			id:        'y.helper'
+			is_method: false
+			mod:       'y'
+			file:      'y.v'
+		},
+	]
+	mut site_of := map[string]DeclSite{}
+	site_of['x.caller'] = DeclSite{
+		mod:  'x'
+		file: 'x.v'
+	}
+	e3 := Edge{
+		from: 'x.caller'
+		to:   'helper'
+		kind: .calls
+	}
+	res3 := resolve_callee(e3, file_by_name, site_of, map[string][]string{}) or {
+		panic('expected same-file narrowing to resolve helper')
+	}
+	assert res3.id == 'x.helper'
+	assert res3.inferred == true
+}
+
+fn test_resolve_edges_sets_edge_provenance() {
+	mut g := Graph{}
+	g.symbols = [
+		Symbol{
+			id:     'demo.greet'
+			name:   'greet'
+			kind:   .function
+			parent: 'demo'
+			file:   'demo.v'
+		},
+		Symbol{
+			id:     'demo.main'
+			name:   'main'
+			kind:   .function
+			parent: 'demo'
+			file:   'demo.v'
+		},
+	]
+	g.edges = [
+		Edge{
+			from: 'demo.main'
+			to:   'greet'
+			kind: .calls
+		},
+	]
+	resolve_edges(mut g)
+	assert g.edges.len == 1
+	assert g.edges[0].to == 'demo.greet'
+	assert g.edges[0].provenance == .extracted
+}
+
 fn test_skeleton_is_bodyless() {
 	syms, _ := extract_v_text(sample, 'demo.v')
 	mut g := Graph{}
