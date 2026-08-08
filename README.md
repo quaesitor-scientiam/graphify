@@ -29,21 +29,38 @@ with [`cmd/bench`](cmd/bench/main.v) — see [BENCH.md](BENCH.md):
 - **Artifact ceiling: ~10–20× fewer tokens** for navigation/mapping (full source
   vs skeleton, apples-to-apples) — 89–95% reduction. This is a theoretical
   maximum, not what a session gets.
-- **Live end-to-end** (real `claude -p` A/B, n=3 per task, opus, on a 2,885-file
-  / 161-module corpus, both arms `--safe-mode` so neither inherits the user's
-  graphify hooks): **~1.3× fewer unique-input tokens on structural questions**
-  — "where is X, what calls it, what's in this module" — and **no gain on
-  implementation walkthroughs**.
+- **Live end-to-end** (real `claude -p` A/B on a 2,885-file / 161-module
+  corpus, both arms `--safe-mode` so neither inherits the user's graphify
+  hooks):
+  - **structural questions** ("where is X, what calls it, what's in this
+    module"), n=3, opus: **~1.3× fewer unique-input tokens**.
+  - **purpose/rationale questions** ("what is X for, why does it exist"),
+    n=3, sonnet, warm-cache rounds: **~1.33× fewer unique-input tokens**,
+    consistently — once `query` actually surfaces the doc it captures (see
+    below), the model goes straight to one batched `explain` call per
+    symbol instead of a full-body read.
+  - **implementation walkthroughs** ("explain step by step what this
+    function does internally"): **no gain** — these require reading the
+    actual logic, and the graph is an extra hop before that read, not a
+    substitute for it.
 
-That's the honest headline — **~1.3× on navigation, ~1× on "explain this code".**
-Turn count and total tokens looked better (median ~2.2×) but ranged 1.15–2.60×
-across runs, so unique-input is the number to quote. graphify's value is
-concentrated in orientation and structure: to explain what a function *does* you
-have to read it, and the graph is an extra hop first.
+That's the honest headline — **~1.3× on structure, ~1.3× on rationale (once
+wired correctly), ~1× on "explain this code".** Turn count and total tokens
+looked better still but varied more run to run, so unique-input is the number
+to quote.
 
-Worth knowing before optimizing: call resolution went 53.7% → 82.9% and live
-savings did **not** move. For these tasks the bottleneck is not resolution
-accuracy.
+Two findings are worth knowing before optimizing further:
+- Call resolution went 53.7% → 82.9% and live savings did **not** move — for
+  these tasks the bottleneck was never resolution accuracy.
+- The rationale task initially **lost** (0.77× avg, 0.44×–1.06× round to
+  round) despite being built to favor docs. Root cause: `query()`'s rendered
+  output omitted the `doc` field entirely — only `explain` showed it — while
+  the wired system prompt recommended `query` first. The model would query,
+  get no doc text back, and fall back to reading a whole function body.
+  Adding a one-line doc preview to `query()` and steering the prompt toward
+  `explain` for named-symbol lookups turned that into the consistent ~1.33×
+  win above. A benchmark claiming "docs help" is only as honest as the
+  wiring that actually exercises the docs.
 
 For the gold-standard test — real Claude Code sessions, same task wired vs. not,
 comparing actual API tokens — see [bench/live/PROTOCOL.md](bench/live/PROTOCOL.md)
@@ -66,7 +83,7 @@ Pipeline: `walk files -> backend.extract(file) -> []Symbol + []Edge -> Graph -> 
 ### Model
 
 - `Symbol{ id, name, kind, signature, file, line, end_line, is_pub, parent, doc }` — `end_line` is what lets `get_body` read one declaration instead of a whole file; `doc` is the `//` block directly above it
-- `Edge{ from, to, kind }` — kinds: `defines`, `calls`, `imports`, `implements`, `embeds`, `references`
+- `Edge{ from, to, kind, provenance }` — kinds: `defines`, `calls`, `imports`, `implements`, `embeds`, `references`; `provenance` (`extracted`/`inferred`) is set on resolved `calls` edges only — see the edge provenance item in Status
 
 ### Emitters
 
@@ -284,8 +301,9 @@ Phase 1 (engine) — done; V only.
 - [x] **SHA256 incremental cache** (`.gf_cache.ndjson`) — a file whose content hash is unchanged since the last `extract` is reused as-is; only new/changed files are reparsed (~11s → ~4s on a full no-op re-run of the V compiler repo)
 - [x] **call-edge disambiguation.** Call edges record the raw callee name and are matched to a declaration afterwards (`resolve_edges`). Ambiguity — not missing data — is the limit. Resolution narrows progressively, strongest signal first: globally unique name → method-vs-function (`x.foo()` can only be a method) → the caller's own file → its module → what the calling file can actually *see*, meaning its `import`s plus `builtin`, which V auto-imports. On the V compiler repo that takes **53.7% → 82.9%** of 167.6k call edges.
   Two ideas do most of the work. Candidates are compared by **id**, not by symbol count, so a function declared once per platform — `os.setenv` in both `environment.c.v` and `environment.js.v` — stops looking ambiguous: it is one function, and the shared id addresses it correctly. And an id is refused only when its declarations sit in separate **build units** that merely share a module name: every standalone `main` program, and every `_test.v` file, each of which V compiles as its own executable. Inside an ordinary module a repeat *cannot* be two different functions, because V would reject the redeclaration. Guessing there would point every consumer at whichever declaration was indexed first.
-- [x] **doc/rationale capture** — the `//` block directly above a declaration becomes its `doc`, surfaced by `explain`/`get_node`. A blank line between comment and declaration means it is a header or a note about the code above, not documentation, so it is dropped. Read from source rather than the AST: in `.toplevel_comments` mode V reports only the *first* line of a contiguous block as a top-level node, and reading directly also keeps the parse in the cheaper `.skip_comments` mode. 15.8k declarations documented on the V compiler repo, 5.8k of them multi-line.
-- [ ] Phase 4 remaining: edge provenance (`EXTRACTED`/`INFERRED`), other languages via tree-sitter — the latter needs its own project (see the Design note; the `tree_sitter` wrapper does not exist yet), so it stays parked.
+- [x] **doc/rationale capture** — the `//` block directly above a declaration becomes its `doc`, surfaced in full (capped at 8 lines) by `explain`/`get_node`, and as a one-line preview per result by `query`/`query_graph`. A blank line between comment and declaration means it is a header or a note about the code above, not documentation, so it is dropped. Read from source rather than the AST: in `.toplevel_comments` mode V reports only the *first* line of a contiguous block as a top-level node, and reading directly also keeps the parse in the cheaper `.skip_comments` mode. 15.8k declarations documented on the V compiler repo, 5.8k of them multi-line. The `query` preview was added after a live benchmark round showed it omitted `doc` entirely, which a suggested "`query` first" workflow turned into full-body reads instead of ever trying `explain` — see Measured savings.
+- [x] **edge provenance** — every resolved `calls` edge is tagged on `Edge.provenance`, persisted in `graph.json`: `extracted` when the callee name was globally unique or its receiver's type came straight from the parser, `inferred` when `resolve_callee` had to pick among several real candidates by file/module/import-visibility locality. On the V compiler repo: 18,341 extracted, 1,287 inferred, of the 82.9%-resolved `calls` edges (`GRAPH_REPORT.md`'s new "Call edges by provenance" section). `embeds`/`references` edges still resolve through a separate, cruder by-name-only check at query time (`Index.resolve`) and are not yet tagged — a known gap, not an oversight. Not yet surfaced per-edge in `explain`'s `calls`/`called by` lines; the data is in the graph for now, not yet in that view.
+- [ ] Phase 4 remaining: other languages via tree-sitter — needs its own project (see the Design note; the `tree_sitter` wrapper does not exist yet), so it stays parked.
 - [ ] **remaining call-edge ambiguity.**
   Most of what is left needs the receiver's *inferred* type (`str` alone has 300 candidate declarations), and inference is a **checker** job: `CallExpr.left_type`/`receiver_type` are populated in `v/checker`, never in `v/parser`. Sharing one `ast.Table` across files — the obvious-looking fix — only improves `type_to_str` rendering in signatures; it does not infer receivers.
   But *inferred* is the operative word, and not every receiver needs inferring. The parser does hand us `CallExpr.left`, the receiver expression, and some shapes are typed syntactically: a method calling another method on its own receiver (`fn (t &Transformer) a() { t.b() }` — the type is written on the enclosing declaration), a literal receiver (`Foo{}.bar()`), or a local whose initializer names its type. graphify resolves the self-receiver case, worth ~4% of the remaining ambiguity. What genuinely requires the checker is a receiver that is a call's return value, a generic, an interface, an alias, or a chained expression. A real fix means running the checker over the whole project in a single process, which collides with worker-process crash isolation (V's parser *panics* on some files, uncatchably), with parallel batch dispatch, and with the per-file cache (a file's output would depend on global table state, so an unchanged hash could serve stale results). It would also restrict graphify to projects that typecheck, when navigating half-broken code is exactly when it is most useful. If wanted, this belongs behind an opt-in `--deep` mode, not in the default path.
