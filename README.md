@@ -126,6 +126,12 @@ that community's own size so a few giant communities can't crowd out every
 small one) since a large real codebase's full node count is too much to
 usefully render or even open; a rendering that got capped says so in an
 HTML comment / on-page caption rather than silently passing as complete.
+No amount of client-side tuning changes that for a genuinely huge repo
+(tens of thousands of symbols) — putting every node on one screen at once
+stops being legible long before it stops being possible to draw. For that
+scale, `export graphml`/`export cypher` are already uncapped and meant to
+be opened in a tool actually built for graphs that size (Gephi, Neo4j
+Bloom) rather than a hand-rolled SVG.
 
 The HTML version also has scroll-to-zoom (centered on the cursor) and
 drag-to-pan on the SVG viewBox, added after direct testing found the first
@@ -144,6 +150,24 @@ interactions, not just reading the JS: a pointer move to the enlarged
 target still highlights correctly, a dispatched wheel event visibly
 shrinks the viewBox width by the expected factor, and a real
 mousedown-move-up drag shifts the viewBox origin.
+
+**Semantic zoom and cluster context.** The default view shows only one bold
+label per community — its name, member count, and *where in the source tree
+it actually lives* (e.g. `main (22) — cmd/cli +2 more dirs`) — with
+individual symbol labels hidden, so the first thing you see is a high-level
+map, not a wall of overlapping per-symbol text. Zooming in past a threshold
+fades the per-symbol labels in; the cluster label stays anchored throughout
+for context. The directory info exists because a community's own label
+(its most internally-connected member's name — see `label_community`)
+doesn't say what part of the codebase it corresponds to, and graphify
+doesn't otherwise show repo directory structure anywhere; `community_location`
+reports the single directory most members share when there's a strict
+majority, or a plain count of distinct directories when there isn't one —
+guessing a "best" directory for a genuinely scattered community would
+misrepresent it, not describe it. Verified live in a real browser: the
+default view shows communities with node labels at `opacity:0`; scrolling in
+on a specific cluster flips `svg.zoomed-in` and reveals that cluster's full
+member names while the rest of the graph stays uncluttered off to the side.
 
 **Export.** Both formats emit one node per unique symbol id via `Index.by_id`
 rather than one per raw `Symbol`, and only resolved edges (`Index.edges`) —
@@ -424,4 +448,5 @@ Phase 1 (engine) — done; V only.
 - [x] Phase 5, **`communities`** — Louvain-style modularity optimization (local-moving + multi-level aggregation) plus a connectivity-guaranteeing split pass, standing in for the Leiden paper's randomized refinement phase; see Usage for exactly what that trades away. Verified against Zachary's Karate Club (correctly separates its two documented rival factions every run; modularity reliably well above a random/degenerate partition across dozens of test runs) and against real V codebases, where the resulting communities are recognizable subsystems — `Checker`, `Builder`, `Parser`, `Fmt`, `JsGen`, `Table`, `Scope` on the V compiler repo, not noise. Surfaced a real, pre-existing limitation rather than papering over it: `Index.by_id` collapses distinct declarations that share an id across build units (every standalone `main` program above all) into one node, which without `defines`-edge exclusion produced an artificial supermassive "main" community; excluding containment edges (`defines`/`imports`/`implements`) from community weight reduces this substantially and is independently well-motivated (containment isn't interaction), but the underlying id-collision issue is a graph-model change, not something fixed here.
 - [x] Phase 5, **GraphML/Cypher export** — both formats emit one node per unique id (via `Index.by_id`, not the raw `Symbol` list) and only resolved edges, for the reasons the Usage section explains. A real bug was caught in the process, not just anticipated: a naive one-node-per-raw-`Symbol` version violated the Cypher export's own uniqueness constraint against this project's own files (they all declare `module graphify`), confirmed by actually running the export, not by inspection.
 - [x] Phase 5, **SVG export and `graph.html`** — both share one layout: communities (see above) arranged around an outer circle, each community's own members around a smaller circle centered on its spot, sized by degree and colored by community. Deterministic trigonometry, not a force-directed simulation — see Usage for why. `graph.html` adds a legend, hover-to-highlight-neighbors, and scroll-to-zoom/drag-to-pan — plain DOM/SVG, no framework. Capped at 300 symbols (proportional per-community, highest-degree first) with the cap always disclosed, never silent.
-  Shipped once already believing it was verified, then genuinely wasn't: the first pass checked hover by dispatching a synthetic `mouseenter` in JS, which passed because it targets the element directly — it can't catch "the real click target is too small to hit," which is exactly what user feedback then reported. Re-verified with a real WebDriver session (`vebidor`, driving actual Edge) instead: a synthesized *pointer move*, not a dispatched event, landed dead-center on a node and measured its rendered size at ~4×4 CSS pixels. Fixed by decoupling the hover hit-target from the node's degree-sized visible dot (now independently sized, ~3× larger) and adding real zoom/pan, then re-confirmed the same honest way — synthesized pointer move on the new target, a dispatched wheel event, and a real drag — plus visual screenshots at each step. This is the closing item of Phase 5.
+  Shipped once already believing it was verified, then genuinely wasn't: the first pass checked hover by dispatching a synthetic `mouseenter` in JS, which passed because it targets the element directly — it can't catch "the real click target is too small to hit," which is exactly what user feedback then reported. Re-verified with a real WebDriver session (`vebidor`, driving actual Edge) instead: a synthesized *pointer move*, not a dispatched event, landed dead-center on a node and measured its rendered size at ~4×4 CSS pixels. Fixed by decoupling the hover hit-target from the node's degree-sized visible dot (now independently sized, ~3× larger) and adding real zoom/pan, then re-confirmed the same honest way — synthesized pointer move on the new target, a dispatched wheel event, and a real drag — plus visual screenshots at each step.
+  Followed by a second round of user feedback shaping this feature further: a high-level view first, with detail revealed while exploring, and per-cluster context since graphify shows no repo directory structure anywhere else. Added semantic zoom — the default view shows one bold label per community (name, count, and `community_location`'s summary of where in the source tree it actually lives) with individual symbol labels hidden until zoomed in past a threshold. Verified the same way as everything else in this feature: real WebDriver zoom on an actual cluster, screenshotted, confirming the map is legible by default and a specific cluster's full member names appear on zooming into it. This is the closing item of Phase 5.
