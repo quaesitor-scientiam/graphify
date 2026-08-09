@@ -699,6 +699,55 @@ fn export_test_graph() Graph {
 	return g
 }
 
+fn test_emit_svg_structure() {
+	g := export_test_graph()
+	out := g.emit_svg()
+
+	assert out.starts_with('<svg xmlns="http://www.w3.org/2000/svg"')
+	assert out.contains('data-id="demo.greet"')
+	assert out.contains('data-id="demo.main"')
+	assert out.contains('data-from="demo.main" data-to="demo.greet"')
+	// the unresolved edge has no node to draw a line to or from
+	assert !out.contains('nonexistent_external_call')
+}
+
+fn test_emit_svg_caps_large_graphs() {
+	// svg_max_nodes is 300; build well past it, all in one tightly-connected
+	// clump so they land in one (or a couple) communities rather than
+	// spreading thin enough to dodge the cap.
+	n := svg_max_nodes + 50
+	mut g := Graph{}
+	for i in 0 .. n {
+		g.symbols << Symbol{
+			id:   'n${i}'
+			name: 'n${i}'
+			kind: .function
+		}
+	}
+	for i in 0 .. n {
+		g.edges << Edge{
+			from: 'n${i}'
+			to:   'n${(i + 1) % n}'
+			kind: .calls
+		}
+	}
+	out := g.emit_svg()
+	assert out.contains('showing') && out.contains('of ${n} symbols')
+	assert out.count('data-id=') <= 2 * svg_max_nodes // circle + text per node
+}
+
+fn test_emit_graph_html_structure() {
+	g := export_test_graph()
+	out := g.emit_graph_html()
+
+	assert out.starts_with('<!doctype html>')
+	assert out.contains('<svg xmlns="http://www.w3.org/2000/svg"')
+	assert out.contains('id="legend"')
+	assert out.contains('<script>')
+	assert out.contains('data-id="demo.greet"')
+	assert out.contains('h2 class="sr-only"') // screen-reader summary, per artifact accessibility convention
+}
+
 fn test_export_emits_one_node_per_colliding_id() {
 	// caught live: this project's own files all declare `module graphify`,
 	// so a naive one-node-per-raw-symbol export produced several

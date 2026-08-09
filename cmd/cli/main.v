@@ -17,7 +17,7 @@ usage:
                                             combine graphs into one, namespaced by label
   graphify communities [--resolution N] [--restarts N]
                                             split the graph into subsystems (Leiden-style)
-  graphify export <graphml|cypher> [--out F]
+  graphify export <graphml|cypher|svg|html> [--out F]
                                             write the graph in that format
 
 query options:
@@ -239,7 +239,7 @@ fn cmd_communities(args []string) {
 }
 
 fn cmd_export(args []string) {
-	format := positional(args, 0) or { fail('export: needs a format (graphml, cypher)') }
+	format := positional(args, 0) or { fail('export: needs a format (graphml, cypher, svg, html)') }
 	g := load(args)
 	mut content := ''
 	mut default_out := ''
@@ -252,8 +252,16 @@ fn cmd_export(args []string) {
 			content = g.emit_cypher()
 			default_out = 'graph.cypher'
 		}
+		'svg' {
+			content = g.emit_svg()
+			default_out = 'graph.svg'
+		}
+		'html' {
+			content = g.emit_graph_html()
+			default_out = 'graph.html'
+		}
 		else {
-			fail('export: unknown format "${format}" (want graphml or cypher)')
+			fail('export: unknown format "${format}" (want graphml, cypher, svg, or html)')
 		}
 	}
 	out := str_flag(args, '--out') or { default_out }
