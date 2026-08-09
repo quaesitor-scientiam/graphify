@@ -103,7 +103,48 @@ graphify explain  build_graph                  # a symbol + its relationships
 graphify body     build_graph                  # just that declaration's source
 graphify skeleton .                            # body-less skeleton of a path
 graphify merge-graphs a/graph.json b/graph.json --out merged.json   # combine two graphs
+graphify communities --resolution 1.5          # split the graph into subsystems
 ```
+
+**Communities.** Splits the graph into densely-interconnected subsystems by
+modularity optimization — the same idea Python Graphify ships as "Communities:
+the graph split into subsystems (Leiden), with LLM-free labels." What this
+implements, precisely, since "Leiden" names a specific algorithm and it's
+worth being exact about the difference: Louvain-style local-moving +
+multi-level aggregation (the same core as the original Louvain algorithm),
+followed by a connectivity-guaranteeing pass that splits any resulting
+community whose induced subgraph turns out disconnected into its connected
+components. That delivers the same practically-important guarantee the
+Leiden paper's randomized refinement phase exists to prove — every returned
+community is one connected piece — via a much simpler, much easier-to-verify
+mechanism (connected-components is a solved primitive; a randomized
+multi-way refinement merge is not something to hand-roll and trust without a
+reference implementation to check against).
+
+Verified against Zachary's Karate Club, the standard 34-node benchmark for
+this exact algorithm: correctly separates the graph's two well-documented
+rival factions every run, and (since local-moving is randomized and any
+single run can settle into a meaningfully weaker local optimum purely by
+chance) `communities()` retries `--restarts` times and keeps the
+highest-modularity result — more restarts is slower but more reliable; the
+default balances the two. `defines`/`imports`/`implements` edges don't count
+toward community weight, only `calls`/`references`/`embeds` — containment
+("this module defines this function") isn't "these two things interact",
+and including it pulled unrelated members of the same module toward each
+other instead of toward whatever they actually collaborate with.
+
+**Known limitation, not new to this feature but made more visible by it:**
+`Index.by_id` collapses every symbol sharing an id into one graph node,
+however many physically distinct declarations actually use it — the same
+case `resolve_edges`' `unaddressable` check already names for call
+resolution (every standalone `main` program's entry point is `main.main`;
+every `_test.v` file's helpers can collide the same way). Before excluding
+containment edges this made an artificial "main" supermassive community
+spanning every unrelated standalone program in a large corpus; excluding
+`defines` edges reduces it substantially since a shared id no longer pulls
+in everything *that id's module defines*, but the underlying id collision —
+giving colliding-but-distinct declarations disambiguated node identities —
+is a graph-model change, not something fixable inside `communities.v`.
 
 **Merging graphs.** Every id is namespaced by its source graph's label (its
 root directory name by default, or `--labels a,b,...`), unconditionally and
@@ -324,4 +365,5 @@ Phase 1 (engine) — done; V only.
   Those remaining ones are at least not *silent*. `index()` drops any edge whose raw callee name matches several declarations, which makes a called function look uncalled; `explain` / `get_node` list them under `possibly called by`, with the declaration count that makes them uncertain.
   That is resolved at query time from the raw names already stored in the graph, *not* by emitting `AMBIGUOUS` edges to every candidate as originally sketched: measured on the V compiler repo, real fan-out adds 1.15M edges (4.2× the whole graph), and those guessed links would then leak into `shortest_path` and `query_graph` traversal. Keeping it query-side costs no graph growth and leaves traversal untouched.
 - [x] Phase 5, **`merge-graphs`** — combines any number of previously-extracted graphs into one, with every id namespaced by its source's label (default: root directory name, deduplicated with `-2`/`-3`/... on repeat) so a shared module name like `main` — the implicit module of every standalone V program — can never collide across inputs. `get_body` is the one operation that doesn't carry over cleanly to a merged graph; see Usage.
-- [ ] Phase 5 remaining: Leiden communities, GraphML/Cypher/SVG, `graph.html`
+- [x] Phase 5, **`communities`** — Louvain-style modularity optimization (local-moving + multi-level aggregation) plus a connectivity-guaranteeing split pass, standing in for the Leiden paper's randomized refinement phase; see Usage for exactly what that trades away. Verified against Zachary's Karate Club (correctly separates its two documented rival factions every run; modularity reliably well above a random/degenerate partition across dozens of test runs) and against real V codebases, where the resulting communities are recognizable subsystems — `Checker`, `Builder`, `Parser`, `Fmt`, `JsGen`, `Table`, `Scope` on the V compiler repo, not noise. Surfaced a real, pre-existing limitation rather than papering over it: `Index.by_id` collapses distinct declarations that share an id across build units (every standalone `main` program above all) into one node, which without `defines`-edge exclusion produced an artificial supermassive "main" community; excluding containment edges (`defines`/`imports`/`implements`) from community weight reduces this substantially and is independently well-motivated (containment isn't interaction), but the underlying id-collision issue is a graph-model change, not something fixed here.
+- [ ] Phase 5 remaining: GraphML/Cypher/SVG export, `graph.html`
