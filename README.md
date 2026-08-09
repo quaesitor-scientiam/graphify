@@ -127,6 +127,24 @@ small one) since a large real codebase's full node count is too much to
 usefully render or even open; a rendering that got capped says so in an
 HTML comment / on-page caption rather than silently passing as complete.
 
+The HTML version also has scroll-to-zoom (centered on the cursor) and
+drag-to-pan on the SVG viewBox, added after direct testing found the first
+version impractical to actually use: a real WebDriver-synthesized mouse
+move (not a JS-dispatched event — the browser preview tool available during
+development renders local files as static snapshots with no JS execution
+at all, so a synthetic `dispatchEvent` had been the only check, and it
+passed without exercising the real problem) landed dead-center on a node
+and measured its rendered size at ~4×4 CSS pixels — correct in principle,
+unusable with an actual mouse. Fixed two ways, both verified the same
+way afterward: each node's hover target (`.hit` in the SVG, invisible,
+layered under the visible dot) is now sized independently of the dot's
+degree-based visual size, roughly 3× larger; and the added zoom lets a
+user close whatever gap remains. Confirmed with real synthesized
+interactions, not just reading the JS: a pointer move to the enlarged
+target still highlights correctly, a dispatched wheel event visibly
+shrinks the viewBox width by the expected factor, and a real
+mousedown-move-up drag shifts the viewBox origin.
+
 **Export.** Both formats emit one node per unique symbol id via `Index.by_id`
 rather than one per raw `Symbol`, and only resolved edges (`Index.edges`) —
 the same reasoning as `query`/`explain`: an id like `main` (every standalone
@@ -405,4 +423,5 @@ Phase 1 (engine) — done; V only.
 - [x] Phase 5, **`merge-graphs`** — combines any number of previously-extracted graphs into one, with every id namespaced by its source's label (default: root directory name, deduplicated with `-2`/`-3`/... on repeat) so a shared module name like `main` — the implicit module of every standalone V program — can never collide across inputs. `get_body` is the one operation that doesn't carry over cleanly to a merged graph; see Usage.
 - [x] Phase 5, **`communities`** — Louvain-style modularity optimization (local-moving + multi-level aggregation) plus a connectivity-guaranteeing split pass, standing in for the Leiden paper's randomized refinement phase; see Usage for exactly what that trades away. Verified against Zachary's Karate Club (correctly separates its two documented rival factions every run; modularity reliably well above a random/degenerate partition across dozens of test runs) and against real V codebases, where the resulting communities are recognizable subsystems — `Checker`, `Builder`, `Parser`, `Fmt`, `JsGen`, `Table`, `Scope` on the V compiler repo, not noise. Surfaced a real, pre-existing limitation rather than papering over it: `Index.by_id` collapses distinct declarations that share an id across build units (every standalone `main` program above all) into one node, which without `defines`-edge exclusion produced an artificial supermassive "main" community; excluding containment edges (`defines`/`imports`/`implements`) from community weight reduces this substantially and is independently well-motivated (containment isn't interaction), but the underlying id-collision issue is a graph-model change, not something fixed here.
 - [x] Phase 5, **GraphML/Cypher export** — both formats emit one node per unique id (via `Index.by_id`, not the raw `Symbol` list) and only resolved edges, for the reasons the Usage section explains. A real bug was caught in the process, not just anticipated: a naive one-node-per-raw-`Symbol` version violated the Cypher export's own uniqueness constraint against this project's own files (they all declare `module graphify`), confirmed by actually running the export, not by inspection.
-- [x] Phase 5, **SVG export and `graph.html`** — both share one layout: communities (see above) arranged around an outer circle, each community's own members around a smaller circle centered on its spot, sized by degree and colored by community. Deterministic trigonometry, not a force-directed simulation — see Usage for why. `graph.html` adds a legend and hover-to-highlight-neighbors (verified directly by dispatching real `mouseenter`/`mouseleave` events in a browser: 156 of 161 nodes correctly dimmed to exactly the hovered node + its true neighbors, cleared fully on mouseleave) — plain DOM/SVG, no framework. Capped at 300 symbols (proportional per-community, highest-degree first) with the cap always disclosed, never silent. This closes out Phase 5.
+- [x] Phase 5, **SVG export and `graph.html`** — both share one layout: communities (see above) arranged around an outer circle, each community's own members around a smaller circle centered on its spot, sized by degree and colored by community. Deterministic trigonometry, not a force-directed simulation — see Usage for why. `graph.html` adds a legend, hover-to-highlight-neighbors, and scroll-to-zoom/drag-to-pan — plain DOM/SVG, no framework. Capped at 300 symbols (proportional per-community, highest-degree first) with the cap always disclosed, never silent.
+  Shipped once already believing it was verified, then genuinely wasn't: the first pass checked hover by dispatching a synthetic `mouseenter` in JS, which passed because it targets the element directly — it can't catch "the real click target is too small to hit," which is exactly what user feedback then reported. Re-verified with a real WebDriver session (`vebidor`, driving actual Edge) instead: a synthesized *pointer move*, not a dispatched event, landed dead-center on a node and measured its rendered size at ~4×4 CSS pixels. Fixed by decoupling the hover hit-target from the node's degree-sized visible dot (now independently sized, ~3× larger) and adding real zoom/pan, then re-confirmed the same honest way — synthesized pointer move on the new target, a dispatched wheel event, and a real drag — plus visual screenshots at each step. This is the closing item of Phase 5.
