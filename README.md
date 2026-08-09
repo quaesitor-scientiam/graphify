@@ -102,7 +102,21 @@ graphify path     build_graph emit_skeleton    # shortest path between symbols
 graphify explain  build_graph                  # a symbol + its relationships
 graphify body     build_graph                  # just that declaration's source
 graphify skeleton .                            # body-less skeleton of a path
+graphify merge-graphs a/graph.json b/graph.json --out merged.json   # combine two graphs
 ```
+
+**Merging graphs.** Every id is namespaced by its source graph's label (its
+root directory name by default, or `--labels a,b,...`), unconditionally and
+regardless of merge order, because two unrelated projects sharing a module
+name is the common case, not an edge case — `main` is the implicit module of
+*every* standalone V program, so any two merged programs collide on
+`main.main` unless kept apart. `query`/`explain`/`path`/`shortest_path`/
+`overview` work normally against the merged result; `get_body` does not —
+`s.file` is relative to each *original* root, and a merged graph has no
+single root to resolve it against, so `--source-dir` can only ever serve one
+of the inputs correctly. Content that's genuinely duplicated across inputs
+(the same file extracted into two of them) is not deduplicated — it appears
+twice, once per label.
 
 Queries read `./graphify-out/graph.json` by default. Override with `--graph <file>`.
 
@@ -309,4 +323,5 @@ Phase 1 (engine) — done; V only.
   17.1% of call edges (28.7k) are still unattributed, but only 4,377 of those are genuinely unresolvable — calls into C, closures, and function variables, which nothing short of running the program could pin down. That puts the real ceiling at **97.4%**, with ~24.3k edges between here and there.
   Those remaining ones are at least not *silent*. `index()` drops any edge whose raw callee name matches several declarations, which makes a called function look uncalled; `explain` / `get_node` list them under `possibly called by`, with the declaration count that makes them uncertain.
   That is resolved at query time from the raw names already stored in the graph, *not* by emitting `AMBIGUOUS` edges to every candidate as originally sketched: measured on the V compiler repo, real fan-out adds 1.15M edges (4.2× the whole graph), and those guessed links would then leak into `shortest_path` and `query_graph` traversal. Keeping it query-side costs no graph growth and leaves traversal untouched.
-- [ ] Phase 5: Leiden communities, `merge-graphs`, GraphML/Cypher/SVG, `graph.html`
+- [x] Phase 5, **`merge-graphs`** — combines any number of previously-extracted graphs into one, with every id namespaced by its source's label (default: root directory name, deduplicated with `-2`/`-3`/... on repeat) so a shared module name like `main` — the implicit module of every standalone V program — can never collide across inputs. `get_body` is the one operation that doesn't carry over cleanly to a merged graph; see Usage.
+- [ ] Phase 5 remaining: Leiden communities, GraphML/Cypher/SVG, `graph.html`
