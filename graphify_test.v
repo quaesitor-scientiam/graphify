@@ -523,6 +523,147 @@ fn test_merge_graphs_explicit_labels_override_defaults() {
 	assert merged.symbols[1].id == 'beta::x.f'
 }
 
+// Zachary's Karate Club: the standard 34-node, 78-edge benchmark graph for
+// community detection, with well-documented expected properties (used here,
+// not a contrived toy) -- see https://en.wikipedia.org/wiki/Zachary%27s_karate_club.
+const karate_edges = [
+	[0, 1], [0, 2], [0, 3], [0, 4], [0, 5], [0, 6], [0, 7], [0, 8], [0, 10], [0, 11],
+	[0, 12], [0, 13], [0, 17], [0, 19], [0, 21], [0, 31], [1, 2], [1, 3], [1, 7], [1, 13],
+	[1, 17], [1, 19], [1, 21], [1, 30], [2, 3], [2, 7], [2, 8], [2, 9], [2, 13], [2, 27],
+	[2, 28], [2, 32], [3, 7], [3, 12], [3, 13], [4, 6], [4, 10], [5, 6], [5, 10], [5, 16],
+	[6, 16], [8, 30], [8, 32], [8, 33], [9, 33], [13, 33], [14, 32], [14, 33], [15, 32],
+	[15, 33], [18, 32], [18, 33], [19, 33], [20, 32], [20, 33], [22, 32], [22, 33], [23, 25],
+	[23, 27], [23, 29], [23, 32], [23, 33], [24, 25], [24, 27], [24, 31], [25, 31], [26, 29],
+	[26, 33], [27, 33], [28, 31], [28, 33], [29, 32], [29, 33], [30, 32], [30, 33], [31, 32],
+	[31, 33], [32, 33],
+]
+
+fn karate_graph() Graph {
+	mut g := Graph{}
+	for i in 0 .. 34 {
+		g.symbols << Symbol{
+			id:   i.str()
+			name: 'n${i}'
+			kind: .function
+		}
+	}
+	for pair in karate_edges {
+		g.edges << Edge{
+			from: pair[0].str()
+			to:   pair[1].str()
+			kind: .calls
+		}
+	}
+	return g
+}
+
+fn test_communities_karate_club_finds_real_structure() {
+	g := karate_graph()
+	// this benchmark is small and adversarial enough to need more than the
+	// production default's restarts for reliable quality -- see
+	// default_leiden_restarts' doc comment.
+	result := g.communities(resolution: 1.0, restarts: 30)
+
+	// every node appears in exactly one community -- no loss, no duplication
+	mut seen := map[string]int{}
+	for c in result {
+		for id in c.members {
+			seen[id] = seen[id] + 1
+		}
+	}
+	assert seen.len == 34
+	for _, n in seen {
+		assert n == 1
+	}
+
+	// meaningful structure, not degenerate: neither one giant blob nor 34
+	// singletons. Louvain-style optimization on this graph is well
+	// documented to land around 3-4 communities.
+	assert result.len >= 2
+	assert result.len <= 8
+
+	// the two best-documented qualitative facts about this graph: nodes 0
+	// (Mr. Hi) and 33 (John A) are the two rival factions' hub nodes and
+	// end up in different communities under any real modularity
+	// optimization -- if this assertion fails, the algorithm is not finding
+	// real structure, whatever its other numbers say.
+	mut comm_of := map[string]int{}
+	for c in result {
+		for id in c.members {
+			comm_of[id] = c.id
+		}
+	}
+	assert comm_of['0'] != comm_of['33']
+
+	// modularity should be solidly above what a broken or near-random
+	// partition produces on this graph. The literature's commonly-cited
+	// ~0.42 for Louvain here is a best-of-many-restarts figure; empirically,
+	// even leiden_restarts' 50 tries occasionally top out closer to 0.34 at
+	// a wide, commonly-reached local optimum rather than escaping further
+	// (see its doc comment) -- 0.30 is comfortably below every value
+	// observed across dozens of runs during development, while a genuine
+	// formula bug reliably produces something far lower (0.15-0.26 range,
+	// also observed directly while this was being debugged).
+	idx := g.index()
+	w := build_wgraph(idx)
+	q := modularity(w, comm_of, 1.0)
+	assert q > 0.30
+}
+
+fn test_communities_are_connected() {
+	// Two disjoint triangles (0-1-2 and 3-4-5), joined only by a single
+	// 2-6 edge -- weak enough that a real optimizer may or may not fold
+	// node 6 into one side, but every returned community, whatever its
+	// membership, must be internally connected by construction.
+	mut g := Graph{}
+	for i in 0 .. 7 {
+		g.symbols << Symbol{
+			id:   i.str()
+			name: 'n${i}'
+			kind: .function
+		}
+	}
+	tri_edges := [[0, 1], [1, 2], [0, 2], [3, 4], [4, 5], [3, 5], [2, 6]]
+	for pair in tri_edges {
+		g.edges << Edge{
+			from: pair[0].str()
+			to:   pair[1].str()
+			kind: .calls
+		}
+	}
+	result := g.communities()
+	idx := g.index()
+	for c in result {
+		mut in_group := map[string]bool{}
+		for id in c.members {
+			in_group[id] = true
+		}
+		mut visited := map[string]bool{}
+		mut queue := [c.members[0]]
+		visited[c.members[0]] = true
+		for queue.len > 0 {
+			node := queue.pop()
+			for nb in idx.adj[node] or { []string{} } {
+				if nb in in_group && !visited[nb] {
+					visited[nb] = true
+					queue << nb
+				}
+			}
+		}
+		assert visited.len == c.members.len // every member reached -- the community is one connected piece
+	}
+}
+
+fn test_communities_resolution_increases_community_count() {
+	// a higher resolution should never produce *fewer* communities than a
+	// lower one on the same graph -- that's the defining monotonic property
+	// of resolution-limited modularity's penalty term.
+	g := karate_graph()
+	low := g.communities(resolution: 0.5)
+	high := g.communities(resolution: 2.0)
+	assert high.len >= low.len
+}
+
 fn test_skeleton_is_bodyless() {
 	syms, _ := extract_v_text(sample, 'demo.v')
 	mut g := Graph{}

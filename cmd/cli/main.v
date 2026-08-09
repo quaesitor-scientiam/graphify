@@ -15,6 +15,8 @@ usage:
   graphify skeleton <path>                 print a body-less skeleton of <path>
   graphify merge-graphs <a.json> <b.json> [more.json...] [--out F] [--labels a,b,...]
                                             combine graphs into one, namespaced by label
+  graphify communities [--resolution N] [--restarts N]
+                                            split the graph into subsystems (Leiden-style)
 
 query options:
   --budget <n>   token budget for the result (default 2000)
@@ -24,6 +26,12 @@ merge-graphs options:
   --out <file>     output path (default ./merged-graph.json)
   --labels <list>  comma-separated namespace label per input graph, in order;
                    defaults to each graph\'s own root directory name
+
+communities options:
+  --resolution <n>  > 1 favors more, smaller communities; < 1 favors fewer,
+                     larger ones (default 1.0)
+  --restarts <n>    randomized attempts, keeping the best result -- higher is
+                     slower but more reliable (default 20)
 
 common options:
   --graph <file>   graph.json to read (default ./graphify-out/graph.json)
@@ -61,6 +69,9 @@ fn main() {
 		}
 		'merge-graphs' {
 			cmd_merge(rest)
+		}
+		'communities' {
+			cmd_communities(rest)
 		}
 		'_parse-batch' {
 			cmd_parse_batch(rest)
@@ -200,6 +211,25 @@ fn cmd_merge(args []string) {
 	println('wrote ${out}')
 }
 
+fn cmd_communities(args []string) {
+	resolution := f64_flag(args, '--resolution') or { 1.0 }
+	restarts := int_flag(args, '--restarts') or { graphify.default_leiden_restarts }
+	g := load(args)
+	idx := g.index()
+	result := g.communities(resolution: resolution, restarts: restarts)
+	println('${result.len} communities (resolution ${resolution}, restarts ${restarts})')
+	for c in result {
+		shown := if c.members.len > 6 { c.members#[..6] } else { c.members }
+		mut names := []string{cap: shown.len}
+		for id in shown {
+			s := idx.by_id[id] or { continue }
+			names << s.name
+		}
+		more := if c.members.len > shown.len { ' (+${c.members.len - shown.len} more)' } else { '' }
+		println('- ${c.label} (${c.members.len} members): ${names.join(', ')}${more}')
+	}
+}
+
 // store_dir returns the central graph store (--store flag or GRAPHIFY_STORE
 // env), or '' if none is configured.
 fn store_dir(args []string) string {
@@ -257,7 +287,8 @@ fn positionals(args []string) []string {
 	for i := 0; i < args.len; i++ {
 		a := args[i]
 		if a.starts_with('--') {
-			if a in ['--budget', '--graph', '--source-dir', '--out', '--store', '--labels'] {
+			if a in ['--budget', '--graph', '--source-dir', '--out', '--store', '--labels', '--resolution',
+				'--restarts'] {
 				i++ // skip the flag's value
 			}
 			continue
@@ -284,6 +315,11 @@ fn str_flag(args []string, name string) ?string {
 fn int_flag(args []string, name string) ?int {
 	v := str_flag(args, name) or { return none }
 	return v.int()
+}
+
+fn f64_flag(args []string, name string) ?f64 {
+	v := str_flag(args, name) or { return none }
+	return v.f64()
 }
 
 @[noreturn]
