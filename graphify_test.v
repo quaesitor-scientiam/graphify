@@ -55,6 +55,54 @@ fn test_extracts_core_symbols() {
 	assert has_call
 }
 
+fn test_literal_receiver_types_the_call() {
+	src := 'module demo
+
+struct Foo {}
+
+fn (f Foo) bar() {}
+
+fn use() {
+	Foo{}.bar()
+}
+'
+	_, edges := extract_v_text(src, 'demo.v')
+	mut found := false
+	for e in edges {
+		if e.kind == .calls && e.to == 'bar' {
+			found = true
+			assert e.is_method
+			assert e.recv_type == 'demo.Foo'
+		}
+	}
+	assert found
+}
+
+fn test_cross_module_literal_receiver_types_by_its_own_module_not_the_callers() {
+	// StructInit.typ_str always prefixes the *parsing* module rather than
+	// whatever module was actually written (confirmed by direct probing of
+	// v.parser, not assumed from its doc comment) -- so `other.Bar{}` inside
+	// `demo` must still type as `other.Bar`, not `demo.Bar`.
+	src := 'module demo
+
+import other
+
+fn use() {
+	other.Bar{}.baz()
+}
+'
+	_, edges := extract_v_text(src, 'demo.v')
+	mut found := false
+	for e in edges {
+		if e.kind == .calls && e.to == 'baz' {
+			found = true
+			assert e.is_method
+			assert e.recv_type == 'other.Bar'
+		}
+	}
+	assert found
+}
+
 fn test_resolve_callee_provenance() {
 	// a globally unique name leaves no real candidate to choose between --
 	// extracted, not inferred, no matter how the rest of resolve_callee reads.

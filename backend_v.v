@@ -115,6 +115,8 @@ fn extract_from_ast(file &ast.File, mut table ast.Table, rel string, src []strin
 					} else {
 						''
 					}
+					table:  table
+					mod_id: mod_id
 				}, mut edges)
 			}
 			ast.StructDecl {
@@ -351,10 +353,15 @@ fn add_ref(from string, typename string, mut edges []Edge, mut seen map[string]b
 // CallCtx is what the call walkers need to know about the function being
 // walked: who is calling, and -- when it is a method -- the name and type of
 // its own receiver, so `t.foo()` can be attributed without type inference.
+// table/mod_id serve the same purpose for a literal receiver (`Foo{}.bar()`):
+// the type is on the literal itself, also with no inference needed, but
+// reading it needs the table (see walk_call).
 struct CallCtx {
 	from      string
 	recv_name string // receiver variable, '' when the caller is not a method
 	recv_type string // id of the receiver's type, e.g. `v3.transform.Transformer`
+	table     &ast.Table = unsafe { nil }
+	mod_id    string
 }
 
 // collect_calls records one `calls` edge per *distinct* callee invoked anywhere
@@ -424,15 +431,23 @@ fn walk_call(ce ast.CallExpr, ctx CallCtx, mut edges []Edge, mut seen map[string
 	if ce.name != '' && ce.name !in seen {
 		seen[ce.name] = true
 		// `t.foo()` inside `fn (t &Transformer) ...` needs no inference: the
-		// receiver's type is written on the enclosing declaration. Any other
-		// receiver shape is left blank rather than guessed at.
+		// receiver's type is written on the enclosing declaration. A literal
+		// receiver (`Foo{}.bar()`) needs no inference either — the type is
+		// the literal's own — but StructInit.typ_str cannot be trusted for
+		// it: the parser always prefixes it with the *current* module rather
+		// than whatever module was actually written, so `other.Bar{}` inside
+		// `demo` reports itself as `demo.Bar` (confirmed empirically, not
+		// from the field's doc comment). `.typ`, resolved through the table,
+		// does not have that bug. Any other receiver shape is left blank
+		// rather than guessed at.
 		mut rt := ''
-		if ce.is_method && ctx.recv_name != '' {
+		if ce.is_method {
 			left := ce.left
-			if left is ast.Ident {
-				if left.name == ctx.recv_name {
-					rt = ctx.recv_type
-				}
+			if left is ast.Ident && ctx.recv_name != '' && left.name == ctx.recv_name {
+				rt = ctx.recv_type
+			} else if left is ast.StructInit && left.typ != ast.void_type && left.typ != 0 {
+				resolved := clean_type(ctx.table, left.typ, ctx.mod_id).trim_left('&')
+				rt = if resolved.contains('.') { resolved } else { '${ctx.mod_id}.${resolved}' }
 			}
 		}
 		edges << Edge{
