@@ -6,17 +6,24 @@ import graphify
 const usage = 'graphify - build a queryable code graph to cut AI token usage
 
 usage:
-  graphify extract <path> [--out D]  build the graph (default ./graphify-out/)
-  graphify overview                  compact summary: counts + most-connected symbols
-  graphify query   <text> [opts]     traverse from matching symbols (token-bounded)
-  graphify path    <A> <B>           shortest path between two symbols
-  graphify explain <symbol>          summarize a symbol and its relationships
-  graphify body    <symbol>          print only that declaration body
-  graphify skeleton <path>           print a body-less skeleton of <path>
+  graphify extract <path> [--out D]        build the graph (default ./graphify-out/)
+  graphify overview                        compact summary: counts + most-connected symbols
+  graphify query   <text> [opts]           traverse from matching symbols (token-bounded)
+  graphify path    <A> <B>                 shortest path between two symbols
+  graphify explain <symbol>                summarize a symbol and its relationships
+  graphify body    <symbol>                print only that declaration body
+  graphify skeleton <path>                 print a body-less skeleton of <path>
+  graphify merge-graphs <a.json> <b.json> [more.json...] [--out F] [--labels a,b,...]
+                                            combine graphs into one, namespaced by label
 
 query options:
   --budget <n>   token budget for the result (default 2000)
   --dfs          walk depth-first instead of breadth-first
+
+merge-graphs options:
+  --out <file>     output path (default ./merged-graph.json)
+  --labels <list>  comma-separated namespace label per input graph, in order;
+                   defaults to each graph\'s own root directory name
 
 common options:
   --graph <file>   graph.json to read (default ./graphify-out/graph.json)
@@ -51,6 +58,9 @@ fn main() {
 		}
 		'skeleton' {
 			cmd_skeleton(rest)
+		}
+		'merge-graphs' {
+			cmd_merge(rest)
 		}
 		'_parse-batch' {
 			cmd_parse_batch(rest)
@@ -170,6 +180,26 @@ fn cmd_skeleton(args []string) {
 	println(g.emit_skeleton())
 }
 
+fn cmd_merge(args []string) {
+	paths := positionals(args)
+	if paths.len < 2 {
+		fail('merge-graphs: needs at least two graph.json paths')
+	}
+	out := str_flag(args, '--out') or { 'merged-graph.json' }
+	mut labels := []string{}
+	if l := str_flag(args, '--labels') {
+		labels = l.split(',')
+	}
+	mut graphs := []graphify.Graph{}
+	for p in paths {
+		graphs << graphify.load_graph(p) or { fail('cannot read ${p}: ${err}') }
+	}
+	merged := graphify.merge_graphs(graphs, labels)
+	graphify.save_graph(merged, out) or { fail('write failed: ${err}') }
+	println('merged ${graphs.len} graphs -> ${merged.symbols.len} symbols, ${merged.edges.len} edges')
+	println('wrote ${out}')
+}
+
 // store_dir returns the central graph store (--store flag or GRAPHIFY_STORE
 // env), or '' if none is configured.
 fn store_dir(args []string) string {
@@ -220,22 +250,26 @@ fn load(args []string) graphify.Graph {
 
 // --- tiny arg helpers ---
 
-fn positional(args []string, n int) ?string {
-	mut count := 0
+// positionals returns every arg that is not a recognized flag or that
+// flag's value, in order.
+fn positionals(args []string) []string {
+	mut out := []string{}
 	for i := 0; i < args.len; i++ {
 		a := args[i]
 		if a.starts_with('--') {
-			if a in ['--budget', '--graph', '--source-dir', '--out', '--store'] {
+			if a in ['--budget', '--graph', '--source-dir', '--out', '--store', '--labels'] {
 				i++ // skip the flag's value
 			}
 			continue
 		}
-		if count == n {
-			return a
-		}
-		count++
+		out << a
 	}
-	return none
+	return out
+}
+
+fn positional(args []string, n int) ?string {
+	all := positionals(args)
+	return if n < all.len { all[n] } else { none }
 }
 
 fn str_flag(args []string, name string) ?string {

@@ -395,6 +395,134 @@ fn test_resolve_edges_resolves_embeds() {
 	assert g.edges[0].provenance == .extracted
 }
 
+fn test_merge_graphs_namespaces_ids() {
+	mut a := Graph{
+		root: 'S:/repo/svc-a'
+	}
+	a.symbols = [
+		Symbol{
+			id:     'demo.greet'
+			name:   'greet'
+			kind:   .function
+			parent: 'demo'
+			file:   'demo.v'
+		},
+	]
+	mut b := Graph{
+		root: 'S:/repo/svc-b'
+	}
+	b.symbols = [
+		Symbol{
+			id:     'demo.greet'
+			name:   'greet'
+			kind:   .function
+			parent: 'demo'
+			file:   'demo.v'
+		},
+	]
+	merged := merge_graphs([a, b], [])
+	assert merged.symbols.len == 2
+	assert merged.symbols[0].id == 'svc-a::demo.greet'
+	assert merged.symbols[1].id == 'svc-b::demo.greet'
+	assert merged.symbols[0].parent == 'svc-a::demo'
+	assert merged.symbols[1].parent == 'svc-b::demo'
+}
+
+fn test_merge_graphs_id_collision_stays_separate() {
+	// `main` is the implicit module of every standalone V program, so two
+	// unrelated projects each declaring `main.run` is the realistic case,
+	// not a contrived one. Namespacing must keep them distinct rather than
+	// one silently shadowing the other in the merged Index.
+	mut a := Graph{
+		root: 'S:/repo/tool-a'
+	}
+	a.symbols = [
+		Symbol{
+			id:   'main.run'
+			name: 'run'
+			kind: .function
+			file: 'main.v'
+		},
+		Symbol{
+			id:   'main.helper_a'
+			name: 'helper_a'
+			kind: .function
+			file: 'main.v'
+		},
+	]
+	a.edges = [
+		Edge{
+			from: 'main.helper_a'
+			to:   'main.run'
+			kind: .calls
+		},
+	]
+	mut b := Graph{
+		root: 'S:/repo/tool-b'
+	}
+	b.symbols = [
+		Symbol{
+			id:   'main.run'
+			name: 'run'
+			kind: .function
+			file: 'main.v'
+		},
+		Symbol{
+			id:   'main.helper_b'
+			name: 'helper_b'
+			kind: .function
+			file: 'main.v'
+		},
+	]
+	b.edges = [
+		Edge{
+			from: 'main.helper_b'
+			to:   'main.run'
+			kind: .calls
+		},
+	]
+	merged := merge_graphs([a, b], [])
+	idx := merged.index()
+	assert idx.by_id.len == 4 // both `main.run`s (and their helpers) survive as distinct nodes
+	assert 'tool-a::main.run' in idx.by_id
+	assert 'tool-b::main.run' in idx.by_id
+	// each project's own call edge must resolve to *its own* run, never the
+	// other project's -- this is the actual failure mode a naive merge
+	// (concatenate without namespacing) would produce.
+	assert idx.adj['tool-a::main.helper_a'] == ['tool-a::main.run']
+	assert idx.adj['tool-b::main.helper_b'] == ['tool-b::main.run']
+}
+
+fn test_merge_graphs_dedups_repeated_default_labels() {
+	// two projects that both happen to be checked out under a directory
+	// named `src` -- a very plausible collision for auto-derived labels.
+	mut a := Graph{
+		root: 'S:/repo/one/src'
+	}
+	mut b := Graph{
+		root: 'S:/repo/two/src'
+	}
+	a.symbols = [Symbol{ id: 'x.f', name: 'f', kind: .function }]
+	b.symbols = [Symbol{ id: 'x.f', name: 'f', kind: .function }]
+	merged := merge_graphs([a, b], [])
+	assert merged.symbols[0].id == 'src::x.f'
+	assert merged.symbols[1].id == 'src-2::x.f'
+}
+
+fn test_merge_graphs_explicit_labels_override_defaults() {
+	mut a := Graph{
+		root: 'S:/repo/one/src'
+	}
+	mut b := Graph{
+		root: 'S:/repo/two/src'
+	}
+	a.symbols = [Symbol{ id: 'x.f', name: 'f', kind: .function }]
+	b.symbols = [Symbol{ id: 'x.f', name: 'f', kind: .function }]
+	merged := merge_graphs([a, b], ['alpha', 'beta'])
+	assert merged.symbols[0].id == 'alpha::x.f'
+	assert merged.symbols[1].id == 'beta::x.f'
+}
+
 fn test_skeleton_is_bodyless() {
 	syms, _ := extract_v_text(sample, 'demo.v')
 	mut g := Graph{}
