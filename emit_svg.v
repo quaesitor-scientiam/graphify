@@ -1,6 +1,7 @@
 module graphify
 
 import math
+import os
 
 // LaidOutNode is one symbol positioned for rendering, with the community it
 // was assigned to (for color-coding) and its degree (for sizing).
@@ -141,6 +142,48 @@ fn node_color(community int) string {
 	return palette[community % palette.len]
 }
 
+// community_location summarizes where a community's members actually live
+// in the source tree. Exists because a community's own label (its most
+// internally-connected member's name -- see label_community) doesn't say
+// what part of the codebase it corresponds to; this does, using data
+// graphify already captured (Symbol.file) rather than anything new.
+// Reports the single directory most members share when there's a real
+// (strict) majority, or a plain count of distinct directories when there
+// isn't one -- guessing a "best" directory when members are actually
+// scattered would misrepresent the community, not describe it. An exact tie
+// (e.g. 1 of 2 members in each of two directories) is deliberately treated
+// as no majority rather than >= 0.5: picking one side of a tie would be an
+// arbitrary, non-deterministic choice (map iteration order isn't
+// guaranteed), not a real finding about the community.
+fn community_location(idx Index, members []string) string {
+	mut dir_count := map[string]int{}
+	for id in members {
+		s := idx.by_id[id] or { continue }
+		dir_count[os.dir(s.file)]++
+	}
+	if dir_count.len == 0 {
+		return ''
+	}
+	if dir_count.len == 1 {
+		for d, _ in dir_count {
+			return d
+		}
+	}
+	mut best_dir := ''
+	mut best_n := 0
+	for d, n in dir_count {
+		if n > best_n {
+			best_n = n
+			best_dir = d
+		}
+	}
+	if f64(best_n) / f64(members.len) > 0.5 {
+		extra := dir_count.len - 1
+		return '${best_dir} +${extra} more dir${if extra == 1 { '' } else { 's' }}'
+	}
+	return '${dir_count.len} directories'
+}
+
 // emit_svg renders the graph as a single self-contained SVG: nodes
 // clustered and colored by community (see layout_communities), sized by
 // degree, connected by lines for every resolved edge between two rendered
@@ -148,14 +191,17 @@ fn node_color(community int) string {
 // so a smaller rendering never silently passes as the whole graph.
 pub fn (g Graph) emit_svg() string {
 	idx := g.index()
-	nodes, total, _ := layout_communities(g, idx)
-	return render_svg(nodes, idx, total)
+	nodes, total, comms := layout_communities(g, idx)
+	return render_svg(nodes, idx, total, comms)
 }
 
 // render_svg builds the actual `<svg>...</svg>` markup from an
 // already-computed layout -- split out so emit_graph_html can reuse it
 // without recomputing communities a second time (see layout_communities).
-fn render_svg(nodes []LaidOutNode, idx Index, total int) string {
+// `comms` is the full (uncapped) community list, needed for the on-canvas
+// cluster labels: a community's true member count and its label/location
+// both come from here, not from whatever subset actually got rendered.
+fn render_svg(nodes []LaidOutNode, idx Index, total int, comms []Community) string {
 	if nodes.len == 0 {
 		return '<svg xmlns="http://www.w3.org/2000/svg"><text x="10" y="20">empty graph</text></svg>'
 	}
@@ -223,8 +269,43 @@ fn render_svg(nodes []LaidOutNode, idx Index, total int) string {
 		sb << '      <circle class="dot" cx="${n.x:.1f}" cy="${n.y:.1f}" r="${r:.1f}" fill="${color}" fill-opacity="0.85" stroke="#333" stroke-width="0.4">'
 		sb << '        <title>${xml_escape(n.label)} (${xml_escape(n.kind.str())})</title>'
 		sb << '      </circle>'
-		sb << '      <text x="${(n.x + r + 2):.1f}" y="${(n.y + 3):.1f}" font-size="7" fill="#222">${xml_escape(n.label)}</text>'
+		sb << '      <text class="node-label" x="${(n.x + r + 2):.1f}" y="${(n.y + 3):.1f}" font-size="7" fill="#222">${xml_escape(n.label)}</text>'
 		sb << '    </g>'
+	}
+	sb << '  </g>'
+
+	// One label per community, at the centroid of whichever of its members
+	// actually got rendered (not the community's theoretical unclipped
+	// center -- if the svg_max_nodes cap trimmed some members, the centroid
+	// of what's really on screen is the honest place to put the label).
+	// This is the primary thing visible at the default zoomed-out view
+	// (see emit_graph_html's "node-label" CSS, which hides individual node
+	// labels until zoomed in); a plain static SVG has no zoom to gate
+	// anything behind, so both this and every node-label stay visible
+	// there unconditionally, same as before this existed.
+	mut centroid_x := map[int]f64{}
+	mut centroid_y := map[int]f64{}
+	mut centroid_n := map[int]int{}
+	for n in nodes {
+		centroid_x[n.community] += n.x
+		centroid_y[n.community] += n.y
+		centroid_n[n.community] += 1
+	}
+	sb << '  <g class="cluster-labels">'
+	for ci, n in centroid_n {
+		if n == 0 || ci >= comms.len {
+			continue
+		}
+		cx := centroid_x[ci] / f64(n)
+		cy := centroid_y[ci] / f64(n)
+		c := comms[ci]
+		loc := community_location(idx, c.members)
+		desc := if loc == '' {
+			'${xml_escape(c.label)} (${c.members.len})'
+		} else {
+			'${xml_escape(c.label)} (${c.members.len}) — ${xml_escape(loc)}'
+		}
+		sb << '    <text class="cluster-label" x="${cx:.1f}" y="${(cy - 14.0):.1f}" font-size="9" font-weight="bold" fill="#333" text-anchor="middle" paint-order="stroke" stroke="white" stroke-width="3">${desc}</text>'
 	}
 	sb << '  </g>'
 

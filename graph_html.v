@@ -1,26 +1,34 @@
 module graphify
 
 // emit_graph_html wraps emit_svg's rendering in an interactive HTML page: a
-// legend mapping each community's color to its label and size,
-// hover-to-highlight (a node and its direct neighbors light up, everything
-// else dims) using the data-id/data-from/data-to attributes emit_svg's
-// output already carries, and scroll-to-zoom + drag-to-pan on the SVG
-// viewBox. No CDN dependency, no build step -- this is meant to be one
-// self-contained file a browser opens directly, matching the rest of
-// graphify's local-only design (nothing here calls out to anything, same as
-// the CLI itself).
+// legend mapping each community's color to its label, size, and location in
+// the source tree; hover-to-highlight (a node and its direct neighbors
+// light up, everything else dims) using the data-id/data-from/data-to
+// attributes emit_svg's output already carries; and scroll-to-zoom +
+// drag-to-pan on the SVG viewBox. No CDN dependency, no build step -- this
+// is meant to be one self-contained file a browser opens directly, matching
+// the rest of graphify's local-only design (nothing here calls out to
+// anything, same as the CLI itself).
 //
-// The zoom/pan exists because the hover target otherwise isn't practically
-// usable: confirmed directly with a real WebDriver-synthesized mouse move
-// (not a JS-dispatched event) that a rendered node was only ~4x4 CSS
-// pixels at the default view -- correct in principle, unusable in practice.
-// Each node's actual hover target (emit_svg's `.hit` circle) is already
-// enlarged independently of its visible size, and zooming in shrinks the
-// gap the rest of the way.
+// Semantic zoom: at the default view only the per-community labels are
+// visible (name, member count, and where in the source tree that community
+// actually lives -- see community_location; a community's label alone,
+// its most internally-connected member's name, doesn't say what part of
+// the codebase it corresponds to). Individual symbol labels fade in once
+// zoomed in past a threshold, so the first thing shown is a high-level map
+// you can then drill into, not a wall of overlapping per-symbol text.
+//
+// The zoom/pan also exists because the hover target otherwise isn't
+// practically usable: confirmed directly with a real WebDriver-synthesized
+// mouse move (not a JS-dispatched event) that a rendered node was only
+// ~4x4 CSS pixels at the default view -- correct in principle, unusable in
+// practice. Each node's actual hover target (emit_svg's `.hit` circle) is
+// already enlarged independently of its visible size, and zooming in
+// shrinks the gap the rest of the way.
 pub fn (g Graph) emit_graph_html() string {
 	idx := g.index()
 	nodes, total, comms := layout_communities(g, idx)
-	svg := render_svg(nodes, idx, total)
+	svg := render_svg(nodes, idx, total, comms)
 
 	mut shown_communities := map[int]bool{}
 	for n in nodes {
@@ -33,7 +41,9 @@ pub fn (g Graph) emit_graph_html() string {
 			continue // every member of this community got cut by the svg_max_nodes cap
 		}
 		color := node_color(i)
-		legend << '    <div><span class="swatch" style="background:${color}"></span>${xml_escape(c.label)} <span class="count">(${c.members.len})</span></div>'
+		loc := community_location(idx, c.members)
+		loc_html := if loc == '' { '' } else { '<span class="loc">${xml_escape(loc)}</span>' }
+		legend << '    <div><span class="swatch" style="background:${color}"></span>${xml_escape(c.label)} <span class="count">(${c.members.len})</span>${loc_html}</div>'
 	}
 
 	mut sb := []string{}
@@ -49,6 +59,7 @@ pub fn (g Graph) emit_graph_html() string {
 	sb << '  #legend div { margin: 3px 0; white-space: nowrap; }'
 	sb << '  #legend .swatch { display: inline-block; width: 10px; height: 10px; margin-right: 6px; border-radius: 2px; vertical-align: middle; }'
 	sb << '  #legend .count { color: #888; }'
+	sb << '  #legend .loc { display: block; color: #aaa; font-size: 10px; margin-left: 16px; }'
 	sb << '  #caption { position: fixed; top: 10px; right: 10px; background: white; border: 1px solid #ccc; border-radius: 4px; padding: 6px 10px; font-size: 11px; color: #555; }'
 	sb << '  #info { position: fixed; bottom: 10px; left: 10px; background: white; border: 1px solid #ccc; border-radius: 4px; padding: 8px 12px; font-size: 12px; display: none; box-shadow: 0 1px 4px rgba(0,0,0,0.15); }'
 	sb << '  #hint { position: fixed; bottom: 10px; right: 10px; background: white; border: 1px solid #ccc; border-radius: 4px; padding: 6px 10px; font-size: 11px; color: #888; }'
@@ -59,6 +70,15 @@ pub fn (g Graph) emit_graph_html() string {
 	sb << '  svg .node, svg line { transition: opacity 0.1s; }'
 	sb << '  svg text { pointer-events: none; }'
 	sb << '  svg .dim { opacity: 0.12; }'
+	// Semantic zoom: at the default, zoomed-out view only the bold
+	// per-community labels (emit_svg's "cluster-label") are visible, so the
+	// first thing you see is a high-level map, not a wall of overlapping
+	// per-symbol text. Individual "node-label"s fade in once svg.zoomed-in
+	// is set (see the wheel handler below); the cluster labels stay visible
+	// throughout since there are only a few dozen of them at most, not
+	// enough to be clutter.
+	sb << '  svg text.node-label { opacity: 0; transition: opacity 0.15s; }'
+	sb << '  svg.zoomed-in text.node-label { opacity: 1; }'
 	sb << '</style>'
 	sb << '</head>'
 	sb << '<body>'
@@ -148,6 +168,17 @@ const js_interactivity = '
     return pt.matrixTransform(svg.getScreenCTM().inverse());
   }
 
+  // Individual symbol labels only earn their clutter once you have
+  // deliberately zoomed in on something -- past ~35% of the original
+  // extent, chosen so a couple of scroll notches on a specific cluster
+  // reveals its member names without needing to zoom in so far that you
+  // lose the surrounding context entirely.
+  var ZOOM_LABEL_THRESHOLD = 0.35;
+  function updateZoomClass() {
+    var ratio = svg.viewBox.baseVal.width / svg._origW;
+    svg.classList.toggle("zoomed-in", ratio < ZOOM_LABEL_THRESHOLD);
+  }
+
   svg.addEventListener("wheel", function(e) {
     e.preventDefault();
     var vb = svg.viewBox.baseVal;
@@ -161,6 +192,7 @@ const js_interactivity = '
     vb.y = p.y - (p.y - vb.y) * factor;
     vb.width = newW;
     vb.height = vb.height * factor;
+    updateZoomClass();
   }, { passive: false });
   svg._origW = svg.viewBox.baseVal.width;
 

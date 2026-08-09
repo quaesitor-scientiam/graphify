@@ -748,6 +748,116 @@ fn test_emit_graph_html_structure() {
 	assert out.contains('h2 class="sr-only"') // screen-reader summary, per artifact accessibility convention
 }
 
+fn location_test_graph() Graph {
+	mut g := Graph{}
+	g.symbols = [
+		Symbol{
+			id:   'a1'
+			name: 'a1'
+			kind: .function
+			file: 'v/checker/checker.v'
+		},
+		Symbol{
+			id:   'a2'
+			name: 'a2'
+			kind: .function
+			file: 'v/checker/infix.v'
+		},
+		Symbol{
+			id:   'a3'
+			name: 'a3'
+			kind: .function
+			file: 'v/checker/infix.v'
+		},
+		Symbol{
+			id:   'b1'
+			name: 'b1'
+			kind: .function
+			file: 'v/parser/parser.v'
+		},
+	]
+	// communities() only clusters nodes that have edges (build_wgraph draws
+	// from idx.edges) -- a graph with symbols but no connectivity data
+	// finds nothing to cluster, so this needs real edges, not just symbols.
+	g.edges = [
+		Edge{
+			from: 'a1'
+			to:   'a2'
+			kind: .calls
+		},
+		Edge{
+			from: 'a2'
+			to:   'a3'
+			kind: .calls
+		},
+		Edge{
+			from: 'a1'
+			to:   'a3'
+			kind: .calls
+		},
+		Edge{
+			from: 'a1'
+			to:   'b1'
+			kind: .calls
+		},
+	]
+	return g
+}
+
+fn test_community_location_single_directory() {
+	g := location_test_graph()
+	idx := g.index()
+	loc := community_location(idx, ['a1', 'a2', 'a3'])
+	assert loc == 'v/checker'
+}
+
+fn test_community_location_majority_directory() {
+	g := location_test_graph()
+	idx := g.index()
+	// 3 of 4 members in v/checker -- a clear (75%) majority
+	loc := community_location(idx, ['a1', 'a2', 'a3', 'b1'])
+	assert loc == 'v/checker +1 more dir'
+}
+
+fn test_community_location_no_majority() {
+	mut g := Graph{}
+	g.symbols = [
+		Symbol{
+			id:   'x1'
+			name: 'x1'
+			kind: .function
+			file: 'v/checker/checker.v'
+		},
+		Symbol{
+			id:   'x2'
+			name: 'x2'
+			kind: .function
+			file: 'v/parser/parser.v'
+		},
+	]
+	idx := g.index()
+	// no single directory reaches a majority -- report a count, don't guess
+	loc := community_location(idx, ['x1', 'x2'])
+	assert loc == '2 directories'
+}
+
+fn test_emit_svg_has_cluster_labels_with_location() {
+	g := location_test_graph()
+	out := g.emit_svg()
+	assert out.contains('class="cluster-label"')
+	assert out.contains('v/checker') // the community's location shows up on-canvas
+}
+
+fn test_emit_graph_html_legend_shows_location() {
+	g := location_test_graph()
+	out := g.emit_graph_html()
+	assert out.contains('class="loc"')
+	assert out.contains('v/checker')
+	// semantic zoom: node labels start hidden, a zoom-triggered class reveals them
+	assert out.contains('text.node-label { opacity: 0')
+	assert out.contains('svg.zoomed-in text.node-label { opacity: 1')
+}
+
 fn test_export_emits_one_node_per_colliding_id() {
 	// caught live: this project's own files all declare `module graphify`,
 	// so a naive one-node-per-raw-symbol export produced several
