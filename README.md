@@ -106,7 +106,26 @@ graphify merge-graphs a/graph.json b/graph.json --out merged.json   # combine tw
 graphify communities --resolution 1.5          # split the graph into subsystems
 graphify export graphml --out graph.graphml    # for Gephi, yEd, Cytoscape, NetworkX
 graphify export cypher  --out graph.cypher     # for Neo4j: cypher-shell < graph.cypher
+graphify export svg     --out graph.svg        # static, community-clustered node-link diagram
+graphify export html    --out graph.html       # the same, interactive: hover to highlight neighbors
 ```
+
+**SVG/HTML.** Nodes are laid out by community (see Communities above), not by
+a force-directed simulation: communities are arranged around an outer
+circle, each community's own members around a smaller circle centered on
+its spot. Deterministic trigonometry instead of an iterative physics
+simulation that would need its own convergence/quality verification the way
+communities.v's Louvain implementation did — genuine physical realism isn't
+the goal, showing which symbols cluster into which subsystem (and roughly
+how large each one is) is. Node size is degree, color is community, hovering
+a node in the HTML version highlights it and its direct neighbors and shows
+its name/kind/id — plain DOM/SVG event handling, no framework, no CDN
+dependency, matching the rest of graphify's fully local design. Caps at 300
+symbols (the highest-degree members of each community, kept proportional to
+that community's own size so a few giant communities can't crowd out every
+small one) since a large real codebase's full node count is too much to
+usefully render or even open; a rendering that got capped says so in an
+HTML comment / on-page caption rather than silently passing as complete.
 
 **Export.** Both formats emit one node per unique symbol id via `Index.by_id`
 rather than one per raw `Symbol`, and only resolved edges (`Index.edges`) —
@@ -386,4 +405,4 @@ Phase 1 (engine) — done; V only.
 - [x] Phase 5, **`merge-graphs`** — combines any number of previously-extracted graphs into one, with every id namespaced by its source's label (default: root directory name, deduplicated with `-2`/`-3`/... on repeat) so a shared module name like `main` — the implicit module of every standalone V program — can never collide across inputs. `get_body` is the one operation that doesn't carry over cleanly to a merged graph; see Usage.
 - [x] Phase 5, **`communities`** — Louvain-style modularity optimization (local-moving + multi-level aggregation) plus a connectivity-guaranteeing split pass, standing in for the Leiden paper's randomized refinement phase; see Usage for exactly what that trades away. Verified against Zachary's Karate Club (correctly separates its two documented rival factions every run; modularity reliably well above a random/degenerate partition across dozens of test runs) and against real V codebases, where the resulting communities are recognizable subsystems — `Checker`, `Builder`, `Parser`, `Fmt`, `JsGen`, `Table`, `Scope` on the V compiler repo, not noise. Surfaced a real, pre-existing limitation rather than papering over it: `Index.by_id` collapses distinct declarations that share an id across build units (every standalone `main` program above all) into one node, which without `defines`-edge exclusion produced an artificial supermassive "main" community; excluding containment edges (`defines`/`imports`/`implements`) from community weight reduces this substantially and is independently well-motivated (containment isn't interaction), but the underlying id-collision issue is a graph-model change, not something fixed here.
 - [x] Phase 5, **GraphML/Cypher export** — both formats emit one node per unique id (via `Index.by_id`, not the raw `Symbol` list) and only resolved edges, for the reasons the Usage section explains. A real bug was caught in the process, not just anticipated: a naive one-node-per-raw-`Symbol` version violated the Cypher export's own uniqueness constraint against this project's own files (they all declare `module graphify`), confirmed by actually running the export, not by inspection.
-- [ ] Phase 5 remaining: SVG export, `graph.html`
+- [x] Phase 5, **SVG export and `graph.html`** — both share one layout: communities (see above) arranged around an outer circle, each community's own members around a smaller circle centered on its spot, sized by degree and colored by community. Deterministic trigonometry, not a force-directed simulation — see Usage for why. `graph.html` adds a legend and hover-to-highlight-neighbors (verified directly by dispatching real `mouseenter`/`mouseleave` events in a browser: 156 of 161 nodes correctly dimmed to exactly the hovered node + its true neighbors, cleared fully on mouseleave) — plain DOM/SVG, no framework. Capped at 300 symbols (proportional per-community, highest-degree first) with the cap always disclosed, never silent. This closes out Phase 5.
