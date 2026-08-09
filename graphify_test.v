@@ -103,6 +103,108 @@ fn use() {
 	assert found
 }
 
+fn recv_type_of(edges []Edge, to string) string {
+	for e in edges {
+		if e.kind == .calls && e.to == to {
+			return e.recv_type
+		}
+	}
+	return '<no such call edge>'
+}
+
+fn test_local_receiver_types_the_call() {
+	src := 'module demo
+
+struct Foo {}
+
+fn (f Foo) bar() {}
+
+fn use() {
+	x := Foo{}
+	x.bar()
+}
+'
+	_, edges := extract_v_text(src, 'demo.v')
+	assert recv_type_of(edges, 'bar') == 'demo.Foo'
+}
+
+fn test_pointer_local_receiver_types_the_call() {
+	src := 'module demo
+
+struct Foo {}
+
+fn (f &Foo) bar() {}
+
+fn use() {
+	x := &Foo{}
+	x.bar()
+}
+'
+	_, edges := extract_v_text(src, 'demo.v')
+	assert recv_type_of(edges, 'bar') == 'demo.Foo'
+}
+
+fn test_local_receiver_type_does_not_leak_out_of_its_block() {
+	// `x` declared inside the if-branch is scoped to that branch. `bar` and
+	// `baz` are distinct callee names on purpose: collect_calls records only
+	// the first edge per name per function (a pre-existing dedup, unrelated
+	// to scoping), so reusing one name for both calls would hide whichever
+	// one lost the race rather than showing whether the type actually leaked.
+	src := 'module demo
+
+struct Foo {}
+
+fn (f Foo) bar() {}
+
+fn (f Foo) baz() {}
+
+fn use(cond bool) {
+	if cond {
+		x := Foo{}
+		x.bar()
+	}
+	x.baz()
+}
+'
+	_, edges := extract_v_text(src, 'demo.v')
+	assert recv_type_of(edges, 'bar') == 'demo.Foo' // inside the if-branch
+	assert recv_type_of(edges, 'baz') == '' // after the branch -- not the same `x`
+}
+
+fn test_local_with_uncertain_initializer_is_not_tracked() {
+	// `compute()`'s return type is a checker fact, not a parser one -- the
+	// exact case the README documents as genuinely requiring the checker.
+	src := 'module demo
+
+fn use() {
+	x := compute()
+	x.bar()
+}
+'
+	_, edges := extract_v_text(src, 'demo.v')
+	assert recv_type_of(edges, 'bar') == ''
+}
+
+fn test_local_reassignment_does_not_clear_its_declared_type() {
+	// V is statically typed: a `:=`-declared local's type cannot change for
+	// the rest of its scope no matter what a later plain `=` looks like, so
+	// track_assign deliberately ignores `=` rather than invalidating on it.
+	src := 'module demo
+
+struct Foo {}
+
+fn (f Foo) bar() {}
+
+fn use() {
+	mut x := Foo{}
+	x = Foo{}
+	x.bar()
+}
+'
+	_, edges := extract_v_text(src, 'demo.v')
+	assert recv_type_of(edges, 'bar') == 'demo.Foo'
+}
+
 fn test_resolve_callee_provenance() {
 	// a globally unique name leaves no real candidate to choose between --
 	// extracted, not inferred, no matter how the rest of resolve_callee reads.

@@ -355,13 +355,16 @@ fn add_ref(from string, typename string, mut edges []Edge, mut seen map[string]b
 // its own receiver, so `t.foo()` can be attributed without type inference.
 // table/mod_id serve the same purpose for a literal receiver (`Foo{}.bar()`):
 // the type is on the literal itself, also with no inference needed, but
-// reading it needs the table (see walk_call).
+// reading it needs the table (see walk_call). locals is the same idea one
+// step removed: `x := Foo{}` followed by `x.bar()`, tracked name -> recv_type
+// as walk_stmts descends a function body (see track_assign).
 struct CallCtx {
 	from      string
 	recv_name string // receiver variable, '' when the caller is not a method
 	recv_type string // id of the receiver's type, e.g. `v3.transform.Transformer`
 	table     &ast.Table = unsafe { nil }
 	mod_id    string
+	locals    map[string]string
 }
 
 // collect_calls records one `calls` edge per *distinct* callee invoked anywhere
@@ -374,13 +377,28 @@ fn collect_calls(stmts []ast.Stmt, ctx CallCtx, mut edges []Edge) {
 	walk_stmts(stmts, ctx, mut edges, mut seen)
 }
 
+// walk_stmts walks one block's statements in order, threading a `mut cur`
+// ctx through the loop so a local typed by walk_stmt (see track_assign) is
+// visible to the *rest of this same block*, then discarded: each nested
+// block (an if/match branch, a for body, ...) starts its own walk_stmts call
+// from the ctx as it stood on entry, so a local declared inside never leaks
+// to a sibling branch or to code after the block -- ordinary lexical scoping,
+// which V's map-copy-on-clone semantics gives for free as long as an update
+// is only ever applied by replacing ctx, never by mutating a shared map.
 fn walk_stmts(stmts []ast.Stmt, ctx CallCtx, mut edges []Edge, mut seen map[string]bool) {
+	mut cur := ctx
 	for stmt in stmts {
-		walk_stmt(stmt, ctx, mut edges, mut seen)
+		cur = walk_stmt(stmt, cur, mut edges, mut seen)
 	}
 }
 
-fn walk_stmt(stmt ast.Stmt, ctx CallCtx, mut edges []Edge, mut seen map[string]bool) {
+// walk_stmt returns the ctx that should apply to whatever comes *after*
+// `stmt` in the same block -- unchanged for everything except an AssignStmt,
+// which may add or leave alone a tracked local (see track_assign). A nested
+// block's own updates (an if-branch's locals, a for-body's locals) are never
+// reflected in this return value; only walk_stmts' internal `cur` sees them,
+// and that is discarded when the nested walk_stmts call returns.
+fn walk_stmt(stmt ast.Stmt, ctx CallCtx, mut edges []Edge, mut seen map[string]bool) CallCtx {
 	match stmt {
 		ast.ExprStmt {
 			walk_expr(stmt.expr, ctx, mut edges, mut seen)
@@ -397,6 +415,7 @@ fn walk_stmt(stmt ast.Stmt, ctx CallCtx, mut edges []Edge, mut seen map[string]b
 			for e in stmt.right {
 				walk_expr(e, ctx, mut edges, mut seen)
 			}
+			return track_assign(stmt, ctx)
 		}
 		ast.AssertStmt {
 			walk_expr(stmt.expr, ctx, mut edges, mut seen)
@@ -412,10 +431,13 @@ fn walk_stmt(stmt ast.Stmt, ctx CallCtx, mut edges []Edge, mut seen map[string]b
 			walk_stmts(stmt.stmts, ctx, mut edges, mut seen)
 		}
 		ast.ForCStmt {
-			walk_stmt(stmt.init, ctx, mut edges, mut seen)
-			walk_expr(stmt.cond, ctx, mut edges, mut seen)
-			walk_stmt(stmt.inc, ctx, mut edges, mut seen)
-			walk_stmts(stmt.stmts, ctx, mut edges, mut seen)
+			// `init`'s scope is the whole loop -- cond, inc, and body all see
+			// it -- but not code after the loop, so its typed ctx is used
+			// only for those three and never returned to our own caller.
+			loop_ctx := walk_stmt(stmt.init, ctx, mut edges, mut seen)
+			walk_expr(stmt.cond, loop_ctx, mut edges, mut seen)
+			walk_stmt(stmt.inc, loop_ctx, mut edges, mut seen)
+			walk_stmts(stmt.stmts, loop_ctx, mut edges, mut seen)
 		}
 		ast.Block {
 			walk_stmts(stmt.stmts, ctx, mut edges, mut seen)
@@ -425,6 +447,68 @@ fn walk_stmt(stmt ast.Stmt, ctx CallCtx, mut edges []Edge, mut seen map[string]b
 		}
 		else {}
 	}
+	return ctx
+}
+
+// track_assign updates the walker's view of local variable types for one
+// assignment, the same idea as a literal receiver one step removed: `x :=
+// Foo{}` types `x` the same way `Foo{}.bar()` types itself, no inference.
+// Tracked only for `:=` (token.Kind.decl_assign) with exactly one name on
+// the left and a directly-typed literal (`Foo{}` or `&Foo{}`) on the right.
+// A later plain `x = ...` is deliberately left untouched rather than
+// invalidated: V is statically typed, so a `:=`-declared local's type cannot
+// change for the rest of its scope regardless of what a later reassignment's
+// right side looks like -- there is nothing to invalidate. Anything else
+// (multi-value assignment, destructuring, a non-Ident target, a right side
+// that isn't a literal) is left untracked rather than guessed at.
+fn track_assign(stmt ast.AssignStmt, ctx CallCtx) CallCtx {
+	if stmt.op != .decl_assign || stmt.left.len != 1 || stmt.right.len != 1 {
+		return ctx
+	}
+	left := stmt.left[0]
+	if left !is ast.Ident {
+		return ctx
+	}
+	name := (left as ast.Ident).name
+	si := struct_init_of(stmt.right[0])
+	if si.typ == ast.void_type || si.typ == 0 {
+		return ctx
+	}
+	mut locals := ctx.locals.clone()
+	locals[name] = recv_type_str(ctx.table, ctx.mod_id, si.typ)
+	return CallCtx{
+		from:      ctx.from
+		recv_name: ctx.recv_name
+		recv_type: ctx.recv_type
+		table:     ctx.table
+		mod_id:    ctx.mod_id
+		locals:    locals
+	}
+}
+
+// struct_init_of unwraps a single `&` prefix (`&Foo{}`) to find a directly
+// written struct literal, or returns a zero-valued StructInit (typ ==
+// ast.void_type) when `e` isn't one of those two shapes -- the same "no
+// type, don't guess" contract walk_call already applies to a literal
+// receiver.
+fn struct_init_of(e ast.Expr) ast.StructInit {
+	if e is ast.StructInit {
+		return e
+	}
+	if e is ast.PrefixExpr && e.op == .amp && e.right is ast.StructInit {
+		return e.right as ast.StructInit
+	}
+	return ast.StructInit{}
+}
+
+// recv_type_str renders a resolved ast.Type in the `mod.Type` format
+// recv_type uses everywhere: clean_type strips the *current* module's own
+// prefix (see its own doc comment), so this re-adds it only when clean_type
+// actually stripped something, and leaves an already-qualified foreign type
+// (`other.Bar`) untouched.
+fn recv_type_str(table &ast.Table, mod_id string, typ ast.Type) string {
+	resolved := clean_type(table, typ, mod_id).trim_left('&')
+	return if resolved.contains('.') { resolved } else { '${mod_id}.${resolved}' }
 }
 
 fn walk_call(ce ast.CallExpr, ctx CallCtx, mut edges []Edge, mut seen map[string]bool) {
@@ -438,16 +522,24 @@ fn walk_call(ce ast.CallExpr, ctx CallCtx, mut edges []Edge, mut seen map[string
 		// than whatever module was actually written, so `other.Bar{}` inside
 		// `demo` reports itself as `demo.Bar` (confirmed empirically, not
 		// from the field's doc comment). `.typ`, resolved through the table,
-		// does not have that bug. Any other receiver shape is left blank
-		// rather than guessed at.
+		// does not have that bug. A local whose own `:=` named its type
+		// (`x := Foo{}` then `x.bar()`) is the same idea once removed, tracked
+		// in ctx.locals by track_assign as walk_stmts descends the body. Any
+		// other receiver shape is left blank rather than guessed at.
 		mut rt := ''
 		if ce.is_method {
 			left := ce.left
-			if left is ast.Ident && ctx.recv_name != '' && left.name == ctx.recv_name {
-				rt = ctx.recv_type
+			if left is ast.Ident {
+				if ctx.recv_name != '' && left.name == ctx.recv_name {
+					rt = ctx.recv_type
+				} else {
+					t := ctx.locals[left.name]
+					if t != '' {
+						rt = t
+					}
+				}
 			} else if left is ast.StructInit && left.typ != ast.void_type && left.typ != 0 {
-				resolved := clean_type(ctx.table, left.typ, ctx.mod_id).trim_left('&')
-				rt = if resolved.contains('.') { resolved } else { '${ctx.mod_id}.${resolved}' }
+				rt = recv_type_str(ctx.table, ctx.mod_id, left.typ)
 			}
 		}
 		edges << Edge{
