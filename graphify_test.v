@@ -664,6 +664,113 @@ fn test_communities_resolution_increases_community_count() {
 	assert high.len >= low.len
 }
 
+fn export_test_graph() Graph {
+	mut g := Graph{}
+	g.symbols = [
+		Symbol{
+			id:        'demo.greet'
+			name:      'greet'
+			kind:      .function
+			file:      'demo.v'
+			line:      5
+			signature: 'fn greet(name string) []T<int> & "quoted" & back\\slash'
+		},
+		Symbol{
+			id:   'demo.main'
+			name: 'main'
+			kind: .function
+			file: 'demo.v'
+			line: 1
+		},
+	]
+	g.edges = [
+		Edge{
+			from:       'demo.main'
+			to:         'demo.greet'
+			kind:       .calls
+			provenance: .inferred
+		},
+		Edge{
+			from: 'demo.main'
+			to:   'nonexistent_external_call'
+			kind: .calls
+		},
+	]
+	return g
+}
+
+fn test_export_emits_one_node_per_colliding_id() {
+	// caught live: this project's own files all declare `module graphify`,
+	// so a naive one-node-per-raw-symbol export produced several
+	// `CREATE (:Symbol:Module {id: 'graphify', ...})` statements, and the
+	// *second* one failed outright against the uniqueness constraint the
+	// same export emits. Simulates that directly: two module symbols
+	// sharing one id, as if from two different files.
+	mut g := Graph{}
+	g.symbols = [
+		Symbol{
+			id:   'graphify'
+			name: 'graphify'
+			kind: .mod_
+			file: 'a.v'
+		},
+		Symbol{
+			id:   'graphify'
+			name: 'graphify'
+			kind: .mod_
+			file: 'b.v'
+		},
+	]
+	graphml := g.emit_graphml()
+	assert graphml.count('<node id="graphify">') == 1
+
+	cypher := g.emit_cypher()
+	assert cypher.count("CREATE (:Symbol:Module {id: 'graphify'") == 1
+}
+
+fn test_emit_graphml_structure_and_escaping() {
+	g := export_test_graph()
+	out := g.emit_graphml()
+
+	assert out.starts_with('<?xml version="1.0" encoding="UTF-8"?>')
+	assert out.contains('<graphml')
+	assert out.contains('<node id="demo.greet">')
+	assert out.contains('<node id="demo.main">')
+
+	// dangerous characters in the signature must come out escaped, and the
+	// raw unescaped forms must not survive into the data content
+	assert out.contains('&lt;int&gt;')
+	assert out.contains('&amp;')
+	assert out.contains('&quot;quoted&quot;')
+	assert !out.contains('[]T<int>') // raw, unescaped -- would be invalid XML
+
+	// the resolved edge is present with its provenance...
+	assert out.contains('<edge source="demo.main" target="demo.greet">')
+	assert out.contains('<data key="e_prov">inferred</data>')
+	// ...the edge to an unresolved external name is not: GraphML's
+	// source/target must reference declared nodes, and idx.edges already
+	// excludes anything that never resolved
+	assert !out.contains('nonexistent_external_call')
+}
+
+fn test_emit_cypher_structure_and_escaping() {
+	g := export_test_graph()
+	out := g.emit_cypher()
+
+	assert out.contains('CREATE CONSTRAINT graphify_id IF NOT EXISTS FOR (n:Symbol) REQUIRE n.id IS UNIQUE;')
+	assert out.contains(":Function {id: 'demo.greet'")
+	assert out.contains(":Function {id: 'demo.main'")
+
+	// the literal backslash in the signature comes out doubled (escaped)...
+	assert out.contains('back\\\\slash')
+	// ...but <, >, &, " are Cypher-safe as-is inside a single-quoted string
+	// and must survive unescaped -- XML's escaping rules don't apply here
+	assert out.contains('[]T<int> & "quoted"')
+
+	assert out.contains("MATCH (a:Symbol {id: 'demo.main'}), (b:Symbol {id: 'demo.greet'}) CREATE (a)-[:CALLS {provenance: 'inferred'}]->(b);")
+	assert !out.contains('nonexistent_external_call')
+}
+
 fn test_skeleton_is_bodyless() {
 	syms, _ := extract_v_text(sample, 'demo.v')
 	mut g := Graph{}

@@ -17,6 +17,8 @@ usage:
                                             combine graphs into one, namespaced by label
   graphify communities [--resolution N] [--restarts N]
                                             split the graph into subsystems (Leiden-style)
+  graphify export <graphml|cypher> [--out F]
+                                            write the graph in that format
 
 query options:
   --budget <n>   token budget for the result (default 2000)
@@ -32,6 +34,9 @@ communities options:
                      larger ones (default 1.0)
   --restarts <n>    randomized attempts, keeping the best result -- higher is
                      slower but more reliable (default 20)
+
+export options:
+  --out <file>  output path (default ./graph.<format>)
 
 common options:
   --graph <file>   graph.json to read (default ./graphify-out/graph.json)
@@ -72,6 +77,9 @@ fn main() {
 		}
 		'communities' {
 			cmd_communities(rest)
+		}
+		'export' {
+			cmd_export(rest)
 		}
 		'_parse-batch' {
 			cmd_parse_batch(rest)
@@ -228,6 +236,29 @@ fn cmd_communities(args []string) {
 		more := if c.members.len > shown.len { ' (+${c.members.len - shown.len} more)' } else { '' }
 		println('- ${c.label} (${c.members.len} members): ${names.join(', ')}${more}')
 	}
+}
+
+fn cmd_export(args []string) {
+	format := positional(args, 0) or { fail('export: needs a format (graphml, cypher)') }
+	g := load(args)
+	mut content := ''
+	mut default_out := ''
+	match format {
+		'graphml' {
+			content = g.emit_graphml()
+			default_out = 'graph.graphml'
+		}
+		'cypher' {
+			content = g.emit_cypher()
+			default_out = 'graph.cypher'
+		}
+		else {
+			fail('export: unknown format "${format}" (want graphml or cypher)')
+		}
+	}
+	out := str_flag(args, '--out') or { default_out }
+	os.write_file(out, content) or { fail('write failed: ${err}') }
+	println('wrote ${out}')
 }
 
 // store_dir returns the central graph store (--store flag or GRAPHIFY_STORE
