@@ -209,10 +209,22 @@ fn render_svg(nodes []LaidOutNode, idx Index, total int) string {
 	for n in nodes {
 		r := 3.0 + (if n.degree > 20 { 20.0 } else { f64(n.degree) }) * 0.4
 		color := node_color(n.community)
-		sb << '    <circle data-id="${xml_escape(n.id)}" cx="${n.x:.1f}" cy="${n.y:.1f}" r="${r:.1f}" fill="${color}" fill-opacity="0.85" stroke="#333" stroke-width="0.4">'
-		sb << '      <title>${xml_escape(n.label)} (${xml_escape(n.kind.str())})</title>'
-		sb << '    </circle>'
-		sb << '    <text data-id="${xml_escape(n.id)}" x="${(n.x + r + 2):.1f}" y="${(n.y + 3):.1f}" font-size="7" fill="#222">${xml_escape(n.label)}</text>'
+		// `.hit` is a much larger invisible circle purely for hovering: the
+		// visible dot stays small (its size encodes degree), but a real
+		// mouse cursor hitting a 3-11 SVG-unit circle is unrealistic --
+		// confirmed directly with a WebDriver-synthesized pointer move
+		// landing dead-center on a node and finding its rendered size was
+		// only ~4x4 CSS pixels. `opacity` on a <g> composites the whole
+		// group as one unit, so emit_graph_html can dim/highlight an entire
+		// node (dot + label) by toggling one class on this wrapper.
+		hit_r := if r + 8.0 > 14.0 { r + 8.0 } else { 14.0 }
+		sb << '    <g class="node" data-id="${xml_escape(n.id)}">'
+		sb << '      <circle class="hit" cx="${n.x:.1f}" cy="${n.y:.1f}" r="${hit_r:.1f}" fill="transparent"/>'
+		sb << '      <circle class="dot" cx="${n.x:.1f}" cy="${n.y:.1f}" r="${r:.1f}" fill="${color}" fill-opacity="0.85" stroke="#333" stroke-width="0.4">'
+		sb << '        <title>${xml_escape(n.label)} (${xml_escape(n.kind.str())})</title>'
+		sb << '      </circle>'
+		sb << '      <text x="${(n.x + r + 2):.1f}" y="${(n.y + 3):.1f}" font-size="7" fill="#222">${xml_escape(n.label)}</text>'
+		sb << '    </g>'
 	}
 	sb << '  </g>'
 
