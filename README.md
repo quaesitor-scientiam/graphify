@@ -104,7 +104,26 @@ graphify body     build_graph                  # just that declaration's source
 graphify skeleton .                            # body-less skeleton of a path
 graphify merge-graphs a/graph.json b/graph.json --out merged.json   # combine two graphs
 graphify communities --resolution 1.5          # split the graph into subsystems
+graphify export graphml --out graph.graphml    # for Gephi, yEd, Cytoscape, NetworkX
+graphify export cypher  --out graph.cypher     # for Neo4j: cypher-shell < graph.cypher
 ```
+
+**Export.** Both formats emit one node per unique symbol id via `Index.by_id`
+rather than one per raw `Symbol`, and only resolved edges (`Index.edges`) —
+the same reasoning as `query`/`explain`: an id like `main` (every standalone
+V program's entry module) or `graphify` (this project's own module, declared
+identically in every one of its own files) is shared by several distinct
+real declarations, and an unresolved edge has no real node to point at. This
+isn't just consistency for its own sake — the Cypher export declares a
+uniqueness constraint on `id` for fast edge lookups, and a naive
+one-node-per-raw-symbol version was confirmed to violate that constraint
+against this project's own export (its own files collide on `graphify`),
+failing outright rather than degrading gracefully. GraphML escapes
+`&<>"'`; Cypher property strings escape `\` and `'` only — `<`, `>`, `&`,
+`"` don't need it inside a single-quoted Cypher string, and escaping them
+anyway would corrupt the data (this was cross-checked directly: a signature
+containing all of `<>&"` round-trips unescaped in the Cypher output, escaped
+in the GraphML one).
 
 **Communities.** Splits the graph into densely-interconnected subsystems by
 modularity optimization — the same idea Python Graphify ships as "Communities:
@@ -366,4 +385,5 @@ Phase 1 (engine) — done; V only.
   That is resolved at query time from the raw names already stored in the graph, *not* by emitting `AMBIGUOUS` edges to every candidate as originally sketched: measured on the V compiler repo, real fan-out adds 1.15M edges (4.2× the whole graph), and those guessed links would then leak into `shortest_path` and `query_graph` traversal. Keeping it query-side costs no graph growth and leaves traversal untouched.
 - [x] Phase 5, **`merge-graphs`** — combines any number of previously-extracted graphs into one, with every id namespaced by its source's label (default: root directory name, deduplicated with `-2`/`-3`/... on repeat) so a shared module name like `main` — the implicit module of every standalone V program — can never collide across inputs. `get_body` is the one operation that doesn't carry over cleanly to a merged graph; see Usage.
 - [x] Phase 5, **`communities`** — Louvain-style modularity optimization (local-moving + multi-level aggregation) plus a connectivity-guaranteeing split pass, standing in for the Leiden paper's randomized refinement phase; see Usage for exactly what that trades away. Verified against Zachary's Karate Club (correctly separates its two documented rival factions every run; modularity reliably well above a random/degenerate partition across dozens of test runs) and against real V codebases, where the resulting communities are recognizable subsystems — `Checker`, `Builder`, `Parser`, `Fmt`, `JsGen`, `Table`, `Scope` on the V compiler repo, not noise. Surfaced a real, pre-existing limitation rather than papering over it: `Index.by_id` collapses distinct declarations that share an id across build units (every standalone `main` program above all) into one node, which without `defines`-edge exclusion produced an artificial supermassive "main" community; excluding containment edges (`defines`/`imports`/`implements`) from community weight reduces this substantially and is independently well-motivated (containment isn't interaction), but the underlying id-collision issue is a graph-model change, not something fixed here.
-- [ ] Phase 5 remaining: GraphML/Cypher/SVG export, `graph.html`
+- [x] Phase 5, **GraphML/Cypher export** — both formats emit one node per unique id (via `Index.by_id`, not the raw `Symbol` list) and only resolved edges, for the reasons the Usage section explains. A real bug was caught in the process, not just anticipated: a naive one-node-per-raw-`Symbol` version violated the Cypher export's own uniqueness constraint against this project's own files (they all declare `module graphify`), confirmed by actually running the export, not by inspection.
+- [ ] Phase 5 remaining: SVG export, `graph.html`
