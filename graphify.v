@@ -40,21 +40,18 @@ pub fn build_graph_resilient(root string, worker_exe string, out_dir string) (Gr
 	os.mkdir_all(out_dir) or {}
 
 	files := if os.is_dir(abs_root) {
-		find_source_files(abs_root, ['v'])
+		find_source_files(abs_root)
 	} else {
-		[SourceFile{
-			path: abs_root
-			lang: 'v'
-		}]
+		[abs_root]
 	}
 
 	old_cache := load_cache(out_dir)
 	mut new_cache := []CacheEntry{cap: files.len}
 
 	mut queue := []WorkItem{}
-	for f in files {
-		rel := rel_path(abs_root, f.path)
-		hash := file_hash(f.path)
+	for path in files {
+		rel := rel_path(abs_root, path)
+		hash := file_hash(path)
 		if hash != '' && rel in old_cache && old_cache[rel].hash == hash {
 			// unchanged since the last extract — reuse its symbols/edges
 			// instead of spending a worker parsing it again.
@@ -65,7 +62,7 @@ pub fn build_graph_resilient(root string, worker_exe string, out_dir string) (Gr
 			continue
 		}
 		queue << WorkItem{
-			path: f.path
+			path: path
 			rel:  rel
 			hash: hash
 		}
@@ -163,12 +160,11 @@ pub fn build_graph_resilient(root string, worker_exe string, out_dir string) (Gr
 pub struct Options {
 pub:
 	root       string // directory (or single file) to analyze
-	languages  []string = ['v'] // language ids to include; [] = all supported
-	with_calls bool     = true  // record call edges between functions
+	with_calls bool = true // record call edges between functions
 }
 
-// build_graph walks `opts.root`, parses every supported file with the right
-// backend, and returns the assembled Graph.
+// build_graph walks `opts.root`, parses every `.v` file, and returns the
+// assembled Graph.
 pub fn build_graph(opts Options) Graph {
 	root := os.real_path(opts.root)
 	mut g := Graph{
@@ -176,22 +172,14 @@ pub fn build_graph(opts Options) Graph {
 	}
 
 	files := if os.is_dir(root) {
-		find_source_files(root, opts.languages)
+		find_source_files(root)
 	} else {
-		[
-			SourceFile{
-				path: root
-				lang: lang_by_ext[os.file_ext(root)] or { '' }
-			},
-		]
+		[root]
 	}
 
-	for f in files {
-		rel := rel_path(root, f.path)
-		syms, edges := match f.lang {
-			'v' { extract_v_file(f.path, rel) }
-			else { extract_ts_file(f.path, rel, f.lang) }
-		}
+	for path in files {
+		rel := rel_path(root, path)
+		syms, edges := extract_v_file(path, rel)
 
 		g.symbols << syms
 		if opts.with_calls {
