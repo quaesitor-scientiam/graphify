@@ -664,6 +664,200 @@ fn test_communities_resolution_increases_community_count() {
 	assert high.len >= low.len
 }
 
+// clique_of_cliques_graph builds n_cliques fully-connected cliques of
+// clique_size each, bridged into one connected structure by a single sparse
+// edge between consecutive cliques -- a graph.html drill-down candidate's
+// shape: one big, internally lumpy community with real sub-structure a flat
+// view never reveals.
+fn clique_of_cliques_graph(n_cliques int, clique_size int) Graph {
+	mut g := Graph{}
+	mut id := 0
+	mut clique_members := [][]string{}
+	for c := 0; c < n_cliques; c++ {
+		mut members := []string{}
+		for i := 0; i < clique_size; i++ {
+			sid := 'n${id}'
+			g.symbols << Symbol{
+				id:   sid
+				name: sid
+				kind: .function
+			}
+			members << sid
+			id++
+		}
+		for i := 0; i < members.len; i++ {
+			for j := i + 1; j < members.len; j++ {
+				g.edges << Edge{
+					from: members[i]
+					to:   members[j]
+					kind: .calls
+				}
+			}
+		}
+		clique_members << members
+	}
+	for c := 0; c < n_cliques - 1; c++ {
+		g.edges << Edge{
+			from: clique_members[c][0]
+			to:   clique_members[c + 1][0]
+			kind: .calls
+		}
+	}
+	return g
+}
+
+fn test_communities_within_finds_sub_structure() {
+	g := clique_of_cliques_graph(3, 10) // 3 well-separated 10-node cliques, bridged sparsely
+	mut all_members := []string{}
+	for s in g.symbols {
+		all_members << s.id
+	}
+	result := g.communities_within(all_members, resolution: 1.0, restarts: 15)
+	assert result.len >= 3 // finds (at least) the 3 real cliques, not one inseparable blob
+
+	// partition safety: every input member appears in exactly one output
+	// community -- same shape as test_communities_karate_club_finds_real_structure.
+	mut seen := map[string]int{}
+	for c in result {
+		for id in c.members {
+			seen[id] = seen[id] + 1
+		}
+	}
+	assert seen.len == all_members.len
+	for _, n in seen {
+		assert n == 1
+	}
+
+	// the connectivity guarantee holds at scoped level too -- same walk as
+	// test_communities_are_connected.
+	idx := g.index()
+	for c in result {
+		mut in_group := map[string]bool{}
+		for id in c.members {
+			in_group[id] = true
+		}
+		mut visited := map[string]bool{}
+		mut queue := [c.members[0]]
+		visited[c.members[0]] = true
+		for queue.len > 0 {
+			node := queue.pop()
+			for nb in idx.adj[node] or { []string{} } {
+				if nb in in_group && !visited[nb] {
+					visited[nb] = true
+					queue << nb
+				}
+			}
+		}
+		assert visited.len == c.members.len
+	}
+}
+
+fn test_communities_within_no_internal_edges_returns_empty() {
+	// every "m" node only calls "outside", never each other -- scoped to
+	// just the "m" set, build_wgraph_scoped finds no qualifying edge at
+	// all, exercising its empty-result path rather than crashing.
+	mut g := Graph{}
+	for i in 0 .. 4 {
+		g.symbols << Symbol{
+			id:   'm${i}'
+			name: 'm${i}'
+			kind: .function
+		}
+	}
+	g.symbols << Symbol{
+		id:   'outside'
+		name: 'outside'
+		kind: .function
+	}
+	for i in 0 .. 4 {
+		g.edges << Edge{
+			from: 'm${i}'
+			to:   'outside'
+			kind: .calls
+		}
+	}
+	result := g.communities_within(['m0', 'm1', 'm2', 'm3'], resolution: 1.0)
+	assert result.len == 0
+}
+
+// ring_of_cliques_graph is the classic Fortunato-Barthelemy resolution-limit
+// construction: n_cliques small cliques arranged in a ring, each linked to
+// its two neighbors by one edge. A plain clique-of-cliques (few cliques,
+// one clean bridge) always gets cleanly separated by communities() at the
+// TOP level too -- confirmed directly, not assumed, after several other
+// constructions kept failing this exact way -- so it can never survive as
+// one large top-level community for compute_drill_views to even consider.
+// A large enough ring is different: modularity optimization provably
+// cannot resolve individual cliques past a certain ring size and merges
+// neighbors together instead, reliably producing a genuinely large,
+// still-internally-splittable top-level community the way a real, much
+// bigger codebase's own communities can. Verified empirically (repeated
+// runs) that 400 5-node cliques reliably produces multiple 30+-member
+// merged communities.
+fn ring_of_cliques_graph(n_cliques int, clique_size int) Graph {
+	mut g := Graph{}
+	mut cliques := [][]string{}
+	mut id := 0
+	for c := 0; c < n_cliques; c++ {
+		mut members := []string{}
+		for i := 0; i < clique_size; i++ {
+			sid := 'n${id}'
+			g.symbols << Symbol{
+				id:   sid
+				name: sid
+				kind: .function
+			}
+			members << sid
+			id++
+		}
+		for i := 0; i < members.len; i++ {
+			for j := i + 1; j < members.len; j++ {
+				g.edges << Edge{
+					from: members[i]
+					to:   members[j]
+					kind: .calls
+				}
+			}
+		}
+		cliques << members
+	}
+	for c := 0; c < n_cliques; c++ {
+		nxt := (c + 1) % n_cliques
+		g.edges << Edge{
+			from: cliques[c][0]
+			to:   cliques[nxt][0]
+			kind: .calls
+		}
+	}
+	return g
+}
+
+fn test_emit_graph_html_drill_views_capped_marked_and_disclosed() {
+	// One graph, computed once, checked for all of: some communities are
+	// large enough to be marked drillable and some are not (the size gate
+	// actually filters something, not everything); the number of emitted
+	// drill-views never exceeds drill_max_candidates; and since this ring
+	// produces well over drill_max_candidates qualifying communities, the
+	// "N of M" truncation disclosure is present, not silent.
+	g := ring_of_cliques_graph(400, 5)
+	out := g.emit_graph_html()
+
+	views := out.count('class="drill-view"')
+	badges := out.count('class="drill-badge-legend"')
+	legend_items := out.count('class="legend-item"')
+
+	assert views > 0 // this ring reliably produces qualifying, splittable communities
+	assert views <= drill_max_candidates // the cap is a hard ceiling, never exceeded
+	// occasionally one of the top-drill_max_candidates-by-size communities
+	// fails the "really has >=2 sub-communities" gate and gets skipped
+	// without being backfilled -- allow a little slack rather than
+	// asserting an exact count that isn't actually guaranteed by the code.
+	assert views >= drill_max_candidates - 3
+	assert views == badges // every drill-view has exactly one matching legend badge
+	assert legend_items > badges // not every community qualified -- the size gate filtered some out
+	assert out.contains('large communities include a detail view') // truncation disclosed, not silent
+}
+
 fn export_test_graph() Graph {
 	mut g := Graph{}
 	g.symbols = [

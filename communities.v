@@ -70,9 +70,30 @@ pub:
 
 // communities splits the graph into subsystems.
 pub fn (g Graph) communities(config CommunitiesConfig) []Community {
-	resolution := config.resolution
 	idx := g.index()
 	w0 := build_wgraph(idx)
+	return communities_from_wgraph(idx, w0, config)
+}
+
+// communities_within splits the induced subgraph of `members` into its own
+// sub-communities -- the same modularity optimization as communities(),
+// scoped to one community's own members and the edges between them. Used
+// by graph.html's drill-down (see emit_graph_html): it and communities()
+// both call communities_from_wgraph rather than one calling the other,
+// since communities() is randomized (rand.shuffle + restart-loop-keep-best,
+// no fixed seed) and a second top-level call could return a different
+// partition than the one already rendered, desyncing ids and membership.
+pub fn (g Graph) communities_within(members []string, config CommunitiesConfig) []Community {
+	idx := g.index()
+	w0 := build_wgraph_scoped(idx, members)
+	return communities_from_wgraph(idx, w0, config)
+}
+
+// communities_from_wgraph does the actual optimize/restart/label/renumber
+// work shared by communities() and communities_within() -- split out so a
+// scoped sub-clustering run doesn't have to duplicate it.
+fn communities_from_wgraph(idx Index, w0 WGraph, config CommunitiesConfig) []Community {
+	resolution := config.resolution
 	if w0.nodes.len == 0 {
 		return []
 	}
@@ -208,6 +229,53 @@ fn build_wgraph(idx Index) WGraph {
 			continue
 		}
 		if e.kind !in [EdgeKind.calls, .references, .embeds] {
+			continue
+		}
+		key := pair_key(e.from, e.to)
+		w.weight[key] = w.weight[key] + 1.0
+	}
+	for key, wt in w.weight {
+		parts := key.split('\x01')
+		a, b := parts[0], parts[1]
+		if a !in seen {
+			seen[a] = true
+			w.nodes << a
+		}
+		if b !in seen {
+			seen[b] = true
+			w.nodes << b
+		}
+		w.neighbors[a] << b
+		w.neighbors[b] << a
+		w.degree[a] = w.degree[a] + wt
+		w.degree[b] = w.degree[b] + wt
+		w.total_w += wt
+	}
+	return w
+}
+
+// build_wgraph_scoped is build_wgraph restricted to edges whose endpoints
+// are both in `members` -- used by communities_within to sub-cluster one
+// community's own internal structure without pulling in the rest of the
+// graph. Same edge-kind filter and self-loop drop as build_wgraph; the
+// membership scope is the only difference, so this stays a separate
+// function rather than an optional parameter threaded through the common
+// path everything else calls.
+fn build_wgraph_scoped(idx Index, members []string) WGraph {
+	mut scope := map[string]bool{}
+	for id in members {
+		scope[id] = true
+	}
+	mut w := WGraph{}
+	mut seen := map[string]bool{}
+	for e in idx.edges {
+		if e.from == e.to {
+			continue
+		}
+		if e.kind !in [EdgeKind.calls, .references, .embeds] {
+			continue
+		}
+		if e.from !in scope || e.to !in scope {
 			continue
 		}
 		key := pair_key(e.from, e.to)
