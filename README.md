@@ -107,7 +107,7 @@ graphify communities --resolution 1.5          # split the graph into subsystems
 graphify export graphml --out graph.graphml    # for Gephi, yEd, Cytoscape, NetworkX
 graphify export cypher  --out graph.cypher     # for Neo4j: cypher-shell < graph.cypher
 graphify export svg     --out graph.svg        # static, community-clustered node-link diagram
-graphify export html    --out graph.html       # the same, interactive: hover to highlight, click to lock/trace/zoom
+graphify export html    --out graph.html       # the same, interactive: hover/lock/trace/zoom, + to drill into large communities
 ```
 
 **SVG/HTML.** Nodes are laid out by community (see Communities above), not by
@@ -201,6 +201,63 @@ neighbor/dim counts summing exactly to the total node count, re-clicking a
 locked node cleanly dropping every highlight, and clicking through to a
 neighbor correctly demoting the previous selection while promoting the new
 one.
+
+That "defer unlock until real pointer movement" fix later turned out to
+overcorrect: it dropped a lock on *any* drag, including one starting from
+a locked node — which defeats the reason locking exists, panning or
+scroll-zooming out to see where a highlighted edge actually leads. Fixed
+to only clear a transient, never-locked hover highlight on pan; a
+deliberate lock now survives it. That exposed a second issue directly
+underneath: a real synthesized ~90px drag still made the browser fire a
+trailing `click` event at mouseup, which was immediately re-triggering
+unlock right back through the *other* click handler the moment the pan
+fix stopped dropping it directly — invisible without tracing the actual
+mousedown/mousemove/mouseup/click sequence a real drag produces, not just
+reading the code. Fixed by having the node and background click handlers
+ignore a click that's the tail end of a just-finished drag. Confirmed with
+a real WebDriver-synthesized drag (not a single click): a locked node's
+highlight classes and dim count come out byte-identical before and after
+panning, while the viewBox itself genuinely moved.
+
+**Drill down into large communities.** A large, internally-lumpy community
+gets a small "+" badge next to its legend entry and in-canvas label —
+computed by `communities_within`, a scoped re-run of the same Louvain
+optimization on just that community's own members and edges, gated on it
+actually finding a real split (`>= 2` sub-communities), not just on size
+alone. Clicking the badge reveals a precomputed nested sub-layout, using
+the same deterministic ring layout and node/edge/label rendering as the
+top level, complete with its own directory-location context per
+sub-cluster; an explicit "back to overview" button (not a re-click toggle
+or an implicit zoom-out threshold — this project already learned that
+lesson once, see above) reverses it. Capped at the 10 largest qualifying
+candidates, bounding both the extra clustering cost (each scoped run has
+its own restart loop) and the payload growth, with the truncation
+disclosed on-page ("N of M large communities include a detail view") the
+same way the 300-node cap already is — never silent.
+
+The size threshold (30 members) is empirically grounded, not a guess:
+tuned against the classic Fortunato–Barthelemy "ring of cliques"
+resolution-limit case, the textbook example of a community that plain
+modularity optimization provably cannot resolve further at the top level
+yet still contains real, recoverable sub-structure once analyzed in
+isolation — a plain clique-of-cliques (few cliques, one clean bridge)
+turned out to *always* get cleanly separated by `communities()` at the
+top level too, confirmed directly after several other hand-built test
+graphs kept failing this exact way, which would leave nothing for
+drill-down to ever find.
+
+Two real bugs surfaced only by testing against an actual ~47k-symbol
+codebase, not the smaller synthetic test graphs the feature was built
+against: the drill badge's fixed small offset from the cluster label
+placed it *inside* a large community's own member ring (whose radius
+grows with `sqrt(member count)`), so a real click landed on a member node
+instead — fixed by measuring each community's actual rendered spread and
+placing the badge outside it. And a drill-view's hidden `.dot` circles
+stayed independently clickable even at `opacity: 0`, since only the
+larger `.hit`/`.cluster-hit` targets had an explicit `pointer-events: none`
+override — `opacity` never implies `pointer-events: none` on its own —
+fixed by covering `.dot` too, in both the hidden-drill-view and
+hidden-flat-content directions.
 
 **Export.** Both formats emit one node per unique symbol id via `Index.by_id`
 rather than one per raw `Symbol`, and only resolved edges (`Index.edges`) —
@@ -483,4 +540,5 @@ Phase 1 (engine) — done; V only.
 - [x] Phase 5, **SVG export and `graph.html`** — both share one layout: communities (see above) arranged around an outer circle, each community's own members around a smaller circle centered on its spot, sized by degree and colored by community. Deterministic trigonometry, not a force-directed simulation — see Usage for why. `graph.html` adds a legend, hover-to-highlight-neighbors, and scroll-to-zoom/drag-to-pan — plain DOM/SVG, no framework. Capped at 300 symbols (proportional per-community, highest-degree first) with the cap always disclosed, never silent.
   Shipped once already believing it was verified, then genuinely wasn't: the first pass checked hover by dispatching a synthetic `mouseenter` in JS, which passed because it targets the element directly — it can't catch "the real click target is too small to hit," which is exactly what user feedback then reported. Re-verified with a real WebDriver session (`vebidor`, driving actual Edge) instead: a synthesized *pointer move*, not a dispatched event, landed dead-center on a node and measured its rendered size at ~4×4 CSS pixels. Fixed by decoupling the hover hit-target from the node's degree-sized visible dot (now independently sized, ~3× larger) and adding real zoom/pan, then re-confirmed the same honest way — synthesized pointer move on the new target, a dispatched wheel event, and a real drag — plus visual screenshots at each step.
   Followed by a second round of user feedback shaping this feature further: a high-level view first, with detail revealed while exploring, and per-cluster context since graphify shows no repo directory structure anywhere else. Added semantic zoom — the default view shows one bold label per community (name, count, and `community_location`'s summary of where in the source tree it actually lives) with individual symbol labels hidden until zoomed in past a threshold. Verified the same way as everything else in this feature: real WebDriver zoom on an actual cluster, screenshotted, confirming the map is legible by default and a specific cluster's full member names appear on zooming into it.
-  A third round added click-to-zoom (a legend entry or an in-canvas cluster label zooms the viewBox to fit that community, computed from the rendered nodes' own bounding boxes) and click-to-lock (a node's highlight persists past `mouseleave`, so clicking through its now-visible neighbors traces a path across clusters one click at a time; connecting edges get a distinct accent color instead of merely staying undimmed). Real-browser verification again earned its keep, catching two genuine bugs invisible to a synthetic dispatch or a code read: a `classList.toggle(cls, undefined)` force-argument gotcha that silently inflated the neighbor set to nearly the whole graph, and a `mousedown`-before-`click` ordering bug that broke unlocking a node by clicking it again. Both fixed and reconfirmed the same way — see Usage for the full story. This is the closing item of Phase 5.
+  A third round added click-to-zoom (a legend entry or an in-canvas cluster label zooms the viewBox to fit that community, computed from the rendered nodes' own bounding boxes) and click-to-lock (a node's highlight persists past `mouseleave`, so clicking through its now-visible neighbors traces a path across clusters one click at a time; connecting edges get a distinct accent color instead of merely staying undimmed). Real-browser verification again earned its keep, catching two genuine bugs invisible to a synthetic dispatch or a code read: a `classList.toggle(cls, undefined)` force-argument gotcha that silently inflated the neighbor set to nearly the whole graph, and a `mousedown`-before-`click` ordering bug that broke unlocking a node by clicking it again. Both fixed and reconfirmed the same way — see Usage for the full story.
+  A fourth round added hierarchical drill-down: a large, internally-lumpy community gets a "+" badge that reveals its own precomputed nested sub-layout (via `communities_within`, a scoped Louvain re-run gated on actually finding real sub-structure, not just size), capped at 10 with the truncation disclosed. The size threshold was tuned empirically against the classic Fortunato–Barthelemy ring-of-cliques resolution-limit case after plain clique-of-cliques test graphs kept getting cleanly separated by `communities()` at the top level too, leaving nothing to drill into — see Usage for why that shape doesn't work. Testing against a real ~47k-symbol codebase (not just the synthetic test graphs) caught two more real bugs: a badge positioned inside a large community's own member ring instead of outside it, and hidden drill-view `.dot` circles that stayed clickable at `opacity: 0` since only their larger `.hit`/`.cluster-hit` siblings had an explicit `pointer-events: none`. Both fixed and reconfirmed on the real codebase. A related regression also surfaced and was fixed in the same round: panning was unconditionally dropping a locked highlight, defeating the reason locking exists (surviving exploration); fixing that then exposed a trailing-click-after-a-real-drag issue underneath, only found by tracing the actual mousedown/mousemove/mouseup/click sequence a real drag produces — see Usage for the full story. This is the closing item of Phase 5.
