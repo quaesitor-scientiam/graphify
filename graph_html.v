@@ -4,11 +4,15 @@ module graphify
 // legend mapping each community's color to its label, size, and location in
 // the source tree; hover-to-highlight (a node and its direct neighbors
 // light up, everything else dims) using the data-id/data-from/data-to
-// attributes emit_svg's output already carries; and scroll-to-zoom +
-// drag-to-pan on the SVG viewBox. No CDN dependency, no build step -- this
-// is meant to be one self-contained file a browser opens directly, matching
-// the rest of graphify's local-only design (nothing here calls out to
-// anything, same as the CLI itself).
+// attributes emit_svg's output already carries; clicking a node locks that
+// highlight so it survives the mouse moving away, and clicking a legend
+// entry or an in-canvas cluster label zooms the viewBox to fit that
+// community -- both let you explore without the highlight or the view
+// resetting itself out from under you; and scroll-to-zoom + drag-to-pan on
+// the SVG viewBox. No CDN dependency, no build step -- this is meant to be
+// one self-contained file a browser opens directly, matching the rest of
+// graphify's local-only design (nothing here calls out to anything, same as
+// the CLI itself).
 //
 // Semantic zoom: at the default view only the per-community labels are
 // visible (name, member count, and where in the source tree that community
@@ -43,7 +47,7 @@ pub fn (g Graph) emit_graph_html() string {
 		color := node_color(i)
 		loc := community_location(idx, c.members)
 		loc_html := if loc == '' { '' } else { '<span class="loc">${xml_escape(loc)}</span>' }
-		legend << '    <div><span class="swatch" style="background:${color}"></span>${xml_escape(c.label)} <span class="count">(${c.members.len})</span>${loc_html}</div>'
+		legend << '    <div class="legend-item" data-community="${i}"><span class="swatch" style="background:${color}"></span>${xml_escape(c.label)} <span class="count">(${c.members.len})</span>${loc_html}</div>'
 	}
 
 	mut sb := []string{}
@@ -60,6 +64,8 @@ pub fn (g Graph) emit_graph_html() string {
 	sb << '  #legend .swatch { display: inline-block; width: 10px; height: 10px; margin-right: 6px; border-radius: 2px; vertical-align: middle; }'
 	sb << '  #legend .count { color: #888; }'
 	sb << '  #legend .loc { display: block; color: #aaa; font-size: 10px; margin-left: 16px; }'
+	sb << '  #legend .legend-item { cursor: pointer; border-radius: 3px; }'
+	sb << '  #legend .legend-item:hover { background: #f0f0f0; }'
 	sb << '  #caption { position: fixed; top: 10px; right: 10px; background: white; border: 1px solid #ccc; border-radius: 4px; padding: 6px 10px; font-size: 11px; color: #555; }'
 	sb << '  #info { position: fixed; bottom: 10px; left: 10px; background: white; border: 1px solid #ccc; border-radius: 4px; padding: 8px 12px; font-size: 12px; display: none; box-shadow: 0 1px 4px rgba(0,0,0,0.15); }'
 	sb << '  #hint { position: fixed; bottom: 10px; right: 10px; background: white; border: 1px solid #ccc; border-radius: 4px; padding: 6px 10px; font-size: 11px; color: #888; }'
@@ -67,9 +73,21 @@ pub fn (g Graph) emit_graph_html() string {
 	sb << '  svg.panning { cursor: grabbing; }'
 	sb << '  svg .node { cursor: pointer; }'
 	sb << '  svg .node .hit { pointer-events: all; }'
+	sb << '  svg .cluster-label-group { cursor: pointer; }'
+	sb << '  svg .cluster-label-group .cluster-hit { pointer-events: all; }'
 	sb << '  svg .node, svg line { transition: opacity 0.1s; }'
+	sb << '  svg line { transition: stroke 0.1s, stroke-width 0.1s; }'
 	sb << '  svg text { pointer-events: none; }'
 	sb << '  svg .dim { opacity: 0.12; }'
+	sb << '  svg .node.selected .dot { stroke: #000; stroke-width: 2px; fill-opacity: 1; }'
+	sb << '  svg .node.neighbor .dot { stroke: #ff8f00; stroke-width: 1.6px; fill-opacity: 1; }'
+	// Edges get the same orange accent as .neighbor dots, so a line
+	// visually reads as "this is why that node is highlighted" rather than
+	// just relying on "everything else got dimmer" to imply connectivity --
+	// especially for edges reaching into an otherwise-dimmed community,
+	// where a merely-undimmed line was easy to lose against all the other
+	// dimmed clutter around it.
+	sb << '  svg line.active { stroke: #ff8f00; stroke-width: 1.6px; }'
 	// Semantic zoom: at the default, zoomed-out view only the bold
 	// per-community labels (emit_svg's "cluster-label") are visible, so the
 	// first thing you see is a high-level map, not a wall of overlapping
@@ -90,7 +108,7 @@ pub fn (g Graph) emit_graph_html() string {
 		sb << '<div id="caption">showing ${nodes.len} of ${total} symbols (highest-degree per community)</div>'
 	}
 	sb << '<div id="info"></div>'
-	sb << '<div id="hint">scroll to zoom &middot; drag to pan &middot; hover a node</div>'
+	sb << '<div id="hint">scroll to zoom &middot; drag to pan &middot; hover a node &middot; click to lock &amp; trace</div>'
 	sb << svg
 	sb << '<script>'
 	sb << js_interactivity
@@ -104,11 +122,22 @@ pub fn (g Graph) emit_graph_html() string {
 //   - hover a node (its .hit circle, larger than the visible .dot -- see
 //     emit_svg) to dim everything except it, its direct neighbors (via
 //     data-from/data-to on the edge lines), and the edges between them.
+//     The node itself and its neighbors also get a distinct stroke
+//     ("selected"/"neighbor") so they're still easy to pick out once
+//     everything else is dimmed, not just "not dimmed".
+//   - click a node to lock that highlight (lockedId) so it survives the
+//     mouse moving away -- click a different node to re-lock onto it
+//     (tracing a path across clusters one click at a time), click the same
+//     node or empty canvas to drop the lock, or just hover normally when
+//     nothing is locked.
+//   - click a legend entry, or a cluster label on the canvas, to zoom the
+//     viewBox to fit that community (see zoomToCommunity/communityBBox).
 //   - scroll to zoom the SVG viewBox, centered on the cursor.
 //   - drag the background to pan.
-// Hover updates are suppressed while actively panning, and any current
-// highlight is cleared the moment a pan starts, so a highlight can't get
-// stuck showing a node the cursor is no longer over.
+// Hover updates are suppressed while actively panning or while a lock is
+// held, and starting a pan or zooming to a community always drops any lock
+// (unlock(), not just clear()) so lockedId and the visible highlight never
+// drift out of sync with each other.
 const js_interactivity = '
 (function() {
   var svg = document.querySelector("svg");
@@ -116,6 +145,7 @@ const js_interactivity = '
   var nodes = svg.querySelectorAll(".node");
   var lines = svg.querySelectorAll("line[data-from]");
   var panning = false;
+  var lockedId = null;
 
   function neighborsOf(id) {
     var set = {};
@@ -129,35 +159,90 @@ const js_interactivity = '
     return set;
   }
 
+  // "selected" marks the exact node a click locked onto; "neighbor" marks
+  // everything else the lock keeps visible -- both on top of the plain
+  // dim/not-dim split, so a locked node and its cross-cluster neighbors are
+  // still findable at a glance even once their own cluster is otherwise
+  // dimmed away.
   function highlight(id) {
     var keep = neighborsOf(id);
     nodes.forEach(function(n) {
-      n.classList.toggle("dim", !keep[n.getAttribute("data-id")]);
+      var nid = n.getAttribute("data-id");
+      // classList.toggle(cls, x) treats an explicit `undefined` x as "no
+      // force argument given" (falls back to flip-on-current-presence, i.e.
+      // ADDS an absent class) rather than "force absent" -- and
+      // `keep[nid] && nid !== id` is `undefined`, not `false`, whenever
+      // keep[nid] itself is unset (the raw short-circuit value of &&, not
+      // a coerced boolean). Without the `!!`, every non-neighbor node ended up
+      // wrongly marked "neighbor" too, on top of correctly being "dim".
+      n.classList.toggle("dim", !keep[nid]);
+      n.classList.toggle("selected", nid === id);
+      n.classList.toggle("neighbor", !!keep[nid] && nid !== id);
     });
     lines.forEach(function(l) {
-      var touches = keep[l.getAttribute("data-from")] && keep[l.getAttribute("data-to")];
+      // Coerce to a real boolean up front, not just at the `!touches` call
+      // site -- `keep[a] && keep[b]` is `undefined` (not `false`) whenever
+      // either lookup misses, and passing that raw `undefined` to the
+      // second toggle() below would hit the exact same force-argument
+      // gotcha the node classes above already had to work around.
+      var touches = !!(keep[l.getAttribute("data-from")] && keep[l.getAttribute("data-to")]);
       l.classList.toggle("dim", !touches);
+      l.classList.toggle("active", touches);
     });
   }
 
   function clear() {
-    nodes.forEach(function(n) { n.classList.remove("dim"); });
-    lines.forEach(function(l) { l.classList.remove("dim"); });
+    nodes.forEach(function(n) { n.classList.remove("dim", "selected", "neighbor"); });
+    lines.forEach(function(l) { l.classList.remove("dim", "active"); });
     info.style.display = "none";
+  }
+
+  // Dropping the lock is always a full clear -- an unlock that left stale
+  // highlight classes in place would leave lockedId null but the diagram
+  // still showing the old selection, or vice versa.
+  function unlock() {
+    lockedId = null;
+    clear();
+  }
+
+  function showInfo(n) {
+    var title = n.querySelector("title");
+    var id = n.getAttribute("data-id");
+    info.textContent = (title ? title.textContent : id) + "  --  " + id;
+    info.style.display = "block";
   }
 
   nodes.forEach(function(n) {
     n.addEventListener("mouseenter", function() {
-      if (panning) return;
-      var id = n.getAttribute("data-id");
-      highlight(id);
-      var title = n.querySelector("title");
-      info.textContent = (title ? title.textContent : id) + "  --  " + id;
-      info.style.display = "block";
+      if (panning || lockedId) return;
+      highlight(n.getAttribute("data-id"));
+      showInfo(n);
     });
     n.addEventListener("mouseleave", function() {
-      if (!panning) clear();
+      if (!panning && !lockedId) clear();
     });
+    // Click locks the current highlight so it survives the mouse moving
+    // away -- lets you pan/scroll around the highlighted neighbors, or
+    // click one of those (now-visible) neighbors in turn to trace a path
+    // across clusters, instead of the highlight vanishing the instant the
+    // cursor leaves the node.
+    n.addEventListener("click", function(e) {
+      e.stopPropagation();
+      var id = n.getAttribute("data-id");
+      if (lockedId === id) {
+        unlock();
+        return;
+      }
+      lockedId = id;
+      highlight(id);
+      showInfo(n);
+    });
+  });
+
+  // Clicking anywhere else on the canvas (background, or bubbled up from a
+  // cluster-label click) drops the lock.
+  svg.addEventListener("click", function() {
+    if (lockedId) unlock();
   });
 
   // --- zoom (wheel, centered on cursor) ---
@@ -197,16 +282,25 @@ const js_interactivity = '
   svg._origW = svg.viewBox.baseVal.width;
 
   // --- pan (drag) ---
-  var lastX = 0, lastY = 0;
+  var lastX = 0, lastY = 0, dragged = false;
   svg.addEventListener("mousedown", function(e) {
     panning = true;
+    dragged = false;
     lastX = e.clientX;
     lastY = e.clientY;
     svg.classList.add("panning");
-    clear();
   });
   window.addEventListener("mousemove", function(e) {
     if (!panning) return;
+    // Unlocking has to wait for the first real movement, not fire on
+    // mousedown itself -- mousedown also fires for a plain click (no drag),
+    // and unlocking there would null out lockedId before the node\'s own
+    // click handler gets to compare "lockedId === id" against its own
+    // re-click, permanently breaking click-the-locked-node-again-to-unlock.
+    if (!dragged) {
+      dragged = true;
+      unlock();
+    }
     var vb = svg.viewBox.baseVal;
     var scale = vb.width / svg.clientWidth;
     vb.x -= (e.clientX - lastX) * scale;
@@ -217,6 +311,50 @@ const js_interactivity = '
   window.addEventListener("mouseup", function() {
     panning = false;
     svg.classList.remove("panning");
+  });
+
+  // --- click a legend entry or an in-canvas cluster label to zoom to it ---
+  // Bounding box comes from the rendered .node groups themselves (getBBox
+  // includes each node.hit circle, so the fit already has the same margin
+  // a single node gets), not from recomputing community layout math in JS.
+  function communityBBox(id) {
+    var els = svg.querySelectorAll(\'.node[data-community="\' + id + \'"]\');
+    if (els.length === 0) return null;
+    var minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    els.forEach(function(el) {
+      var b = el.getBBox();
+      minX = Math.min(minX, b.x);
+      minY = Math.min(minY, b.y);
+      maxX = Math.max(maxX, b.x + b.width);
+      maxY = Math.max(maxY, b.y + b.height);
+    });
+    return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
+  }
+
+  function zoomToCommunity(id) {
+    var box = communityBBox(id);
+    if (!box) return;
+    var pad = 40;
+    var vb = svg.viewBox.baseVal;
+    var w = Math.max(box.w + pad * 2, 60);
+    var h = Math.max(box.h + pad * 2, 60);
+    vb.x = box.x + box.w / 2 - w / 2;
+    vb.y = box.y + box.h / 2 - h / 2;
+    vb.width = w;
+    vb.height = h;
+    unlock();
+    updateZoomClass();
+  }
+
+  document.querySelectorAll(".legend-item").forEach(function(el) {
+    el.addEventListener("click", function() {
+      zoomToCommunity(el.getAttribute("data-community"));
+    });
+  });
+  svg.querySelectorAll(".cluster-label-group").forEach(function(el) {
+    el.addEventListener("click", function() {
+      zoomToCommunity(el.getAttribute("data-community"));
+    });
   });
 })();
 '

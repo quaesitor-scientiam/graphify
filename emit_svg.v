@@ -264,7 +264,7 @@ fn render_svg(nodes []LaidOutNode, idx Index, total int, comms []Community) stri
 		// group as one unit, so emit_graph_html can dim/highlight an entire
 		// node (dot + label) by toggling one class on this wrapper.
 		hit_r := if r + 8.0 > 14.0 { r + 8.0 } else { 14.0 }
-		sb << '    <g class="node" data-id="${xml_escape(n.id)}">'
+		sb << '    <g class="node" data-id="${xml_escape(n.id)}" data-community="${n.community}">'
 		sb << '      <circle class="hit" cx="${n.x:.1f}" cy="${n.y:.1f}" r="${hit_r:.1f}" fill="transparent"/>'
 		sb << '      <circle class="dot" cx="${n.x:.1f}" cy="${n.y:.1f}" r="${r:.1f}" fill="${color}" fill-opacity="0.85" stroke="#333" stroke-width="0.4">'
 		sb << '        <title>${xml_escape(n.label)} (${xml_escape(n.kind.str())})</title>'
@@ -305,7 +305,21 @@ fn render_svg(nodes []LaidOutNode, idx Index, total int, comms []Community) stri
 		} else {
 			'${xml_escape(c.label)} (${c.members.len}) — ${xml_escape(loc)}'
 		}
-		sb << '    <text class="cluster-label" x="${cx:.1f}" y="${(cy - 14.0):.1f}" font-size="9" font-weight="bold" fill="#333" text-anchor="middle" paint-order="stroke" stroke="white" stroke-width="3">${desc}</text>'
+		// `.cluster-hit` gives the label a real click target: the text
+		// itself is `pointer-events: none` (see emit_graph_html's CSS, so
+		// hover/click on a node underneath a label still reaches the node),
+		// so without a separate hit rect the clickable area would be
+		// whatever glyph pixels happen to be painted -- the same
+		// too-small-to-actually-hit problem the node `.hit` circle above
+		// exists to avoid, just for text instead of a dot. Width is a rough
+		// per-character estimate for bold 9px sans-serif, generous rather
+		// than exact since overshooting just makes clicking easier.
+		text_w := f64(desc.len) * 5.5 + 20.0
+		label_y := cy - 14.0
+		sb << '    <g class="cluster-label-group" data-community="${ci}">'
+		sb << '      <rect class="cluster-hit" x="${(cx - text_w / 2):.1f}" y="${(label_y - 10.0):.1f}" width="${text_w:.1f}" height="20" fill="transparent"/>'
+		sb << '      <text class="cluster-label" x="${cx:.1f}" y="${label_y:.1f}" font-size="9" font-weight="bold" fill="#333" text-anchor="middle" paint-order="stroke" stroke="white" stroke-width="3">${desc}</text>'
+		sb << '    </g>'
 	}
 	sb << '  </g>'
 
