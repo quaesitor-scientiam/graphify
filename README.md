@@ -107,7 +107,7 @@ graphify communities --resolution 1.5          # split the graph into subsystems
 graphify export graphml --out graph.graphml    # for Gephi, yEd, Cytoscape, NetworkX
 graphify export cypher  --out graph.cypher     # for Neo4j: cypher-shell < graph.cypher
 graphify export svg     --out graph.svg        # static, community-clustered node-link diagram
-graphify export html    --out graph.html       # the same, interactive: hover to highlight neighbors
+graphify export html    --out graph.html       # the same, interactive: hover to highlight, click to lock/trace/zoom
 ```
 
 **SVG/HTML.** Nodes are laid out by community (see Communities above), not by
@@ -168,6 +168,39 @@ misrepresent it, not describe it. Verified live in a real browser: the
 default view shows communities with node labels at `opacity:0`; scrolling in
 on a specific cluster flips `svg.zoomed-in` and reveals that cluster's full
 member names while the rest of the graph stays uncluttered off to the side.
+
+**Click to zoom, lock, and trace.** Clicking a legend entry, or a cluster's
+own label on the canvas, zooms the viewBox to fit that community — no need
+to scroll-zoom by hand to find where a cluster from the legend actually
+sits in the layout. Clicking a node locks its hover highlight so it
+survives the mouse moving away: pan or scroll around a node's neighbors at
+leisure, or click one of those now-visible neighbors to re-lock onto it and
+trace a path across communities one click at a time (click the same node
+again, or empty canvas, to drop the lock). The locked node, its neighbors,
+and the edges connecting them get a distinct stroke — black for the node
+itself, orange for its neighbors and the edges reaching them — instead of
+relying on everything else merely getting dimmer to imply connectivity,
+which was easy to lose against a cluster's own now-dimmed edges.
+
+Verified with real WebDriver clicks, not `dispatchEvent`, which caught two
+real bugs neither a code read nor a synthetic check would have surfaced.
+`classList.toggle(cls, x)` treats an explicit `undefined` `x` as "no force
+argument given" — falling back to flip-on-current-presence — rather than
+"force false"; since `keep[nid] && nid !== id` evaluates to `undefined`
+(not `false`) whenever `keep[nid]` itself is unset, this silently marked
+nearly every node in the graph as a "neighbor" on top of correctly being
+"dim." And the pan-starter's `mousedown` handler was calling `unlock()` on
+*every* mousedown, including a plain click with no drag, nulling out the
+lock before the click handler's own "am I re-clicking my own lock?" check
+could ever see it — breaking click-the-same-node-to-unlock outright. Both
+fixed (a `!!` coercion before the affected `toggle()` calls; deferring the
+pan-triggered unlock until real pointer movement is detected) and
+re-confirmed the same way: real clicks on legend entries and cluster labels
+shrinking the viewBox to the expected community, a locked node's
+neighbor/dim counts summing exactly to the total node count, re-clicking a
+locked node cleanly dropping every highlight, and clicking through to a
+neighbor correctly demoting the previous selection while promoting the new
+one.
 
 **Export.** Both formats emit one node per unique symbol id via `Index.by_id`
 rather than one per raw `Symbol`, and only resolved edges (`Index.edges`) —
@@ -449,4 +482,5 @@ Phase 1 (engine) — done; V only.
 - [x] Phase 5, **GraphML/Cypher export** — both formats emit one node per unique id (via `Index.by_id`, not the raw `Symbol` list) and only resolved edges, for the reasons the Usage section explains. A real bug was caught in the process, not just anticipated: a naive one-node-per-raw-`Symbol` version violated the Cypher export's own uniqueness constraint against this project's own files (they all declare `module graphify`), confirmed by actually running the export, not by inspection.
 - [x] Phase 5, **SVG export and `graph.html`** — both share one layout: communities (see above) arranged around an outer circle, each community's own members around a smaller circle centered on its spot, sized by degree and colored by community. Deterministic trigonometry, not a force-directed simulation — see Usage for why. `graph.html` adds a legend, hover-to-highlight-neighbors, and scroll-to-zoom/drag-to-pan — plain DOM/SVG, no framework. Capped at 300 symbols (proportional per-community, highest-degree first) with the cap always disclosed, never silent.
   Shipped once already believing it was verified, then genuinely wasn't: the first pass checked hover by dispatching a synthetic `mouseenter` in JS, which passed because it targets the element directly — it can't catch "the real click target is too small to hit," which is exactly what user feedback then reported. Re-verified with a real WebDriver session (`vebidor`, driving actual Edge) instead: a synthesized *pointer move*, not a dispatched event, landed dead-center on a node and measured its rendered size at ~4×4 CSS pixels. Fixed by decoupling the hover hit-target from the node's degree-sized visible dot (now independently sized, ~3× larger) and adding real zoom/pan, then re-confirmed the same honest way — synthesized pointer move on the new target, a dispatched wheel event, and a real drag — plus visual screenshots at each step.
-  Followed by a second round of user feedback shaping this feature further: a high-level view first, with detail revealed while exploring, and per-cluster context since graphify shows no repo directory structure anywhere else. Added semantic zoom — the default view shows one bold label per community (name, count, and `community_location`'s summary of where in the source tree it actually lives) with individual symbol labels hidden until zoomed in past a threshold. Verified the same way as everything else in this feature: real WebDriver zoom on an actual cluster, screenshotted, confirming the map is legible by default and a specific cluster's full member names appear on zooming into it. This is the closing item of Phase 5.
+  Followed by a second round of user feedback shaping this feature further: a high-level view first, with detail revealed while exploring, and per-cluster context since graphify shows no repo directory structure anywhere else. Added semantic zoom — the default view shows one bold label per community (name, count, and `community_location`'s summary of where in the source tree it actually lives) with individual symbol labels hidden until zoomed in past a threshold. Verified the same way as everything else in this feature: real WebDriver zoom on an actual cluster, screenshotted, confirming the map is legible by default and a specific cluster's full member names appear on zooming into it.
+  A third round added click-to-zoom (a legend entry or an in-canvas cluster label zooms the viewBox to fit that community, computed from the rendered nodes' own bounding boxes) and click-to-lock (a node's highlight persists past `mouseleave`, so clicking through its now-visible neighbors traces a path across clusters one click at a time; connecting edges get a distinct accent color instead of merely staying undimmed). Real-browser verification again earned its keep, catching two genuine bugs invisible to a synthetic dispatch or a code read: a `classList.toggle(cls, undefined)` force-argument gotcha that silently inflated the neighbor set to nearly the whole graph, and a `mousedown`-before-`click` ordering bug that broke unlocking a node by clicking it again. Both fixed and reconfirmed the same way — see Usage for the full story. This is the closing item of Phase 5.
