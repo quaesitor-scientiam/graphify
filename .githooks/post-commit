@@ -5,6 +5,8 @@
 # Uses the built binary if present, else falls back to `v run`.
 if [ -x ./bin/graphify.exe ] || [ -f ./bin/graphify.exe ]; then
 	./bin/graphify.exe extract . >/dev/null 2>&1 || true
+elif [ -x ./bin/graphify ] || [ -f ./bin/graphify ]; then
+	./bin/graphify extract . >/dev/null 2>&1 || true
 else
 	v run cmd/cli extract . >/dev/null 2>&1 || true
 fi

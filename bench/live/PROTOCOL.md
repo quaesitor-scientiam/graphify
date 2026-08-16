@@ -30,9 +30,9 @@ needs you to drive two actual sessions; the scripting just tallies the result.
 4. Note the transcript (see "Finding transcripts").
 
 **Condition B — graphify wired:**
-1. Copy graphify's `.claude/` and `.mcp.json` into the target repo; fix the
-   absolute paths to point at this repo's `bin/`.
-2. Build the graph once: `bin\graphify.exe extract .`
+1. Copy graphify's `.claude/` and `.mcp.json.example` (as `.mcp.json`) into
+   the target repo — no path edits needed, both use `${CLAUDE_PROJECT_DIR}`.
+2. Build the graph once: `bin/graphify extract .` (`bin/graphify.exe` on Windows)
 3. Approve the `graphify` MCP server and reload so its tools are available.
 4. Start a **fresh** session, paste the **same** prompt, let it finish.
 

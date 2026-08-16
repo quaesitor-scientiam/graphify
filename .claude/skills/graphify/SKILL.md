@@ -10,7 +10,7 @@ B connect", "what's in here"), use the graph instead of Grep/Glob/Read. Every
 result carries `file:line`, so drill in with a targeted read — never load a whole
 file to find one thing.
 
-Tools (MCP `graphify`, or `S:\vProjects\graphify\bin\graphify.exe <cmd>` via Bash):
+Tools (MCP `graphify`, or `bin/graphify <cmd>` — `bin/graphify.exe` on Windows — via Bash):
 
 - `overview` / `skeleton <path>` — body-less map of the codebase
 - `query_graph(text)` / `query` — token-bounded traversal from matching symbols

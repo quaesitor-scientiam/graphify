@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-and-smoke-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Built from source rather than a third-party marketplace action, per
+      # V's own documented install method — avoids depending on an action
+      # that could be renamed or go unmaintained.
+      - name: Install V
+        run: |
+          git clone --depth 1 https://github.com/vlang/v
+          cd v
+          make
+          sudo ./v symlink
+
+      - name: Build CLI
+        run: v -prod -gc none -o bin/graphify cmd/cli
+
+      - name: Build hook binary
+        run: v -prod -gc none -o bin/graphify-hook cmd/hooks/graphify_hook.vsh
+
+      - name: Build MCP server
+        run: v -prod -o bin/graphify-mcp cmd/mcp
+
+      - name: Run tests
+        run: v test .
+
+      # Real end-to-end proof this platform's build actually works, not
+      # just that it compiles — extracts graphify's own source.
+      - name: Smoke test — extract graphify's own source
+        run: |
+          ./bin/graphify extract . --out /tmp/graphify-ci-out
+          test -f /tmp/graphify-ci-out/graph.json
+          cat /tmp/graphify-ci-out/GRAPH_REPORT.md
+
+      - name: Smoke test — hook binary handles empty stdin without crashing
+        run: |
+          printf '' | ./bin/graphify-hook

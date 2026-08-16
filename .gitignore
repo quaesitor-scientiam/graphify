@@ -1,5 +1,11 @@
 bin/*.exe
+bin/graphify
+bin/graphify-mcp
+bin/graphify-hook
 graphify-out/
 .idea/
 *.log
 graphify.config.ps1
+graphify.config.json
+.mcp.json
+.claude/settings.json

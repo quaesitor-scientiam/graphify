@@ -559,7 +559,17 @@ fn rel_path(root string, path string) string {
 		// single-file run: use the bare file name as the header
 		return os.base(path)
 	}
-	rel := if path.starts_with(root) { path[root.len..].trim_left('\\/') } else { path }
+	// Case-insensitive comparison only: Windows/macOS filesystems are
+	// case-insensitive-but-preserving, so a casing mismatch between how
+	// `root` and a walked `path` were constructed already worked there by
+	// accident. Linux's case-sensitive filesystem is the one place that
+	// mismatch would otherwise fall through to the raw absolute path
+	// instead of the intended relative one.
+	rel := if path.to_lower().starts_with(root.to_lower()) {
+		path[root.len..].trim_left('\\/')
+	} else {
+		path
+	}
 	// store with forward slashes so the graph resolves on any OS
 	return rel.replace('\\', '/')
 }

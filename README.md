@@ -95,7 +95,7 @@ Mirrors the Python [Graphify](https://medium.com/jin-system-architect/graphify-t
 command surface: extract once, then traverse instead of re-reading files.
 
 ```
-graphify extract  . --out S:\graph_data        # build graph -> a central dir
+graphify extract  . --out /path/to/graph_data  # build graph -> a central dir
 graphify overview                              # compact summary (counts + key symbols)
 graphify query    "auth flow" --budget 2000    # token-bounded traversal
 graphify path     build_graph emit_skeleton    # shortest path between symbols
@@ -378,99 +378,132 @@ the graph instead of reading source files:
 | `get_neighbors(node)` | names of all directly linked symbols |
 | `shortest_path(a, b)` | relationship path between two symbols |
 
-Build and register (project-scoped via `.mcp.json`, already in this repo):
+Build and register (project-scoped via `.mcp.json`, already in this repo).
+`cmd/cli` and `cmd/hooks` both build `-gc none`: both are one-shot, short-lived
+processes — `graphify extract`'s own README section above already explains why
+(Boehm GC's per-call overhead caused a ~500x slowdown on the graph.json write
+path, 616s -> 32s on the full vlang repo). Do NOT add `-gc none` to
+`graphify-mcp` below — it's a long-lived server process and needs bounded
+memory. The binary name gets an `.exe` suffix on Windows only; the rest of
+this doc omits it:
 
 ```
-v -prod -gc none -o bin/graphify.exe cmd/cli   # -gc none: extract is one-shot and short-lived;
-                                                # Boehm GC caused a ~500x slowdown on the graph.json
-                                                # write path (616s -> 32s on the full vlang repo).
-                                                # Do NOT add -gc none to graphify-mcp below — it's a
-                                                # long-lived server process and needs bounded memory.
-v -prod -o bin/graphify-mcp.exe cmd/mcp
-bin\graphify.exe extract .                 # produce graphify-out/graph.json first
+v -prod -gc none -o bin/graphify         cmd/cli     # extract, query, etc.
+v -prod -gc none -o bin/graphify-hook    cmd/hooks/graphify_hook.vsh   # Claude Code hook, see below
+v -prod            -o bin/graphify-mcp   cmd/mcp
+bin/graphify extract .                 # produce graphify-out/graph.json first
 ```
+
+`.mcp.json` (already in this repo, gitignored — copy `.mcp.json.example` if
+you don't have one) uses Claude Code's `${CLAUDE_PROJECT_DIR}` path expansion,
+so it works unedited on any machine; the one thing to check per OS is the
+`.exe` suffix on `command`:
 
 ```json
 {
   "mcpServers": {
     "graphify": {
-      "command": "S:\\vProjects\\graphify\\bin\\graphify-mcp.exe",
-      "args": ["S:\\vProjects\\graphify\\graphify-out\\graph.json"]
+      "command": "${CLAUDE_PROJECT_DIR}/bin/graphify-mcp.exe",
+      "args": ["${CLAUDE_PROJECT_DIR}/graphify-out/graph.json"]
     }
   }
 }
 ```
 
-Or register globally: `claude mcp add graphify -- S:\vProjects\graphify\bin\graphify-mcp.exe <path-to-graph.json>`.
-Smoke-test the protocol without Claude: `Get-Content cmd/mcp/test_session.jsonl | bin\graphify-mcp.exe graphify-out/graph.json`.
+Or register globally: `claude mcp add graphify -- /path/to/bin/graphify-mcp <path-to-graph.json>`.
+Smoke-test the protocol without Claude: `cat cmd/mcp/test_session.jsonl | bin/graphify-mcp graphify-out/graph.json`.
 
 ## Operational scripts
 
-Beyond the `graphify` CLI itself, `bin/` and `bench/` hold PowerShell helpers
-built for running this against a large external repo (vlang) day to day.
+Beyond the `graphify` CLI itself, `bin/` and `bench/` hold V shell scripts
+(`.vsh`, run via `v run` — no separate scripting language or interpreter to
+install, since every machine running this already has V) for running this
+against a large external repo (vlang) day to day. The one exception is the
+Claude Code hook (below), which is prebuilt for latency reasons rather than
+run via `v run`.
 
-**One-time setup:** copy `graphify.config.ps1.example` to `graphify.config.ps1`
-(repo root) and edit the two paths for your machine:
+**One-time setup:** copy `graphify.config.json.example` to
+`graphify.config.json` (repo root) and edit the two paths for your machine:
 
+```json
+{ "vlang_repo": "/path/to/repo/vlang", "store": "/path/to/graph_data" }
 ```
-$GraphifyVlangRepo = 'S:\repo\vlang'   # the external repo these scripts track
-$GraphifyStore     = 'S:\graph_data'   # central store for extracted graphs
-```
 
-`graphify.config.ps1` is gitignored — each machine keeps its own copy, and
-`update-vlang-graph.ps1`, `switch-vlang-graph.ps1`, and `extract_bench.ps1`
+`graphify.config.json` is gitignored — each machine keeps its own copy, and
+`update-vlang-graph.vsh`, `switch-vlang-graph.vsh`, and `extract_bench.vsh`
 (its default `-Source`) all read from it. If the file is missing, each script
 errors with a pointer back to the `.example` template instead of silently
 using the wrong paths.
 
-### `bin/update-vlang-graph.ps1` — daily graph refresh
+### `bin/update-vlang-graph.vsh` — daily graph refresh
 
 Pulls the target repo and re-extracts only if there were new commits. Wired
-into Windows Task Scheduler for a nightly run; can also be run by hand.
+into a daily scheduler — Windows Task Scheduler, macOS `launchd`, or Linux
+`cron`, see **Scheduling** below; can also be run by hand.
 
 ```
-bin\update-vlang-graph.ps1              # git pull, extract only if new commits
-bin\update-vlang-graph.ps1 -NoPull      # skip the pull, always re-extract
+v run bin/update-vlang-graph.vsh              # git pull, extract only if new commits
+v run bin/update-vlang-graph.vsh -NoPull      # skip the pull, always re-extract
 ```
 
-Logs to `S:\graph_data\update.log`.
+Logs to `<store>/update.log`.
 
-### `bin/switch-vlang-graph.ps1` — branch-aware graph switching
+### `bin/switch-vlang-graph.vsh` — branch-aware graph switching
 
 Extracts (or reuses) a graph for a specific branch and repoints the MCP
 server's `~/.claude.json` config at it. `master`/`main` keep the graph at
-`<store>\vlang`; other branches get their own `<store>\vlang-<branch>`.
+`<store>/vlang`; other branches get their own `<store>/vlang-<branch>`. The
+`~/.claude.json` edit is a targeted text splice of just that one field, not a
+full rewrite — see the comment on `patch_mcp_args` in the script for why (a
+full parse+re-encode round-trip was tried first and found to silently corrupt
+unrelated floating-point fields elsewhere in the file).
 
 ```
-bin\switch-vlang-graph.ps1                             # graph for the current branch
-bin\switch-vlang-graph.ps1 -Branch feature-x           # graph for a specific branch
-bin\switch-vlang-graph.ps1 -Branch feature-x -Checkout # also `git checkout` that branch first
-bin\switch-vlang-graph.ps1 -Force                      # re-extract even if a graph already exists
+v run bin/switch-vlang-graph.vsh                             # graph for the current branch
+v run bin/switch-vlang-graph.vsh feature-x                   # graph for a specific branch
+v run bin/switch-vlang-graph.vsh feature-x -Checkout          # also `git checkout` that branch first
+v run bin/switch-vlang-graph.vsh -Force                      # re-extract even if a graph already exists
 ```
 
 Restart Claude Code after switching so the MCP server picks up the new graph.
 
-### `bench/session_stats.ps1` — token-free MCP usage stats
+### `bench/session_stats.vsh` — token-free MCP usage stats
 
 Scans Claude Code's session transcripts and reports graphify tool-call counts
 per session (main-agent vs. subagent split), at zero token/API cost.
 
 ```
-bench\session_stats.ps1                  # last 14 days
-bench\session_stats.ps1 -Days 30         # look back further
-bench\session_stats.ps1 -IncludeBench    # include graphify's own bench sessions
+v run bench/session_stats.vsh                  # last 14 days
+v run bench/session_stats.vsh -Days 30         # look back further
+v run bench/session_stats.vsh -IncludeBench    # include graphify's own bench sessions
 ```
 
-### `bench/extract_bench.ps1` — repeatable extraction benchmark
+### `bench/extract_bench.vsh` — repeatable extraction benchmark
 
 Times `graphify extract` end-to-end against a target repo, clearing the
 output directory first so every run starts cold.
 
 ```
-bench\extract_bench.ps1                          # defaults: vlang repo, temp out dir
-bench\extract_bench.ps1 -Runs 3                  # average over 3 runs
-bench\extract_bench.ps1 -Source S:\myproject -Out S:\temp\gf-bench-myproject
+v run bench/extract_bench.vsh                          # defaults: configured repo, temp out dir
+v run bench/extract_bench.vsh -Runs 3                  # average over 3 runs
+v run bench/extract_bench.vsh -Source /path/to/myproject -Out /tmp/gf-bench-myproject
 ```
+
+### Scheduling — Windows / macOS / Linux
+
+- **Windows**: register `update-vlang-graph.vsh` in Task Scheduler (`v run
+  <path>` as the action), daily. No script for this in-repo — it's a couple
+  of clicks in the Task Scheduler GUI, or `schtasks /create`.
+- **macOS**: copy `bin/com.graphify.vlang-update.plist.example` to
+  `~/Library/LaunchAgents/com.graphify.vlang-update.plist`, edit the
+  `/path/to/...` placeholders, then `launchctl bootstrap gui/$(id -u)
+  ~/Library/LaunchAgents/com.graphify.vlang-update.plist`. Chosen over cron:
+  modern macOS restricts cron from accessing files outside a few whitelisted
+  locations without manually granting it Full Disk Access, so a stock cron
+  job for this fails silently; launchd needs no such grant.
+- **Linux**: a plain crontab line is enough for one daily command —
+  `crontab -e` and add
+  `0 3 * * * v run /path/to/graphify/bin/update-vlang-graph.vsh >> /path/to/graph_data/cron.log 2>&1`.
 
 ## Claude Code wiring
 
@@ -481,15 +514,31 @@ dogfoods it on itself):
   tools or CLI) for structural questions and drill into bodies by `file:line`.
 - **`.claude/commands/graphify.md`** — `/graphify [path]` rebuilds the graph and
   summarizes `GRAPH_REPORT.md`.
-- **`.claude/settings.json`** — a `SessionStart` hook injects standing guidance,
-  and a `PreToolUse` hook on `Grep|Glob` reminds Claude to consult the graph
-  before scanning files. Both call `.claude/hooks/graphify_hook.ps1`
-  (pwsh, non-blocking, emits `hookSpecificOutput.additionalContext`).
+- **`.claude/settings.json`** (gitignored — copy `.claude/settings.json.example`,
+  same per-machine pattern as `graphify.config.json`/`.mcp.json`) — a
+  `SessionStart` hook injects standing guidance, and a `PreToolUse` hook on
+  `Grep|Glob` reminds Claude to consult the graph before scanning files. Both
+  call `bin/graphify-hook(.exe)` — the compiled `cmd/hooks/graphify_hook.vsh`
+  above — directly. It's prebuilt rather than run via `v run` because this
+  hook fires on every Grep/Glob/SessionStart, and `v run` recompiling from
+  source each time costs several seconds per call — the prebuilt binary
+  responds in well under 100ms. Settings.json is per-machine (not
+  `${CLAUDE_PROJECT_DIR}`-templated like `.mcp.json`) specifically so the one
+  `.exe` suffix difference can just be hardcoded directly, with no dispatcher
+  layer and no non-V dependency: an earlier version of this used a tiny pwsh
+  script to pick the binary name per OS (since a static JSON command can't
+  branch, and V always appends `.exe` on Windows regardless of the `-o` name
+  given, confirmed empirically — there's no way to build one binary name that
+  works unedited on all three platforms), but that made pwsh a real
+  dependency for macOS/Linux just to dispatch a 3-line decision. One
+  per-machine edit (matching the two config files you already edit) removes
+  that dependency entirely.
 - **`.githooks/post-commit`** — rebuilds the graph after each commit. Enable with
   `git config core.hooksPath .githooks`.
 
-To wire a *different* project, copy `.claude/` (and `.mcp.json`) into it and
-update the absolute paths to point at this repo's `bin/`.
+To wire a *different* project, copy `.claude/` (including
+`settings.json.example` → `settings.json`, editing the `.exe` suffix for your
+OS) and `.mcp.json.example` (as `.mcp.json`, no edits needed) into it.
 
 ## Sharing a graph across machines / OSes
 

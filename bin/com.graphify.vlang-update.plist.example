@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  macOS launchd equivalent of the Windows Task Scheduler daily job.
+
+  Chosen over cron: modern macOS TCC/SIP restricts cron/crontab from
+  accessing files outside a few whitelisted locations without manually
+  granting Full Disk Access to /usr/sbin/cron in System Settings, so a
+  stock-Mac cron job for this fails silently in a way that's hard to
+  debug. launchd needs no such grant for a job like this one.
+
+  Setup:
+    1. cp bin/com.graphify.vlang-update.plist.example \
+         ~/Library/LaunchAgents/com.graphify.vlang-update.plist
+    2. Edit every /path/to/... placeholder below for your machine.
+    3. launchctl bootstrap gui/$(id -u) \
+         ~/Library/LaunchAgents/com.graphify.vlang-update.plist
+    4. Check it loaded:  launchctl list | grep graphify
+-->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.graphify.vlang-update</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/usr/local/bin/v</string>
+		<string>run</string>
+		<string>/path/to/graphify/bin/update-vlang-graph.vsh</string>
+	</array>
+	<key>StartCalendarInterval</key>
+	<dict>
+		<key>Hour</key>
+		<integer>3</integer>
+		<key>Minute</key>
+		<integer>0</integer>
+	</dict>
+	<key>StandardOutPath</key>
+	<string>/path/to/graph_data/launchd-stdout.log</string>
+	<key>StandardErrorPath</key>
+	<string>/path/to/graph_data/launchd-stderr.log</string>
+</dict>
+</plist>

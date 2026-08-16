@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "pwsh -NoProfile -File \"S:\\vProjects\\graphify\\.claude\\hooks\\graphify_hook.ps1\""
+            "command": "\"${CLAUDE_PROJECT_DIR}/bin/graphify-hook.exe\""
           }
         ]
       }
@@ -16,7 +16,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "pwsh -NoProfile -File \"S:\\vProjects\\graphify\\.claude\\hooks\\graphify_hook.ps1\""
+            "command": "\"${CLAUDE_PROJECT_DIR}/bin/graphify-hook.exe\""
           }
         ]
       }

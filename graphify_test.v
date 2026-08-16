@@ -1135,3 +1135,19 @@ fn test_skeleton_is_bodyless() {
 	assert out.contains('{ ... }') // fn bodies elided
 	assert !out.contains('println') // no implementation leaked
 }
+
+fn test_rel_path_is_case_insensitive() {
+	// Windows/macOS resolve `root` and a walked `path` from the same
+	// filesystem entry regardless of casing, so a mismatch never showed up
+	// there — but on a case-sensitive filesystem a real casing difference
+	// between how `root` and `path` were each constructed (e.g. a symlink,
+	// or os.real_path normalizing differently) must still be recognized as
+	// "path is under root", not silently fall through to the raw absolute
+	// path.
+	assert rel_path('/repo/Project', '/repo/project/vlib/os/os.v') == 'vlib/os/os.v'
+	assert rel_path('/repo/project', '/repo/Project/vlib/os/os.v') == 'vlib/os/os.v'
+	// exact-case match still works
+	assert rel_path('/repo/project', '/repo/project/vlib/os/os.v') == 'vlib/os/os.v'
+	// a genuinely unrelated path still falls through unchanged
+	assert rel_path('/repo/project', '/other/place/os.v') == '/other/place/os.v'
+}

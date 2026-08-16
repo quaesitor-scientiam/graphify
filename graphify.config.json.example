@@ -1,0 +1,4 @@
+{
+  "vlang_repo": "/path/to/repo/vlang",
+  "store": "/path/to/graph_data"
+}
