@@ -855,7 +855,36 @@ fn test_emit_graph_html_drill_views_capped_marked_and_disclosed() {
 	assert views >= drill_max_candidates - 3
 	assert views == badges // every drill-view has exactly one matching legend badge
 	assert legend_items > badges // not every community qualified -- the size gate filtered some out
-	assert out.contains('large communities include a detail view') // truncation disclosed, not silent
+
+	// The "N of M" disclosure only appears when compute_drill_views actually
+	// dropped a qualifying (>= drill_min_members) community -- to the
+	// drill_max_candidates cap, or to the "not really splittable" gate --
+	// never unconditionally. Louvain's shuffled visitation order (see
+	// communities.v) means the number of >= drill_min_members communities
+	// this ring produces varies run to run, so don't assume it's always
+	// more than drill_max_candidates: recover the actual qualifying count
+	// the same way compute_drill_views did, from the legend's own
+	// per-community sizes (legend and drill views are built from the same
+	// `comms` slice inside emit_graph_html, and layout_ring always keeps
+	// at least one member per community, so every qualifying community is
+	// guaranteed a legend entry to count here).
+	mut qualifying := 0
+	mut rest := out
+	for {
+		start := rest.index('<span class="count">(') or { break }
+		tail := rest[start + '<span class="count">('.len..]
+		end := tail.index(')') or { break }
+		if tail[..end].int() >= drill_min_members {
+			qualifying++
+		}
+		rest = tail[end..]
+	}
+	assert qualifying >= views // every rendered drill-view came from a qualifying community
+	if qualifying > views {
+		assert out.contains('large communities include a detail view')
+	} else {
+		assert !out.contains('large communities include a detail view')
+	}
 }
 
 fn export_test_graph() Graph {
