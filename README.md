@@ -322,12 +322,15 @@ regardless of merge order, because two unrelated projects sharing a module
 name is the common case, not an edge case — `main` is the implicit module of
 *every* standalone V program, so any two merged programs collide on
 `main.main` unless kept apart. `query`/`explain`/`path`/`shortest_path`/
-`overview` work normally against the merged result; `get_body` does not —
-`s.file` is relative to each *original* root, and a merged graph has no
-single root to resolve it against, so `--source-dir` can only ever serve one
-of the inputs correctly. Content that's genuinely duplicated across inputs
-(the same file extracted into two of them) is not deduplicated — it appears
-twice, once per label.
+`overview` work normally against the merged result, and so does `get_body`:
+the merged graph carries a `roots` map from each source's label chain (the
+same `label::` prefix its symbol ids carry) back to that source's own
+original root, so `get_body` picks the right root per symbol instead of
+needing one root for the whole graph. `--source-dir` still overrides the
+single `root` field when set, which only matters for a non-merged graph or
+for forcing every symbol through one relocated checkout. Content that's
+genuinely duplicated across inputs (the same file extracted into two of
+them) is not deduplicated — it appears twice, once per label.
 
 Queries read `./graphify-out/graph.json` by default. Override with `--graph <file>`.
 
@@ -583,7 +586,7 @@ Phase 1 (engine) — done; V only.
   17.1% of call edges (28.7k) are still unattributed, but only 4,377 of those are genuinely unresolvable — calls into C, closures, and function variables, which nothing short of running the program could pin down. That puts the real ceiling at **97.4%**, with ~24.3k edges between here and there.
   Those remaining ones are at least not *silent*. `index()` drops any edge whose raw callee name matches several declarations, which makes a called function look uncalled; `explain` / `get_node` list them under `possibly called by`, with the declaration count that makes them uncertain.
   That is resolved at query time from the raw names already stored in the graph, *not* by emitting `AMBIGUOUS` edges to every candidate as originally sketched: measured on the V compiler repo, real fan-out adds 1.15M edges (4.2× the whole graph), and those guessed links would then leak into `shortest_path` and `query_graph` traversal. Keeping it query-side costs no graph growth and leaves traversal untouched.
-- [x] Phase 5, **`merge-graphs`** — combines any number of previously-extracted graphs into one, with every id namespaced by its source's label (default: root directory name, deduplicated with `-2`/`-3`/... on repeat) so a shared module name like `main` — the implicit module of every standalone V program — can never collide across inputs. `get_body` is the one operation that doesn't carry over cleanly to a merged graph; see Usage.
+- [x] Phase 5, **`merge-graphs`** — combines any number of previously-extracted graphs into one, with every id namespaced by its source's label (default: root directory name, deduplicated with `-2`/`-3`/... on repeat) so a shared module name like `main` — the implicit module of every standalone V program — can never collide across inputs. `get_body` works against the merged result too: a `roots` map from each source's label chain to its own original root lets it pick the right root per symbol; a graph.json from before this map existed simply decodes with `roots` empty and falls back to the single `root` field, unchanged. See Usage.
 - [x] Phase 5, **`communities`** — Louvain-style modularity optimization (local-moving + multi-level aggregation) plus a connectivity-guaranteeing split pass, standing in for the Leiden paper's randomized refinement phase; see Usage for exactly what that trades away. Verified against Zachary's Karate Club (correctly separates its two documented rival factions every run; modularity reliably well above a random/degenerate partition across dozens of test runs) and against real V codebases, where the resulting communities are recognizable subsystems — `Checker`, `Builder`, `Parser`, `Fmt`, `JsGen`, `Table`, `Scope` on the V compiler repo, not noise. Surfaced a real, pre-existing limitation rather than papering over it: `Index.by_id` collapses distinct declarations that share an id across build units (every standalone `main` program above all) into one node, which without `defines`-edge exclusion produced an artificial supermassive "main" community; excluding containment edges (`defines`/`imports`/`implements`) from community weight reduces this substantially and is independently well-motivated (containment isn't interaction), but the underlying id-collision issue is a graph-model change, not something fixed here.
 - [x] Phase 5, **GraphML/Cypher export** — both formats emit one node per unique id (via `Index.by_id`, not the raw `Symbol` list) and only resolved edges, for the reasons the Usage section explains. A real bug was caught in the process, not just anticipated: a naive one-node-per-raw-`Symbol` version violated the Cypher export's own uniqueness constraint against this project's own files (they all declare `module graphify`), confirmed by actually running the export, not by inspection.
 - [x] Phase 5, **SVG export and `graph.html`** — both share one layout: communities (see above) arranged around an outer circle, each community's own members around a smaller circle centered on its spot, sized by degree and colored by community. Deterministic trigonometry, not a force-directed simulation — see Usage for why. `graph.html` adds a legend, hover-to-highlight-neighbors, and scroll-to-zoom/drag-to-pan — plain DOM/SVG, no framework. Capped at 300 symbols (proportional per-community, highest-degree first) with the cap always disclosed, never silent.

@@ -24,20 +24,30 @@ import os
 // each label, rather than being merged into one node. Reconciling that is
 // future scope, not silently guessed at here.
 //
-// get_body does not work correctly against the merged result: `s.file` is
-// relative to each *original* root, but a merged graph has no single root to
-// resolve it against. --source-dir picks one root for the whole graph, so it
-// can only ever serve bodies for whichever single input that happens to be.
-// Every other query (query/explain/path/shortest_path/overview) only reads
-// already-captured signature/doc/relationship data, never the source tree,
-// so they are unaffected.
+// get_body works against the merged result via `out.roots`: every symbol id
+// carries its source's label chain as a `label::` prefix, and `roots` maps
+// that exact chain back to the label's own original absolute root, so
+// get_body can pick the right root per symbol instead of needing one root
+// for the whole graph. If `g` (an input) is itself already a merge -- its
+// own `roots` is non-empty -- its entries are re-prefixed with this merge's
+// label rather than collapsed to `g.root` (which for an already-merged graph
+// is only the cosmetic `" + "`-joined display string, not a real path), so
+// nested merges resolve correctly too.
 pub fn merge_graphs(graphs []Graph, labels []string) Graph {
 	resolved := dedup_labels(graphs, labels)
 	mut out := Graph{
-		root: resolved.join(' + ') // display only -- see get_body note above
+		root:  resolved.join(' + ') // display only -- real roots live in `roots`
+		roots: map[string]string{}
 	}
 	for i, g in graphs {
 		ns := resolved[i] + '::'
+		if g.roots.len > 0 {
+			for inner_label, inner_root in g.roots {
+				out.roots['${resolved[i]}::${inner_label}'] = inner_root
+			}
+		} else {
+			out.roots[resolved[i]] = g.root
+		}
 		for s in g.symbols {
 			mut ns_s := s
 			ns_s.id = ns + s.id

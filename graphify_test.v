@@ -1,5 +1,7 @@
 module graphify
 
+import os
+
 const sample = 'module demo
 
 import os
@@ -521,6 +523,114 @@ fn test_merge_graphs_explicit_labels_override_defaults() {
 	merged := merge_graphs([a, b], ['alpha', 'beta'])
 	assert merged.symbols[0].id == 'alpha::x.f'
 	assert merged.symbols[1].id == 'beta::x.f'
+}
+
+// merge_get_body_fixture writes two tiny on-disk source trees (distinct
+// content, same relative filename, so a root mix-up would read the wrong
+// one) and returns their Graphs, ready to merge. Callers must remove the
+// returned roots when done.
+fn merge_get_body_fixture() (Graph, Graph, string, string) {
+	root_a := os.join_path(os.temp_dir(), 'graphify_test_merge_a')
+	root_b := os.join_path(os.temp_dir(), 'graphify_test_merge_b')
+	os.rmdir_all(root_a) or {}
+	os.rmdir_all(root_b) or {}
+	os.mkdir_all(root_a) or { panic(err) }
+	os.mkdir_all(root_b) or { panic(err) }
+	os.write_file(os.join_path(root_a, 'demo.v'), 'fn greet_a() string {\n\treturn "hello from a"\n}\n') or {
+		panic(err)
+	}
+	os.write_file(os.join_path(root_b, 'demo.v'), 'fn greet_b() string {\n\treturn "hello from b"\n}\n') or {
+		panic(err)
+	}
+	mut a := Graph{
+		root: root_a
+	}
+	a.symbols = [
+		Symbol{
+			id:       'demo.greet_a'
+			name:     'greet_a'
+			kind:     .function
+			file:     'demo.v'
+			line:     1
+			end_line: 3
+		},
+	]
+	mut b := Graph{
+		root: root_b
+	}
+	b.symbols = [
+		Symbol{
+			id:       'demo.greet_b'
+			name:     'greet_b'
+			kind:     .function
+			file:     'demo.v'
+			line:     1
+			end_line: 3
+		},
+	]
+	return a, b, root_a, root_b
+}
+
+fn test_get_body_merged_graph_reads_from_each_source_own_root() {
+	a, b, root_a, root_b := merge_get_body_fixture()
+	defer {
+		os.rmdir_all(root_a) or {}
+		os.rmdir_all(root_b) or {}
+	}
+
+	merged := merge_graphs([a, b], ['svc_a', 'svc_b'])
+	body_a := merged.get_body('svc_a::demo.greet_a')
+	body_b := merged.get_body('svc_b::demo.greet_b')
+	assert body_a.contains('hello from a')
+	assert !body_a.contains('hello from b') // proves it read root_a's demo.v, not root_b's
+	assert body_b.contains('hello from b')
+	assert !body_b.contains('hello from a')
+}
+
+fn test_get_body_unmerged_graph_still_uses_single_root() {
+	// A plain, non-merged graph has an empty `roots` map -- get_body must
+	// fall back to `g.root` exactly as it did before merged graphs existed.
+	a, _, root_a, root_b := merge_get_body_fixture()
+	defer {
+		os.rmdir_all(root_a) or {}
+		os.rmdir_all(root_b) or {}
+	}
+	assert a.roots.len == 0
+	body := a.get_body('demo.greet_a')
+	assert body.contains('hello from a')
+}
+
+fn test_merge_graphs_nested_merge_propagates_roots() {
+	// Merging an already-merged graph must re-prefix its inner labels rather
+	// than collapsing to its cosmetic `root` (a " + "-joined display string,
+	// not a real path -- see merge_graphs' doc comment).
+	mut a := Graph{
+		root: 'S:/repo/svc-a'
+	}
+	a.symbols = [Symbol{ id: 'x.f', name: 'f', kind: .function, file: 'x.v' }]
+	mut b := Graph{
+		root: 'S:/repo/svc-b'
+	}
+	b.symbols = [Symbol{ id: 'x.f', name: 'f', kind: .function, file: 'x.v' }]
+	inner := merge_graphs([a, b], ['svc_a', 'svc_b'])
+	assert inner.roots == {
+		'svc_a': 'S:/repo/svc-a'
+		'svc_b': 'S:/repo/svc-b'
+	}
+
+	mut c := Graph{
+		root: 'S:/repo/svc-c'
+	}
+	c.symbols = [Symbol{ id: 'x.f', name: 'f', kind: .function, file: 'x.v' }]
+	outer := merge_graphs([inner, c], ['bundle', 'svc_c'])
+	assert outer.roots == {
+		'bundle::svc_a': 'S:/repo/svc-a'
+		'bundle::svc_b': 'S:/repo/svc-b'
+		'svc_c':         'S:/repo/svc-c'
+	}
+	// and a symbol that went through both merges resolves through the
+	// composed two-level prefix, not just the outer one.
+	assert outer.source_root(Symbol{ id: 'bundle::svc_a::x.f' }) == 'S:/repo/svc-a'
 }
 
 // Zachary's Karate Club: the standard 34-node, 78-edge benchmark graph for

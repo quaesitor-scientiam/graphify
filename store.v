@@ -34,7 +34,18 @@ fn graph_to_json(g Graph) string {
 	mut sb := strings.new_builder(g.symbols.len * 120 + g.edges.len * 60)
 	sb.write_string('{"root":')
 	write_json_str(mut sb, g.root)
-	sb.write_string(',"symbols":[')
+	sb.write_string(',"roots":{')
+	mut ri := 0
+	for label, root in g.roots {
+		if ri > 0 {
+			sb.write_u8(`,`)
+		}
+		write_json_str(mut sb, label)
+		sb.write_u8(`:`)
+		write_json_str(mut sb, root)
+		ri++
+	}
+	sb.write_string('},"symbols":[')
 	for i, s in g.symbols {
 		if i > 0 {
 			sb.write_u8(`,`)

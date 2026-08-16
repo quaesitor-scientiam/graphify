@@ -342,6 +342,19 @@ fn uniq(a []string) []string {
 	return out
 }
 
+// source_root picks the root a given symbol's `file` is relative to: its
+// own source's root when `g.roots` is populated (a merged graph — see
+// merge_graphs), or the graph's single root otherwise, unchanged from
+// before merged graphs were supported.
+fn (g Graph) source_root(s Symbol) string {
+	for label, root in g.roots {
+		if s.id.starts_with(label + '::') {
+			return root
+		}
+	}
+	return g.root
+}
+
 // get_body returns the source of a single declaration (by name or id), read
 // from disk by its captured line range — so a caller can fetch one function
 // instead of reading a whole file.
@@ -352,7 +365,9 @@ pub fn (g Graph) get_body(node string) string {
 		return 'no symbol matches: ${node}'
 	}
 	s := idx.by_id[id] or { return 'no symbol matches: ${node}' }
-	src := os.read_file(os.join_path(g.root, s.file)) or { return 'cannot read ${s.file}: ${err}' }
+	src := os.read_file(os.join_path(g.source_root(s), s.file)) or {
+		return 'cannot read ${s.file}: ${err}'
+	}
 	lines := src.split('\n')
 	start := if s.line > 0 { s.line - 1 } else { 0 }
 	mut end := if s.end_line > s.line { s.end_line } else { 0 }

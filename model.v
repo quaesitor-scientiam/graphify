@@ -90,6 +90,13 @@ pub mut:
 	root    string
 	symbols []Symbol
 	edges   []Edge
+	// roots maps a merged graph's namespace label chain (matching the
+	// `label::` prefix merge_graphs gives that source's symbol ids) to that
+	// source's own original absolute root. Empty for a graph extracted
+	// directly, where `root` above is the only root there is — get_body
+	// falls back to it whenever roots is empty, so existing single-source
+	// graph.json files keep working unchanged.
+	roots map[string]string
 }
 
 // add_symbol appends a symbol and returns its id for convenient edge wiring.
