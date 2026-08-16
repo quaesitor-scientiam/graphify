@@ -16,11 +16,15 @@ jobs:
 
       # Built from source rather than a third-party marketplace action, per
       # V's own documented install method — avoids depending on an action
-      # that could be renamed or go unmaintained.
+      # that could be renamed or go unmaintained. Cloned into RUNNER_TEMP
+      # (outside the checkout) so `v test .` below only ever sees graphify's
+      # own tests — cloning into the workspace once made `v test .` also
+      # sweep up V's own ~3600-file vlib test suite (GL headers, globals,
+      # multi-hour runtime) as if it were part of this project.
       - name: Install V
         run: |
-          git clone --depth 1 https://github.com/vlang/v
-          cd v
+          git clone --depth 1 https://github.com/vlang/v "$RUNNER_TEMP/v"
+          cd "$RUNNER_TEMP/v"
           make
           sudo ./v symlink
 
