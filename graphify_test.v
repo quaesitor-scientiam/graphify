@@ -57,6 +57,46 @@ fn test_extracts_core_symbols() {
 	assert has_call
 }
 
+fn test_c_extern_decl_does_not_collide_with_same_name_v_wrapper() {
+	// `fn C.foo()` is a body-less extern binding; `short_name` drops the
+	// `C.`/`JS.` prefix (see fn_id's doc comment), so before this fix it and
+	// a same-named real V wrapper IN THE SAME FILE got the identical id
+	// `demo.get_string_array` -- a same-file collision a file-qualified
+	// suffix can never separate. Matches the real shape found in
+	// vlib/v/tests/c_function/pass_ref_test.c.v.
+	src := 'module demo
+
+fn C.get_string_array() &&char
+
+pub fn get_string_array() &&char {
+	return C.get_string_array()
+}
+'
+	syms, _ := extract_v_text(src, 'demo.v')
+	fns := syms.filter(it.kind == .function)
+	assert fns.len == 1
+	assert fns[0].id == 'demo.get_string_array'
+	assert fns[0].name == 'get_string_array'
+}
+
+fn test_js_extern_decl_does_not_collide_with_same_name_v_wrapper() {
+	// Same bug, JS backend -- matches
+	// examples/wasm/change_color_by_id/change_color_by_id.wasm.v.
+	src := 'module demo
+
+fn JS.change_color(id string)
+
+pub fn change_color(id string) {
+	JS.change_color(id)
+}
+'
+	syms, _ := extract_v_text(src, 'demo.v')
+	fns := syms.filter(it.kind == .function)
+	assert fns.len == 1
+	assert fns[0].id == 'demo.change_color'
+	assert fns[0].name == 'change_color'
+}
+
 fn test_literal_receiver_types_the_call() {
 	src := 'module demo
 

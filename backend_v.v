@@ -74,6 +74,15 @@ fn extract_from_ast(file &ast.File, mut table ast.Table, rel string, src []strin
 	for stmt in file.stmts {
 		match stmt {
 			ast.FnDecl {
+				if stmt.language != .v && stmt.no_body {
+					// `fn C.foo()` / `fn JS.foo()` -- an extern binding, not
+					// real V code a graph consumer would navigate to. Its
+					// short_name drops the C./JS. prefix (see fn_id), so it
+					// collides with a same-named V wrapper declared in the
+					// SAME file; a file-qualified suffix can't separate two
+					// declarations that already share a file.
+					continue
+				}
 				id := fn_id(mod_id, stmt, mut table)
 				syms << Symbol{
 					id:        id
