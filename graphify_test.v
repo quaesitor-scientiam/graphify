@@ -319,6 +319,221 @@ fn test_resolve_edges_sets_edge_provenance() {
 	assert g.edges[0].provenance == .extracted
 }
 
+fn test_disambiguate_ids_splits_main_module_collision() {
+	// Two unrelated standalone programs, both `module main` (V's implicit
+	// module for a program with no `module` declaration), each with their
+	// own `fn main()` -- the single biggest real-world source of id
+	// collision (see the README's Index.by_id note).
+	mut g := Graph{}
+	g.symbols = [
+		Symbol{
+			id:     'main.main'
+			name:   'main'
+			kind:   .function
+			parent: 'main'
+			file:   'a.v'
+		},
+		Symbol{
+			id:     'main.main'
+			name:   'main'
+			kind:   .function
+			parent: 'main'
+			file:   'b.v'
+		},
+	]
+	disambiguate_ids(mut g)
+	assert g.symbols[0].id == 'main.main@a.v'
+	assert g.symbols[1].id == 'main.main@b.v'
+	assert g.symbols[0].id != g.symbols[1].id
+	// each renamed declaration gets its own `defines` edge from the module
+	assert g.edges.any(it.kind == .defines && it.from == 'main' && it.to == 'main.main@a.v')
+	assert g.edges.any(it.kind == .defines && it.from == 'main' && it.to == 'main.main@b.v')
+}
+
+fn test_disambiguate_ids_leaves_platform_variant_untouched() {
+	// One logical function declared once per platform -- e.g. `os.setenv` in
+	// both environment.c.v and environment.js.v -- is NOT a collision: V
+	// would reject a genuine redeclaration inside one ordinary module, so a
+	// repeat here means the same id correctly addresses both declarations.
+	mut g := Graph{}
+	g.symbols = [
+		Symbol{
+			id:     'os.setenv'
+			name:   'setenv'
+			kind:   .function
+			parent: 'os'
+			file:   'environment.c.v'
+		},
+		Symbol{
+			id:     'os.setenv'
+			name:   'setenv'
+			kind:   .function
+			parent: 'os'
+			file:   'environment.js.v'
+		},
+	]
+	disambiguate_ids(mut g)
+	assert g.symbols[0].id == 'os.setenv'
+	assert g.symbols[1].id == 'os.setenv'
+}
+
+fn test_disambiguate_ids_splits_multi_test_file_collision() {
+	// Not `main` this time -- an ordinary module, but the id repeats across
+	// two distinct `_test.v` files, each of which V compiles as its own
+	// executable, so they are separate build units too.
+	mut g := Graph{}
+	g.symbols = [
+		Symbol{
+			id:     'mymod.helper'
+			name:   'helper'
+			kind:   .function
+			parent: 'mymod'
+			file:   'a_test.v'
+		},
+		Symbol{
+			id:     'mymod.helper'
+			name:   'helper'
+			kind:   .function
+			parent: 'mymod'
+			file:   'b_test.v'
+		},
+	]
+	disambiguate_ids(mut g)
+	assert g.symbols[0].id == 'mymod.helper@a_test.v'
+	assert g.symbols[1].id == 'mymod.helper@b_test.v'
+}
+
+fn test_disambiguate_ids_cascades_to_struct_fields() {
+	// Two colliding `main.Foo` structs, each with a field named `x` -- the
+	// field's own id/parent embed the struct's id as a literal prefix, so
+	// they must move in lockstep with the struct's rename even though a
+	// field's own bare id is never itself checked for collision.
+	mut g := Graph{}
+	g.symbols = [
+		Symbol{
+			id:     'main.Foo'
+			name:   'Foo'
+			kind:   .struct_
+			parent: 'main'
+			file:   'a.v'
+		},
+		Symbol{
+			id:     'main.Foo.x'
+			name:   'x'
+			kind:   .field
+			parent: 'main.Foo'
+			file:   'a.v'
+		},
+		Symbol{
+			id:     'main.Foo'
+			name:   'Foo'
+			kind:   .struct_
+			parent: 'main'
+			file:   'b.v'
+		},
+		Symbol{
+			id:     'main.Foo.x'
+			name:   'x'
+			kind:   .field
+			parent: 'main.Foo'
+			file:   'b.v'
+		},
+	]
+	disambiguate_ids(mut g)
+	assert g.symbols[0].id == 'main.Foo@a.v'
+	assert g.symbols[1].id == 'main.Foo@a.v.x'
+	assert g.symbols[1].parent == 'main.Foo@a.v'
+	assert g.symbols[2].id == 'main.Foo@b.v'
+	assert g.symbols[3].id == 'main.Foo@b.v.x'
+	assert g.symbols[3].parent == 'main.Foo@b.v'
+}
+
+fn test_disambiguate_ids_renames_outgoing_calls_edges() {
+	// Each colliding `main.main` calls a different helper -- Edge.file is
+	// what lets disambiguate_ids tell the two calls edges apart even though
+	// both originally share the exact same `from`.
+	mut g := Graph{}
+	g.symbols = [
+		Symbol{
+			id:     'main.main'
+			name:   'main'
+			kind:   .function
+			parent: 'main'
+			file:   'a.v'
+		},
+		Symbol{
+			id:     'main.main'
+			name:   'main'
+			kind:   .function
+			parent: 'main'
+			file:   'b.v'
+		},
+	]
+	g.edges = [
+		Edge{
+			from: 'main.main'
+			to:   'helper_a'
+			kind: .calls
+			file: 'a.v'
+		},
+		Edge{
+			from: 'main.main'
+			to:   'helper_b'
+			kind: .calls
+			file: 'b.v'
+		},
+	]
+	disambiguate_ids(mut g)
+	call_a := g.edges.filter(it.kind == .calls && it.to == 'helper_a')
+	call_b := g.edges.filter(it.kind == .calls && it.to == 'helper_b')
+	assert call_a.len == 1
+	assert call_a[0].from == 'main.main@a.v'
+	assert call_b.len == 1
+	assert call_b[0].from == 'main.main@b.v'
+}
+
+fn test_disambiguate_ids_then_resolve_edges_fixes_self_receiver_across_collision() {
+	// End-to-end: two unrelated standalone programs each declare their own
+	// `struct Foo` with a `bar` method that self-calls `baz` on the same
+	// receiver -- the exact self-receiver shortcut in resolve_callee that
+	// only works once the receiver type's id has been correctly
+	// disambiguated (want_suffixed) rather than left pointing at a bare,
+	// now-collided id that matches nothing.
+	src := 'struct Foo {}
+
+fn (f Foo) baz() {}
+
+fn (f Foo) bar() {
+	f.baz()
+}
+'
+	syms_a, edges_a := extract_v_text(src, 'a.v')
+	syms_b, edges_b := extract_v_text(src, 'b.v')
+	mut g := Graph{}
+	g.symbols << syms_a
+	g.symbols << syms_b
+	g.edges << edges_a
+	g.edges << edges_b
+	disambiguate_ids(mut g)
+	resolve_edges(mut g)
+
+	bar_a := g.symbols.filter(it.name == 'bar' && it.file == 'a.v')[0]
+	bar_b := g.symbols.filter(it.name == 'bar' && it.file == 'b.v')[0]
+	baz_a := g.symbols.filter(it.name == 'baz' && it.file == 'a.v')[0]
+	baz_b := g.symbols.filter(it.name == 'baz' && it.file == 'b.v')[0]
+	assert bar_a.id != bar_b.id // the collision was real -- ids came out distinct
+	assert baz_a.id != baz_b.id
+
+	call_from_a := g.edges.filter(it.kind == .calls && it.from == bar_a.id)
+	call_from_b := g.edges.filter(it.kind == .calls && it.from == bar_b.id)
+	assert call_from_a.len == 1
+	assert call_from_a[0].to == baz_a.id // resolves to its OWN file's baz, not the other's
+	assert call_from_a[0].provenance == .extracted // self-receiver -- no guessing needed
+	assert call_from_b.len == 1
+	assert call_from_b[0].to == baz_b.id
+	assert call_from_b[0].provenance == .extracted
+}
+
 fn test_resolve_type_ref_provenance() {
 	// a globally unique type name: extracted, nothing to choose between.
 	mut unique_by_name := map[string][]TypeCand{}

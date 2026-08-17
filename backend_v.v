@@ -95,16 +95,16 @@ fn extract_from_ast(file &ast.File, mut table ast.Table, rel string, src []strin
 				// type references: receiver, params, return
 				mut rseen := map[string]bool{}
 				if stmt.is_method {
-					add_ref(id, base_type_name(table, stmt.receiver.typ, mod_id), mut edges, mut
+					add_ref(id, base_type_name(table, stmt.receiver.typ, mod_id), rel, mut edges, mut
 						rseen)
 				}
 				pstart := if stmt.is_method { 1 } else { 0 }
 				for i := pstart; i < stmt.params.len; i++ {
-					add_ref(id, base_type_name(table, stmt.params[i].typ, mod_id), mut edges, mut
+					add_ref(id, base_type_name(table, stmt.params[i].typ, mod_id), rel, mut edges, mut
 						rseen)
 				}
 				if stmt.return_type != ast.void_type && stmt.return_type != 0 {
-					add_ref(id, base_type_name(table, stmt.return_type, mod_id), mut edges, mut
+					add_ref(id, base_type_name(table, stmt.return_type, mod_id), rel, mut edges, mut
 						rseen)
 				}
 				collect_calls(stmt.stmts, CallCtx{
@@ -117,6 +117,7 @@ fn extract_from_ast(file &ast.File, mut table ast.Table, rel string, src []strin
 					}
 					table:  table
 					mod_id: mod_id
+					file:   rel
 				}, mut edges)
 			}
 			ast.StructDecl {
@@ -165,9 +166,10 @@ fn extract_from_ast(file &ast.File, mut table ast.Table, rel string, src []strin
 							from: id
 							to:   base
 							kind: .embeds
+							file: rel
 						}
 					}
-					add_ref(id, base, mut edges, mut rseen)
+					add_ref(id, base, rel, mut edges, mut rseen)
 				}
 			}
 			ast.EnumDecl {
@@ -338,7 +340,7 @@ fn base_type_name(table &ast.Table, typ ast.Type, mod_id string) string {
 }
 
 // add_ref records a `references` edge to a type name, deduped per declaration.
-fn add_ref(from string, typename string, mut edges []Edge, mut seen map[string]bool) {
+fn add_ref(from string, typename string, file string, mut edges []Edge, mut seen map[string]bool) {
 	if typename == '' || typename in seen {
 		return
 	}
@@ -347,6 +349,7 @@ fn add_ref(from string, typename string, mut edges []Edge, mut seen map[string]b
 		from: from
 		to:   typename
 		kind: .references
+		file: file
 	}
 }
 
@@ -364,6 +367,7 @@ struct CallCtx {
 	recv_type string // id of the receiver's type, e.g. `v3.transform.Transformer`
 	table     &ast.Table = unsafe { nil }
 	mod_id    string
+	file      string // the file being extracted, stamped onto each calls edge -- see Edge.file
 	locals    map[string]string
 }
 
@@ -548,6 +552,7 @@ fn walk_call(ce ast.CallExpr, ctx CallCtx, mut edges []Edge, mut seen map[string
 			kind:      .calls
 			is_method: ce.is_method
 			recv_type: rt
+			file:      ctx.file
 		}
 	}
 	walk_expr(ce.left, ctx, mut edges, mut seen)

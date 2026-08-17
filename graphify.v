@@ -152,6 +152,7 @@ pub fn build_graph_resilient(root string, worker_exe string, out_dir string) (Gr
 	}
 
 	save_cache(out_dir, new_cache)
+	disambiguate_ids(mut g)
 	resolve_edges(mut g)
 	return g, failed
 }
@@ -193,8 +194,146 @@ pub fn build_graph(opts Options) Graph {
 		}
 	}
 
+	disambiguate_ids(mut g)
 	resolve_edges(mut g)
 	return g
+}
+
+// disambiguate_ids gives colliding declarations their own distinct node
+// identity before resolve_edges runs, so Index.by_id (and everything built
+// on it -- query/explain/get_node/communities/GraphML/Cypher) stops
+// silently collapsing them into one. Uses the exact same classification
+// resolve_edges' `unaddressable` check already does -- an id names more
+// than one real declaration only when they sit in separate *build units*
+// that happen to share a module name: every standalone `main` program, and
+// every `_test.v` file, which V compiles as its own executable. Repeats
+// inside an ordinary module cannot be distinct declarations -- V would
+// reject the redeclaration -- so those are left untouched (they are one
+// logical declaration, e.g. a per-platform variant like `os.setenv` in
+// both environment.c.v and environment.js.v).
+//
+// Colliding declarations are renamed to `${id}@${file}` -- file-qualified,
+// so provably unique for any two declarations V would actually accept as
+// distinct. This can't be done correctly by retroactively rewriting an
+// already-flattened Graph: several declarations share the *same* old id
+// (that is the collision), so a bare find-and-replace can't tell which
+// edge belongs to which one. Symbols carry their own `file`, so renaming
+// them is unambiguous; edges historically didn't, which is what Edge.file
+// exists for -- see its doc comment in model.v.
+//
+// Known residual, confirmed on the real V compiler repo (4 ids / 8 of
+// 107,134 symbols -- 0.004%): a `fn C.foo(...)` or `fn JS.foo(...)` extern
+// declaration and a same-named real V wrapper function in the *same* file
+// (e.g. `fn C.get_string_array() ...` next to `pub fn get_string_array()
+// { return C.get_string_array() }`) still collide, since fn_id's
+// `short_name` doesn't preserve the `C.`/`JS.` prefix -- a `@file` suffix
+// can't separate two declarations that share a file. Root-caused, not
+// silently unexplained; a real fix belongs in fn_id (extraction), not
+// here, since this function only disambiguates by build unit, and these
+// two declarations are already in the same one.
+fn disambiguate_ids(mut g Graph) {
+	kinds := [SymbolKind.function, .method, .struct_, .enum_, .interface_, .type_alias]
+	mut id_count := map[string]int{}
+	mut id_mod := map[string]string{}
+	mut id_files := map[string][]string{}
+	for s in g.symbols {
+		if s.kind in kinds {
+			id_count[s.id]++
+			id_mod[s.id] = s.parent
+			id_files[s.id] << s.file
+		}
+	}
+	mut collides := map[string]bool{}
+	for id, n in id_count {
+		if n < 2 {
+			continue
+		}
+		if id_mod[id] or { '' } == 'main' {
+			collides[id] = true
+			continue
+		}
+		mut tests := []string{}
+		for f in id_files[id] or { []string{} } {
+			if f.ends_with('_test.v') && f !in tests {
+				tests << f
+			}
+		}
+		if tests.len > 1 {
+			collides[id] = true
+		}
+	}
+	if collides.len == 0 {
+		return
+	}
+
+	// Rename the colliding declarations themselves -- unambiguous, since
+	// each Symbol carries its own file.
+	for i in 0 .. g.symbols.len {
+		s := g.symbols[i]
+		if s.kind in kinds && collides[s.id] {
+			g.symbols[i].id = '${s.id}@${s.file}'
+		}
+	}
+	// Cascade to field symbols, whose id/parent embed their struct's old id
+	// as a literal prefix (fields aren't in `kinds` above -- a field's own
+	// bare id never collides on its own -- but they must move with their
+	// struct). Reads s.parent before this loop's own writes touch it, since
+	// fields were untouched by the rename above.
+	for i in 0 .. g.symbols.len {
+		s := g.symbols[i]
+		if s.kind == .field && collides[s.parent] {
+			new_parent := '${s.parent}@${s.file}'
+			old_prefix := s.parent + '.'
+			if s.id.starts_with(old_prefix) {
+				g.symbols[i].id = new_parent + '.' + s.id[old_prefix.len..]
+			}
+			g.symbols[i].parent = new_parent
+		}
+	}
+
+	// `defines` edges are redundant with each symbol's own parent/id field,
+	// so once those are renamed, the simplest correct move is to discard
+	// the old edges (still holding pre-rename ids) and regenerate them from
+	// the now-current symbol data, rather than trying to retroactively
+	// patch them -- they have the same which-declaration-does-this-edge-
+	// belong-to ambiguity as calls/embeds/references, just without an
+	// Edge.file to resolve it, since regenerating is exact and just as
+	// cheap here.
+	mut rest := []Edge{cap: g.edges.len}
+	for e in g.edges {
+		if e.kind != .defines {
+			rest << e
+		}
+	}
+	for s in g.symbols {
+		if s.parent != '' && s.kind != .import_ {
+			rest << Edge{
+				from: s.parent
+				to:   s.id
+				kind: .defines
+			}
+		}
+	}
+	g.edges = rest
+
+	// calls/embeds/references edges' `from` is the id of the declaration
+	// that emitted them -- rename it the same way, using Edge.file (which
+	// symbols don't need, since they carry `file` directly) to know which
+	// of the several now-differently-renamed declarations a given edge
+	// actually belongs to. Edge's fields are all `pub:` (read-only), so a
+	// changed edge is a new value, same as resolve_edges builds below.
+	mut with_from_renamed := []Edge{cap: g.edges.len}
+	for e in g.edges {
+		if (e.kind == .calls || e.kind == .embeds || e.kind == .references) && collides[e.from] {
+			with_from_renamed << Edge{
+				...e
+				from: '${e.from}@${e.file}'
+			}
+		} else {
+			with_from_renamed << e
+		}
+	}
+	g.edges = with_from_renamed
 }
 
 // only_id returns the id that every candidate shares, or none if they disagree.
@@ -431,10 +570,18 @@ fn resolve_callee(e Edge, by_name map[string][]CallCand, site_of map[string]Decl
 	// A receiver the parser could type without inference pins the call down
 	// exactly — but only trust it when that method really exists, since the
 	// call may be to an embedded type's method or a function-typed field.
+	// `want` alone misses a disambiguated id (see disambiguate_ids in this
+	// file): `e.recv_type` was built at extraction time, before any id could
+	// have been renamed, so it can never carry the `@file` suffix a colliding
+	// receiver type's real id now does — `want_suffixed` reconstructs it
+	// using this edge's own file, matching how the receiver's declaration
+	// would have been suffixed when co-located with the calling method (the
+	// overwhelmingly common case for a self-receiver call).
 	if e.recv_type != '' {
 		want := e.recv_type + '.' + e.to
+		want_suffixed := if e.file != '' { '${want}@${e.file}' } else { '' }
 		for c in cands {
-			if c.id == want {
+			if c.id == want || (want_suffixed != '' && c.id == want_suffixed) {
 				return CallResolution{ id: c.id, inferred: false }
 			}
 		}

@@ -74,6 +74,15 @@ pub:
 	// Empty whenever the receiver would need the checker to type. Like
 	// is_method, it is extraction-only and not persisted.
 	recv_type string
+	// file is the path of the file that emitted this edge — populated for
+	// `calls`/`embeds`/`references` edges, whose `from` is the id of a
+	// declaration that may need disambiguating (see disambiguate_ids in
+	// graphify.v): id collisions can only be told apart by the file they
+	// came from, and an edge is otherwise indistinguishable from another one
+	// sharing the same raw `from`/`to` text. Like is_method/recv_type,
+	// extraction-only and not persisted — disambiguation always runs before
+	// a graph is saved, so a loaded graph never needs it again.
+	file string
 }
 
 // FileResult is one file's extracted symbols and edges — the unit passed back

@@ -83,6 +83,7 @@ Pipeline: `walk files -> extract_v_file(file) -> []Symbol + []Edge -> Graph -> e
 
 - `Symbol{ id, name, kind, signature, file, line, end_line, is_pub, parent, doc }` — `end_line` is what lets `get_body` read one declaration instead of a whole file; `doc` is the `//` block directly above it
 - `Edge{ from, to, kind, provenance }` — kinds: `defines`, `calls`, `imports`, `implements`, `embeds`, `references`; `provenance` (`extracted`/`inferred`) is set on resolved `calls`, `embeds`, and `references` edges — see the edge provenance item in Status
+- **`implements` is a declared vocabulary slot, not a planned feature.** V's interfaces are satisfied structurally — there is no `impl X for Y` syntax to read off the AST, so detecting it means matching a candidate's resolved method/field set (including through embeds) against every visible interface's, which needs a whole-program, fully-resolved type table exactly like `v/ast/table.does_type_implement_interface` builds — the opposite of graphify's per-file, parallel-worker, cacheable extraction. Investigated concretely, not just deferred by assumption: real yield data across 3 real corpora (V's own compiler, this project, and a real `veb`-framework app) found the obvious pitch — a project's own type implementing a project's own interface — in **zero of 288 measured pairs**, including a corpus that declares 6 of its own interfaces specifically to test this. The one real signal (app code satisfying a *framework's* interface) scored 2 meaningful pairs in the one corpus built to have it; the other 286 pairs were stdlib-satisfying-stdlib facts (`io.ReaderWriter`, `IError`) — the same static fact in every V program, not project-specific insight. Building this would mean a standing compiler-patch dependency (forking or upstreaming a change to `v/ast/table.v`) for a feature that, on the best evidence gathered, finds a handful of edges per framework-consumer project and nothing in most others.
 
 ### Emitters
 
@@ -303,18 +304,36 @@ toward community weight, only `calls`/`references`/`embeds` — containment
 and including it pulled unrelated members of the same module toward each
 other instead of toward whatever they actually collaborate with.
 
-**Known limitation, not new to this feature but made more visible by it:**
-`Index.by_id` collapses every symbol sharing an id into one graph node,
-however many physically distinct declarations actually use it — the same
-case `resolve_edges`' `unaddressable` check already names for call
-resolution (every standalone `main` program's entry point is `main.main`;
-every `_test.v` file's helpers can collide the same way). Before excluding
-containment edges this made an artificial "main" supermassive community
+**Fixed: `Index.by_id` no longer collapses distinct declarations that share
+an id.** It used to — the same case `resolve_edges`' `unaddressable` check
+already named for call resolution (every standalone `main` program's entry
+point is `main.main`; every `_test.v` file's helpers can collide the same
+way) silently dropped whichever declaration wasn't indexed last, everywhere
+`Index.by_id` is used: `query`/`explain`/`get_node`, `communities`,
+GraphML/Cypher export. Measured on the V compiler repo before the fix:
+21.03% of all 107,134 symbols were silently discarded this way, 17.11%
+of them genuinely distinct declarations, not harmless duplicates. `extract`
+now runs `disambiguate_ids` before edge resolution: a declaration whose id
+collides across separate *build units* (every standalone `main` program, or
+an id repeated across ≥2 distinct `_test.v` files — same classification
+`unaddressable` already used, just applied earlier) is renamed to
+`id@file`, file-qualified and so unique for any two declarations V itself
+would accept as distinct; a same-declaration repeat inside one ordinary
+module (a per-platform variant like `os.setenv` in both environment.c.v and
+environment.js.v) is untouched, since V would reject a genuine
+redeclaration there. Post-fix on the same repo: 13.54% of symbols still
+collapse, entirely the `mod_`/`import_`/`constant`/`field` kinds this pass
+deliberately doesn't touch (matching `resolve_edges`' own scope) plus
+legitimate platform variants — of the 7,646 rows that were genuine
+cross-build-unit collisions, 7,638 (99.9%) are fixed; the 8 remaining are a
+separate, root-caused, out-of-scope bug (a `fn C.foo`/`fn JS.foo` extern
+declaration colliding with a same-named V wrapper in the *same* file, where
+a file-qualified suffix can't help). Before excluding containment edges,
+the old collapse also produced an artificial "main" supermassive community
 spanning every unrelated standalone program in a large corpus; excluding
-`defines` edges reduces it substantially since a shared id no longer pulls
-in everything *that id's module defines*, but the underlying id collision —
-giving colliding-but-distinct declarations disambiguated node identities —
-is a graph-model change, not something fixable inside `communities.v`.
+`defines` edges from community weight remains independently correct
+(containment isn't interaction) even now that the underlying collision
+itself is fixed.
 
 **Merging graphs.** Every id is namespaced by its source graph's label (its
 root directory name by default, or `--labels a,b,...`), unconditionally and
@@ -587,7 +606,8 @@ Phase 1 (engine) — done; V only.
   Those remaining ones are at least not *silent*. `index()` drops any edge whose raw callee name matches several declarations, which makes a called function look uncalled; `explain` / `get_node` list them under `possibly called by`, with the declaration count that makes them uncertain.
   That is resolved at query time from the raw names already stored in the graph, *not* by emitting `AMBIGUOUS` edges to every candidate as originally sketched: measured on the V compiler repo, real fan-out adds 1.15M edges (4.2× the whole graph), and those guessed links would then leak into `shortest_path` and `query_graph` traversal. Keeping it query-side costs no graph growth and leaves traversal untouched.
 - [x] Phase 5, **`merge-graphs`** — combines any number of previously-extracted graphs into one, with every id namespaced by its source's label (default: root directory name, deduplicated with `-2`/`-3`/... on repeat) so a shared module name like `main` — the implicit module of every standalone V program — can never collide across inputs. `get_body` works against the merged result too: a `roots` map from each source's label chain to its own original root lets it pick the right root per symbol; a graph.json from before this map existed simply decodes with `roots` empty and falls back to the single `root` field, unchanged. See Usage.
-- [x] Phase 5, **`communities`** — Louvain-style modularity optimization (local-moving + multi-level aggregation) plus a connectivity-guaranteeing split pass, standing in for the Leiden paper's randomized refinement phase; see Usage for exactly what that trades away. Verified against Zachary's Karate Club (correctly separates its two documented rival factions every run; modularity reliably well above a random/degenerate partition across dozens of test runs) and against real V codebases, where the resulting communities are recognizable subsystems — `Checker`, `Builder`, `Parser`, `Fmt`, `JsGen`, `Table`, `Scope` on the V compiler repo, not noise. Surfaced a real, pre-existing limitation rather than papering over it: `Index.by_id` collapses distinct declarations that share an id across build units (every standalone `main` program above all) into one node, which without `defines`-edge exclusion produced an artificial supermassive "main" community; excluding containment edges (`defines`/`imports`/`implements`) from community weight reduces this substantially and is independently well-motivated (containment isn't interaction), but the underlying id-collision issue is a graph-model change, not something fixed here.
+- [x] Phase 5, **`communities`** — Louvain-style modularity optimization (local-moving + multi-level aggregation) plus a connectivity-guaranteeing split pass, standing in for the Leiden paper's randomized refinement phase; see Usage for exactly what that trades away. Verified against Zachary's Karate Club (correctly separates its two documented rival factions every run; modularity reliably well above a random/degenerate partition across dozens of test runs) and against real V codebases, where the resulting communities are recognizable subsystems — `Checker`, `Builder`, `Parser`, `Fmt`, `JsGen`, `Table`, `Scope` on the V compiler repo, not noise. Surfaced a real, pre-existing limitation rather than papering over it: `Index.by_id` collapsed distinct declarations that share an id across build units (every standalone `main` program above all) into one node, which without `defines`-edge exclusion produced an artificial supermassive "main" community. Excluding containment edges (`defines`/`imports`/`implements`) from community weight remains independently well-motivated (containment isn't interaction) even now that the id-collision itself is fixed below — it also matters for the legitimate platform-variant ids that are still intentionally left collapsed.
+- [x] **`Index.by_id` id-collision fixed (2026-08-16).** `disambiguate_ids` (graphify.v) runs before edge resolution and gives colliding declarations their own distinct node identity — see the Usage section's Index.by_id note for the full mechanism and real before/after numbers (21.03% of all symbols silently discarded → 13.54%, with the fixable portion — genuine cross-build-unit collisions — going from 7,646 rows to 8). The 8 that remain are a distinct, root-caused, out-of-scope bug: a `fn C.foo`/`fn JS.foo` extern declaration colliding with a same-named V wrapper *in the same file*, which a file-qualified suffix can't separate.
 - [x] Phase 5, **GraphML/Cypher export** — both formats emit one node per unique id (via `Index.by_id`, not the raw `Symbol` list) and only resolved edges, for the reasons the Usage section explains. A real bug was caught in the process, not just anticipated: a naive one-node-per-raw-`Symbol` version violated the Cypher export's own uniqueness constraint against this project's own files (they all declare `module graphify`), confirmed by actually running the export, not by inspection.
 - [x] Phase 5, **SVG export and `graph.html`** — both share one layout: communities (see above) arranged around an outer circle, each community's own members around a smaller circle centered on its spot, sized by degree and colored by community. Deterministic trigonometry, not a force-directed simulation — see Usage for why. `graph.html` adds a legend, hover-to-highlight-neighbors, and scroll-to-zoom/drag-to-pan — plain DOM/SVG, no framework. Capped at 300 symbols (proportional per-community, highest-degree first) with the cap always disclosed, never silent.
   Shipped once already believing it was verified, then genuinely wasn't: the first pass checked hover by dispatching a synthetic `mouseenter` in JS, which passed because it targets the element directly — it can't catch "the real click target is too small to hit," which is exactly what user feedback then reported. Re-verified with a real WebDriver session (`vebidor`, driving actual Edge) instead: a synthesized *pointer move*, not a dispatched event, landed dead-center on a node and measured its rendered size at ~4×4 CSS pixels. Fixed by decoupling the hover hit-target from the node's degree-sized visible dot (now independently sized, ~3× larger) and adding real zoom/pan, then re-confirmed the same honest way — synthesized pointer move on the new target, a dispatched wheel event, and a real drag — plus visual screenshots at each step.

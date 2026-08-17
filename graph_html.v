@@ -423,7 +423,12 @@ const js_interactivity = '
   function showInfo(n) {
     var title = n.querySelector("title");
     var id = n.getAttribute("data-id");
-    info.textContent = (title ? title.textContent : id) + "  --  " + id;
+    // A disambiguated id (a colliding declaration -- see disambiguate_ids
+    // in graphify.v) carries a "@<file>" suffix for uniqueness; the file is
+    // already shown separately, so strip it here rather than showing a
+    // raw, unfamiliar id to the reader.
+    var displayId = id.split("@")[0];
+    info.textContent = (title ? title.textContent : displayId) + "  --  " + displayId;
     info.style.display = "block";
   }
 
