@@ -21,3 +21,8 @@ Tools (MCP `graphify`, or `bin/graphify <cmd>` — `bin/graphify.exe` on Windows
 Workflow: map with `overview`/`query` → inspect with `get_node` → read only what
 you need with `get_body`. Refresh after code changes: `graphify extract .` or
 `/graphify`. Covers V (`.v`) files.
+
+Symbol ids are module-qualified (e.g. `mymod.Struct.method`, not just
+`Struct.method` or `method`) — if `get_node`/`explain` reports no match on a
+guessed id, that means the id is wrong, not that the symbol is absent; get the
+exact id from a `query`/`query_graph` result first.
