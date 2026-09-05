@@ -1545,3 +1545,90 @@ fn test_rel_path_is_case_insensitive() {
 	// a genuinely unrelated path still falls through unchanged
 	assert rel_path('/repo/project', '/other/place/os.v') == '/other/place/os.v'
 }
+
+// cache_test_dir returns a fresh scratch dir for one cache.v test, so
+// separate tests never share (or race on) the same .gf_cache.ndjson.
+fn cache_test_dir(name string) string {
+	dir := os.join_path(os.temp_dir(), 'graphify_test_cache_${name}')
+	os.rmdir_all(dir) or {}
+	os.mkdir_all(dir) or { panic(err) }
+	return dir
+}
+
+fn test_cache_round_trips_when_binary_hash_matches() {
+	dir := cache_test_dir('roundtrip')
+	entries := [
+		CacheEntry{
+			rel:  'demo.v'
+			hash: 'abc123'
+			fr:   FileResult{
+				symbols: [Symbol{ id: 'demo.greet', name: 'greet', kind: .function }]
+			}
+		},
+	]
+	save_cache(dir, 'binhash1', entries)
+	loaded := load_cache(dir, 'binhash1')
+	assert loaded.len == 1
+	assert loaded['demo.v'].hash == 'abc123'
+	assert loaded['demo.v'].fr.symbols[0].id == 'demo.greet'
+}
+
+fn test_cache_rejected_when_binary_hash_differs() {
+	// The actual bug this fix closes: a cache written by one graphify binary
+	// must not be trusted by a DIFFERENT one, even though every per-file
+	// content hash inside it would still match on disk -- the binary is what
+	// decides what a file's content extracts to, not just the file itself.
+	dir := cache_test_dir('binary_mismatch')
+	entries := [
+		CacheEntry{
+			rel:  'demo.v'
+			hash: 'abc123'
+			fr:   FileResult{
+				symbols: [Symbol{ id: 'demo.greet', name: 'greet', kind: .function }]
+			}
+		},
+	]
+	save_cache(dir, 'binhash1', entries)
+	loaded := load_cache(dir, 'binhash2')
+	assert loaded.len == 0
+}
+
+fn test_cache_rejected_when_written_by_older_format_without_binary_line() {
+	// Simulates a real pre-existing v4 cache file already on a user's disk
+	// from before this fix (format marker + per-file lines directly, no
+	// binary-hash line at all) -- upgrading graphify must not crash trying
+	// to parse it, and must treat it as stale (full reparse) rather than
+	// silently misinterpreting the first entry line as a binary-hash header.
+	dir := cache_test_dir('old_format')
+	old_style := 'graphify-cache-v4\ndemo.v\tabc123\t' + encode_file_result(FileResult{
+		symbols: [Symbol{ id: 'demo.greet', name: 'greet', kind: .function }]
+	})
+	os.write_file(os.join_path(dir, cache_file_name), old_style) or { panic(err) }
+	loaded := load_cache(dir, 'binhash1')
+	assert loaded.len == 0
+
+	// Also cover a hypothetical current-format file that is merely truncated
+	// (format line present, binary-hash line missing entirely) -- the same
+	// lines.len < 2 guard must catch this shape too, not just a wrong marker.
+	os.write_file(os.join_path(dir, cache_file_name), cache_format) or { panic(err) }
+	assert load_cache(dir, 'binhash1').len == 0
+}
+
+fn test_cache_not_trusted_or_written_when_binary_hash_is_blank() {
+	// A blank bin_hash means we couldn't even hash our own executable --
+	// nothing should be trusted, and nothing should be written that a future
+	// load could never validate anyway.
+	dir := cache_test_dir('blank_hash')
+	entries := [
+		CacheEntry{
+			rel:  'demo.v'
+			hash: 'abc123'
+			fr:   FileResult{
+				symbols: [Symbol{ id: 'demo.greet', name: 'greet', kind: .function }]
+			}
+		},
+	]
+	save_cache(dir, '', entries)
+	assert !os.exists(os.join_path(dir, cache_file_name))
+	assert load_cache(dir, '').len == 0
+}

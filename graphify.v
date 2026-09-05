@@ -27,8 +27,9 @@ mut:
 // file isolated and the rest of that batch requeued for a later wave.
 //
 // Files whose content hash matches `out_dir`'s cache from the previous run
-// are reused directly, skipping re-parsing entirely — see cache.v. Returns
-// the graph and the list of files that failed to parse.
+// are reused directly, skipping re-parsing entirely — but only when that
+// cache was also written by this same worker_exe binary; see cache.v.
+// Returns the graph and the list of files that failed to parse.
 pub fn build_graph_resilient(root string, worker_exe string, out_dir string) (Graph, []string) {
 	abs_root := os.real_path(root)
 	mut g := Graph{
@@ -45,7 +46,11 @@ pub fn build_graph_resilient(root string, worker_exe string, out_dir string) (Gr
 		[abs_root]
 	}
 
-	old_cache := load_cache(out_dir)
+	// Hashed once and reused for both load and save below -- see cache.v for
+	// why the cache is tied to the running binary's own content, not just
+	// each source file's hash.
+	bin_hash := file_hash(worker_exe)
+	old_cache := load_cache(out_dir, bin_hash)
 	mut new_cache := []CacheEntry{cap: files.len}
 
 	mut queue := []WorkItem{}
@@ -151,7 +156,7 @@ pub fn build_graph_resilient(root string, worker_exe string, out_dir string) (Gr
 		}
 	}
 
-	save_cache(out_dir, new_cache)
+	save_cache(out_dir, bin_hash, new_cache)
 	disambiguate_ids(mut g)
 	resolve_edges(mut g)
 	return g, failed
