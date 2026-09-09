@@ -106,13 +106,32 @@ pub fn (g Graph) query(text string, budget int, dfs bool) string {
 		visited[s] = true
 		queue << s
 	}
-	for queue.len > 0 {
+	// `head` is a cursor into `queue`, never removed from -- BFS used to dequeue
+	// via `queue.first()` + `queue.delete(0)`, which shifts every remaining
+	// element down one slot on every single pop. That is only cheap for a
+	// small reachable set; a seed sitting in a large, densely-connected
+	// component (a real one: "asm" in a real compiler's own codebase reaches
+	// 85%+ of a 116k-symbol graph, confirmed on the actual vlang corpus) turns
+	// this into genuine O(n^2) work -- confirmed hanging for 8+ CPU-minutes
+	// per query and leaking unkillable server processes, not just "slow".
+	// DFS still legitimately shrinks `queue` via `.pop()` off the end, which
+	// is already O(1); `head` simply stays put in that mode.
+	//
+	// The `order.len < budget` bound below is a second, independent fix, not
+	// just a mitigation for the first: no `budget`-token render can ever need
+	// more than `budget` lines (each renders to at least ~1 token in
+	// practice), so this can never change what the render loop below would
+	// have produced anyway for any query whose reachable set already fit --
+	// it only stops walking a component far larger than any budget could use.
+	mut head := 0
+	for head < queue.len && order.len < budget {
 		id := if dfs {
 			queue.pop()
 		} else {
-			first := queue.first()
-			queue.delete(0)
-			first
+			queue[head]
+		}
+		if !dfs {
+			head++
 		}
 		order << id
 		for nb in idx.adj[id] or { []string{} } {
@@ -141,7 +160,7 @@ pub fn (g Graph) query(text string, budget int, dfs bool) string {
 		lines << line
 		tokens += t
 	}
-	header := '// query: ${text}  (${lines.len} of ${order.len} reachable symbols, ~${tokens} tokens)'
+	header := '// query: ${text}  (${lines.len} of ${order.len} visited symbols, ~${tokens} tokens)'
 	return header + '\n' + lines.join('\n')
 }
 
@@ -161,9 +180,14 @@ pub fn (g Graph) shortest_path(a string, b string) []string {
 	mut visited := map[string]bool{}
 	visited[start] = true
 	mut queue := [start]
-	for queue.len > 0 {
-		cur := queue.first()
-		queue.delete(0)
+	// Index cursor, not `queue.first()` + `queue.delete(0)` -- see the
+	// identical fix (and its rationale) in query() above. A goal that is
+	// unreachable, or simply far away in a large component, hits the same
+	// O(n^2) blowup this had.
+	mut head := 0
+	for head < queue.len {
+		cur := queue[head]
+		head++
 		for nb in idx.adj[cur] or { []string{} } {
 			if nb in visited {
 				continue

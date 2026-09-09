@@ -1632,3 +1632,89 @@ fn test_cache_not_trusted_or_written_when_binary_hash_is_blank() {
 	assert !os.exists(os.join_path(dir, cache_file_name))
 	assert load_cache(dir, '').len == 0
 }
+
+// hub_spoke_graph builds one `hub_fn` symbol calling `n` `leaf_N` symbols --
+// a single connected component reachable in one hop from the hub, used to
+// exercise query()/shortest_path() traversal without needing a real corpus.
+fn hub_spoke_graph(n int) Graph {
+	mut g := Graph{}
+	g.symbols << Symbol{
+		id:        'demo.hub_fn'
+		name:      'hub_fn'
+		kind:      .function
+		file:      'demo.v'
+		signature: 'fn hub_fn()'
+	}
+	for i in 0 .. n {
+		leaf_id := 'demo.leaf_${i}'
+		leaf_name := 'leaf_${i}'
+		g.symbols << Symbol{
+			id:        leaf_id
+			name:      leaf_name
+			kind:      .function
+			file:      'demo.v'
+			signature: 'fn ${leaf_name}()'
+		}
+		g.edges << Edge{
+			from: 'demo.hub_fn'
+			to:   leaf_id
+			kind: .calls
+		}
+	}
+	return g
+}
+
+fn test_query_finds_seeds_and_walks_calls_edges() {
+	// query()/shortest_path() had ZERO test coverage before this -- this is
+	// the first basic correctness check, not just the regression test below.
+	g := hub_spoke_graph(3)
+	out := g.query('hub', 2000, false)
+	assert out.contains('fn hub_fn()')
+	assert out.contains('fn leaf_0()')
+	assert out.contains('fn leaf_1()')
+	assert out.contains('fn leaf_2()')
+}
+
+fn test_query_never_walks_past_budget_even_in_a_large_component() {
+	// The actual bug: query() used to walk the ENTIRE reachable component
+	// before ever consulting `budget` -- on a real corpus (vlang, "asm"
+	// query) that reached 85% of a 116k-symbol graph, and combined with an
+	// O(n) `queue.delete(0)` dequeue, hung for 8+ CPU-minutes per query.
+	// Verified this test actually catches that: temporarily reverted just
+	// the query() fix (kept queue.delete(0) and no budget check on the
+	// traversal loop) and confirmed this assertion FAILS with visited=51
+	// (hub + all 50 leaves) before restoring the fix, which brings it to 5.
+	g := hub_spoke_graph(50) // hub + 50 leaves = 51 nodes, all one component
+	out := g.query('hub', 5, false)
+	// "// query: hub  (N of VISITED visited symbols, ~T tokens)"
+	visited := out.all_before('\n').all_after('of ').all_before(' visited').int()
+	assert visited > 0 // sanity: actually parsed a number, not a silent 0 from a broken extraction
+	assert visited <= 5
+}
+
+fn test_query_dfs_mode_also_finds_seeds() {
+	g := hub_spoke_graph(3)
+	out := g.query('leaf_1', 2000, true)
+	assert out.contains('fn leaf_1()')
+}
+
+fn test_shortest_path_finds_a_real_path() {
+	g := hub_spoke_graph(3)
+	path := g.shortest_path('demo.leaf_0', 'demo.leaf_1')
+	assert path == ['demo.leaf_0', 'demo.hub_fn', 'demo.leaf_1']
+}
+
+fn test_shortest_path_returns_empty_for_unreachable_or_unknown_nodes() {
+	g := hub_spoke_graph(3)
+	mut g2 := Graph{}
+	g2.symbols << Symbol{ id: 'other.thing', name: 'thing', kind: .function }
+	// unknown node on one side
+	assert g.shortest_path('demo.leaf_0', 'nonexistent') == []
+	// known nodes, but no edge connects them at all (disjoint graphs, so no
+	// path exists once merged into one lookup -- same shape as "unreachable")
+	mut disjoint := Graph{}
+	disjoint.symbols << g.symbols
+	disjoint.symbols << g2.symbols
+	disjoint.edges << g.edges
+	assert disjoint.shortest_path('demo.leaf_0', 'other.thing') == []
+}
