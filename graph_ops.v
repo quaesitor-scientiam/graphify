@@ -100,32 +100,56 @@ pub fn (g Graph) query(text string, budget int, dfs bool) string {
 	}
 
 	mut visited := map[string]bool{}
-	mut order := []string{}
 	mut queue := []string{}
 	for s in seeds {
 		visited[s] = true
 		queue << s
 	}
-	for queue.len > 0 {
-		id := if dfs {
-			queue.pop()
+
+	// Walk and render in one pass, stopping as soon as the budget is spent.
+	// This used to be two phases -- walk the whole reachable component into an
+	// `order` list, then render `order` until the budget ran out -- which made
+	// the cost depend on the size of the component rather than on the budget:
+	// a 250-token query against the V compiler's graph walked all ~108k
+	// reachable symbols and took minutes. Nothing about the output changes,
+	// because the budget cut the render at the same point anyway; only the work
+	// after that point is skipped.
+	//
+	// The trade is that the header can no longer say how many symbols were
+	// reachable in total, since counting them is exactly the walk being
+	// avoided. It reports whether more remained instead, which is the part a
+	// caller acts on (narrow the query, or raise the budget).
+	mut lines := []string{}
+	mut tokens := 0
+	mut head := 0
+	mut truncated := false
+	for {
+		mut id := ''
+		if dfs {
+			if queue.len == 0 {
+				break
+			}
+			id = queue.pop()
 		} else {
-			first := queue.first()
-			queue.delete(0)
-			first
+			// An index into the queue, not `delete(0)`: deleting the first
+			// element shifts every remaining one, which is O(n) per step and
+			// turns a breadth-first walk over a large component quadratic.
+			if head >= queue.len {
+				break
+			}
+			id = queue[head]
+			head++
 		}
-		order << id
+		// Expand before rendering, so a seed or neighbour that has no symbol of
+		// its own (an edge target that resolved to an id the graph doesn't
+		// carry) still contributes its neighbours, exactly as the walk did when
+		// it ran as its own phase.
 		for nb in idx.adj[id] or { []string{} } {
 			if nb !in visited {
 				visited[nb] = true
 				queue << nb
 			}
 		}
-	}
-
-	mut lines := []string{}
-	mut tokens := 0
-	for id in order {
 		s := idx.by_id[id] or { continue }
 		mut line := s.render()
 		if s.doc != '' {
@@ -136,12 +160,14 @@ pub fn (g Graph) query(text string, budget int, dfs bool) string {
 		}
 		t := line.len / 4
 		if tokens + t > budget && lines.len > 0 {
+			truncated = true
 			break
 		}
 		lines << line
 		tokens += t
 	}
-	header := '// query: ${text}  (${lines.len} of ${order.len} reachable symbols, ~${tokens} tokens)'
+	more := if truncated { ', more reachable' } else { '' }
+	header := '// query: ${text}  (${lines.len} symbols, ~${tokens} tokens${more})'
 	return header + '\n' + lines.join('\n')
 }
 
