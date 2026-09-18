@@ -2,6 +2,10 @@ bin/*.exe
 bin/graphify
 bin/graphify-mcp
 bin/graphify-hook
+bench/*.exe
+bench/*.def
+bench/session_stats
+bench/extract_bench
 graphify-out/
 .idea/
 *.log

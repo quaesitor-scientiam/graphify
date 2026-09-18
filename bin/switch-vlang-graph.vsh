@@ -4,6 +4,30 @@
 // ~/.claude.json's graphify MCP server at it.
 //
 //   v run bin/switch-vlang-graph.vsh [branch] [-Checkout] [-Force]
+//   v run bin/switch-vlang-graph.vsh <worktree-path> [-Force]
+//
+// A positional arg that is an existing directory is treated as a WORKTREE
+// PATH, not a branch name: its own checked-out branch is used to label the
+// stored graph, and -Checkout is meaningless (a worktree is already on its
+// own branch) and ignored if passed. This is the normal case for this
+// project's own convention of one worktree per feature branch (never
+// `git checkout <branch>` inside the shared main checkout) -- pass the
+// worktree path directly, e.g.:
+//   v run bin/switch-vlang-graph.vsh S:\repo\vlang-http3-server-handshake
+//
+// A plain branch name (no such directory exists) keeps the original
+// behavior: operates on the single configured `vlang_repo` checkout,
+// optionally `git checkout`-ing it first with -Checkout.
+//
+// Either way, a brand-new graph is NOT a full rescan: master's own
+// `.gf_cache.ndjson` (content-hash-keyed, portable across directories) is
+// copied in to prime the target's cache before extracting, so only files
+// that actually differ from master's current tree get reparsed. Measured
+// on a real branch whose only difference from master was one commit: full
+// scan ~60-90s, primed-cache scan ~8s, same symbol/edge count for the
+// unchanged files. Skip this priming (rare: you want a graph of some
+// OTHER, unrelated base than current master) by deleting the target
+// graph_dir's .gf_cache.ndjson before rerunning with -Force.
 
 import os
 import time
@@ -80,6 +104,24 @@ fn patch_mcp_args(content string, graph_file string) !string {
 	return content[..idx] + new_escaped + content[idx + old_escaped.len..]
 }
 
+// prime_cache_from_master copies master's incremental cache into a fresh
+// graph_dir before extraction, so the extractor treats any file whose
+// content is unchanged from master's current tree as already-parsed
+// instead of rescanning it. Best-effort: a missing master cache (e.g. this
+// is the very first extract ever) just means the branch's own extract
+// falls back to a full scan, same as before this existed.
+fn prime_cache_from_master(store string, graph_dir string) {
+	master_cache := os.join_path(store, 'vlang', '.gf_cache.ndjson')
+	target_cache := os.join_path(graph_dir, '.gf_cache.ndjson')
+	if !os.exists(master_cache) {
+		return
+	}
+	os.mkdir_all(graph_dir) or { return }
+	os.cp(master_cache, target_cache) or {
+		eprintln('Could not prime cache from master (${err}) -- falling back to a full scan')
+	}
+}
+
 fn main() {
 	config_path := os.join_path(@VMODROOT, 'graphify.config.json')
 	if !os.exists(config_path) {
@@ -98,27 +140,46 @@ fn main() {
 	args := os.args#[1..]
 	do_checkout := parse_flag(args, '-Checkout')
 	force := parse_flag(args, '-Force')
-	mut branch := positional_branch(args)
+	positional := positional_branch(args)
 
-	vlang := config.vlang_repo
 	store := config.store
 	exe_name := $if windows { 'graphify.exe' } $else { 'graphify' }
 	graphify_exe := os.join_path(@VMODROOT, 'bin', exe_name)
 	claude_json_path := os.join_path(os.home_dir(), '.claude.json')
 
-	if branch == '' {
+	// A positional arg that names an existing directory is a worktree path:
+	// extract IT directly, never touch the shared main checkout, and label
+	// the stored graph after whatever branch that worktree itself is on.
+	is_worktree := positional != '' && os.is_dir(positional)
+
+	mut vlang := config.vlang_repo
+	mut branch := positional
+
+	if is_worktree {
+		vlang = positional
 		detect := os.execute('git -C ${os.quoted_path(vlang)} branch --show-current')
 		branch = detect.output.trim_space()
 		if branch == '' {
-			eprintln('Could not detect current branch')
+			eprintln('Could not detect the branch checked out at ${vlang}')
 			exit(1)
 		}
-	}
-
-	if do_checkout {
-		println('git checkout ${branch}...')
-		checkout := os.execute('git -C ${os.quoted_path(vlang)} checkout ${os.quoted_path(branch)}')
-		println(checkout.output.trim_space())
+		if do_checkout {
+			eprintln('-Checkout is ignored for a worktree path -- it is already on its own branch.')
+		}
+	} else {
+		if branch == '' {
+			detect := os.execute('git -C ${os.quoted_path(vlang)} branch --show-current')
+			branch = detect.output.trim_space()
+			if branch == '' {
+				eprintln('Could not detect current branch')
+				exit(1)
+			}
+		}
+		if do_checkout {
+			println('git checkout ${branch}...')
+			checkout := os.execute('git -C ${os.quoted_path(vlang)} checkout ${os.quoted_path(branch)}')
+			println(checkout.output.trim_space())
+		}
 	}
 
 	safe_branch := branch.replace('/', '-').replace('\\', '-')
@@ -130,7 +191,10 @@ fn main() {
 	graph_file := os.join_path(graph_dir, 'graph.json')
 
 	if force || !os.exists(graph_file) {
-		println("Extracting graph for branch '${branch}' -> ${graph_dir} ...")
+		if branch !in ['master', 'main'] {
+			prime_cache_from_master(store, graph_dir)
+		}
+		println("Extracting graph for branch '${branch}' (${vlang}) -> ${graph_dir} ...")
 		start := time.now()
 		result := os.execute('${os.quoted_path(graphify_exe)} extract ${os.quoted_path(vlang)} --out ${os.quoted_path(graph_dir)}')
 		println(result.output.trim_space())

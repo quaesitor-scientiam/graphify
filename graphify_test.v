@@ -1545,3 +1545,176 @@ fn test_rel_path_is_case_insensitive() {
 	// a genuinely unrelated path still falls through unchanged
 	assert rel_path('/repo/project', '/other/place/os.v') == '/other/place/os.v'
 }
+
+// cache_test_dir returns a fresh scratch dir for one cache.v test, so
+// separate tests never share (or race on) the same .gf_cache.ndjson.
+fn cache_test_dir(name string) string {
+	dir := os.join_path(os.temp_dir(), 'graphify_test_cache_${name}')
+	os.rmdir_all(dir) or {}
+	os.mkdir_all(dir) or { panic(err) }
+	return dir
+}
+
+fn test_cache_round_trips_when_binary_hash_matches() {
+	dir := cache_test_dir('roundtrip')
+	entries := [
+		CacheEntry{
+			rel:  'demo.v'
+			hash: 'abc123'
+			fr:   FileResult{
+				symbols: [Symbol{ id: 'demo.greet', name: 'greet', kind: .function }]
+			}
+		},
+	]
+	save_cache(dir, 'binhash1', entries)
+	loaded := load_cache(dir, 'binhash1')
+	assert loaded.len == 1
+	assert loaded['demo.v'].hash == 'abc123'
+	assert loaded['demo.v'].fr.symbols[0].id == 'demo.greet'
+}
+
+fn test_cache_rejected_when_binary_hash_differs() {
+	// The actual bug this fix closes: a cache written by one graphify binary
+	// must not be trusted by a DIFFERENT one, even though every per-file
+	// content hash inside it would still match on disk -- the binary is what
+	// decides what a file's content extracts to, not just the file itself.
+	dir := cache_test_dir('binary_mismatch')
+	entries := [
+		CacheEntry{
+			rel:  'demo.v'
+			hash: 'abc123'
+			fr:   FileResult{
+				symbols: [Symbol{ id: 'demo.greet', name: 'greet', kind: .function }]
+			}
+		},
+	]
+	save_cache(dir, 'binhash1', entries)
+	loaded := load_cache(dir, 'binhash2')
+	assert loaded.len == 0
+}
+
+fn test_cache_rejected_when_written_by_older_format_without_binary_line() {
+	// Simulates a real pre-existing v4 cache file already on a user's disk
+	// from before this fix (format marker + per-file lines directly, no
+	// binary-hash line at all) -- upgrading graphify must not crash trying
+	// to parse it, and must treat it as stale (full reparse) rather than
+	// silently misinterpreting the first entry line as a binary-hash header.
+	dir := cache_test_dir('old_format')
+	old_style := 'graphify-cache-v4\ndemo.v\tabc123\t' + encode_file_result(FileResult{
+		symbols: [Symbol{ id: 'demo.greet', name: 'greet', kind: .function }]
+	})
+	os.write_file(os.join_path(dir, cache_file_name), old_style) or { panic(err) }
+	loaded := load_cache(dir, 'binhash1')
+	assert loaded.len == 0
+
+	// Also cover a hypothetical current-format file that is merely truncated
+	// (format line present, binary-hash line missing entirely) -- the same
+	// lines.len < 2 guard must catch this shape too, not just a wrong marker.
+	os.write_file(os.join_path(dir, cache_file_name), cache_format) or { panic(err) }
+	assert load_cache(dir, 'binhash1').len == 0
+}
+
+fn test_cache_not_trusted_or_written_when_binary_hash_is_blank() {
+	// A blank bin_hash means we couldn't even hash our own executable --
+	// nothing should be trusted, and nothing should be written that a future
+	// load could never validate anyway.
+	dir := cache_test_dir('blank_hash')
+	entries := [
+		CacheEntry{
+			rel:  'demo.v'
+			hash: 'abc123'
+			fr:   FileResult{
+				symbols: [Symbol{ id: 'demo.greet', name: 'greet', kind: .function }]
+			}
+		},
+	]
+	save_cache(dir, '', entries)
+	assert !os.exists(os.join_path(dir, cache_file_name))
+	assert load_cache(dir, '').len == 0
+}
+
+// hub_spoke_graph builds one `hub_fn` symbol calling `n` `leaf_N` symbols --
+// a single connected component reachable in one hop from the hub, used to
+// exercise query()/shortest_path() traversal without needing a real corpus.
+fn hub_spoke_graph(n int) Graph {
+	mut g := Graph{}
+	g.symbols << Symbol{
+		id:        'demo.hub_fn'
+		name:      'hub_fn'
+		kind:      .function
+		file:      'demo.v'
+		signature: 'fn hub_fn()'
+	}
+	for i in 0 .. n {
+		leaf_id := 'demo.leaf_${i}'
+		leaf_name := 'leaf_${i}'
+		g.symbols << Symbol{
+			id:        leaf_id
+			name:      leaf_name
+			kind:      .function
+			file:      'demo.v'
+			signature: 'fn ${leaf_name}()'
+		}
+		g.edges << Edge{
+			from: 'demo.hub_fn'
+			to:   leaf_id
+			kind: .calls
+		}
+	}
+	return g
+}
+
+fn test_query_finds_seeds_and_walks_calls_edges() {
+	// query()/shortest_path() had ZERO test coverage before this -- this is
+	// the first basic correctness check, not just the regression test below.
+	g := hub_spoke_graph(3)
+	out := g.query('hub', 2000, false)
+	assert out.contains('fn hub_fn()')
+	assert out.contains('fn leaf_0()')
+	assert out.contains('fn leaf_1()')
+	assert out.contains('fn leaf_2()')
+}
+
+fn test_query_never_walks_past_budget_even_in_a_large_component() {
+	// The actual bug: query() used to walk the ENTIRE reachable component
+	// before ever consulting `budget` -- on a real corpus (vlang, "asm"
+	// query) that reached 85% of a 116k-symbol graph, and combined with an
+	// O(n) `queue.delete(0)` dequeue, hung for 8+ CPU-minutes per query.
+	// Verified this test actually catches that: temporarily reverted just
+	// the query() fix (kept queue.delete(0) and no budget check on the
+	// traversal loop) and confirmed this assertion FAILS with visited=51
+	// (hub + all 50 leaves) before restoring the fix, which brings it to 5.
+	g := hub_spoke_graph(50) // hub + 50 leaves = 51 nodes, all one component
+	out := g.query('hub', 5, false)
+	// "// query: hub  (N of VISITED visited symbols, ~T tokens)"
+	visited := out.all_before('\n').all_after('of ').all_before(' visited').int()
+	assert visited > 0 // sanity: actually parsed a number, not a silent 0 from a broken extraction
+	assert visited <= 5
+}
+
+fn test_query_dfs_mode_also_finds_seeds() {
+	g := hub_spoke_graph(3)
+	out := g.query('leaf_1', 2000, true)
+	assert out.contains('fn leaf_1()')
+}
+
+fn test_shortest_path_finds_a_real_path() {
+	g := hub_spoke_graph(3)
+	path := g.shortest_path('demo.leaf_0', 'demo.leaf_1')
+	assert path == ['demo.leaf_0', 'demo.hub_fn', 'demo.leaf_1']
+}
+
+fn test_shortest_path_returns_empty_for_unreachable_or_unknown_nodes() {
+	g := hub_spoke_graph(3)
+	mut g2 := Graph{}
+	g2.symbols << Symbol{ id: 'other.thing', name: 'thing', kind: .function }
+	// unknown node on one side
+	assert g.shortest_path('demo.leaf_0', 'nonexistent') == []
+	// known nodes, but no edge connects them at all (disjoint graphs, so no
+	// path exists once merged into one lookup -- same shape as "unreachable")
+	mut disjoint := Graph{}
+	disjoint.symbols << g.symbols
+	disjoint.symbols << g2.symbols
+	disjoint.edges << g.edges
+	assert disjoint.shortest_path('demo.leaf_0', 'other.thing') == []
+}

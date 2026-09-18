@@ -325,10 +325,15 @@ redeclaration there. Post-fix on the same repo: 13.54% of symbols still
 collapse, entirely the `mod_`/`import_`/`constant`/`field` kinds this pass
 deliberately doesn't touch (matching `resolve_edges`' own scope) plus
 legitimate platform variants — of the 7,646 rows that were genuine
-cross-build-unit collisions, 7,638 (99.9%) are fixed; the 8 remaining are a
-separate, root-caused, out-of-scope bug (a `fn C.foo`/`fn JS.foo` extern
-declaration colliding with a same-named V wrapper in the *same* file, where
-a file-qualified suffix can't help). Before excluding containment edges,
+cross-build-unit collisions, 7,638 (99.9%) were fixed here; the remaining 8
+were a separate, root-caused bug that a file-qualified suffix can't help
+with — a `fn C.foo`/`fn JS.foo` extern declaration colliding with a
+same-named V wrapper in the *same* file, since `fn_id` (backend_v.v) doesn't
+preserve the language prefix in `short_name` — since fixed by skipping
+body-less non-V `FnDecl`s as symbols entirely (call resolution to an extern
+callee was already non-functional either way, so nothing that worked is
+lost); a fresh full-repo extraction now shows 0 duplicate ids across all six
+kinds this pass targets. Before excluding containment edges,
 the old collapse also produced an artificial "main" supermassive community
 spanning every unrelated standalone program in a large corpus; excluding
 `defines` edges from community weight remains independently correct
@@ -373,7 +378,11 @@ Resolution order: `--graph` > `GRAPHIFY_GRAPH` > `GRAPHIFY_STORE`/<cwd-name> > `
 - `.gf_cache.ndjson` — incremental cache: each file's content hash plus its
   extracted symbols/edges. A file whose hash matches the cache is reused
   as-is on the next `extract` instead of being reparsed — only new/changed
-  files hit the parser. Safe to delete to force a full reparse.
+  files hit the parser. The whole cache is also tied to a hash of the
+  `graphify` binary that wrote it, so a rebuilt binary with different
+  extraction logic can never silently serve stale results just because the
+  source files themselves didn't change. Safe to delete to force a full
+  reparse.
 
 Library:
 
@@ -485,7 +494,27 @@ v run bin/switch-vlang-graph.vsh                             # graph for the cur
 v run bin/switch-vlang-graph.vsh feature-x                   # graph for a specific branch
 v run bin/switch-vlang-graph.vsh feature-x -Checkout          # also `git checkout` that branch first
 v run bin/switch-vlang-graph.vsh -Force                      # re-extract even if a graph already exists
+v run bin/switch-vlang-graph.vsh <worktree-path>              # graph for an existing worktree
+v run bin/switch-vlang-graph.vsh <worktree-path> -Force       # same, forcing a re-extract
 ```
+
+A positional arg that names an existing directory is treated as a **worktree
+path**, not a branch name: it's extracted directly, the stored graph is
+labeled after whatever branch that worktree is already checked out to, and
+`-Checkout` is ignored (a worktree is already on its own branch). This is the
+normal case for a one-worktree-per-feature-branch convention, where the
+shared main checkout is never `git checkout`-ed away from its own branch —
+pass the worktree's path directly rather than a branch name.
+
+A brand-new graph (worktree or plain branch) isn't a full rescan either way:
+`master`'s own `.gf_cache.ndjson` is copied in to prime the target's cache
+before extracting, so only files that actually differ from master's current
+tree get reparsed — measured on a real branch one commit ahead of master,
+~60-90s full scan vs. ~8s primed. Best-effort and silent on a cache miss (no
+prior master extract yet just means a normal full scan, same as before this
+existed); skip it deliberately (rare — building a graph against some other,
+unrelated base) by deleting the target's `.gf_cache.ndjson` before rerunning
+with `-Force`.
 
 Restart Claude Code after switching so the MCP server picks up the new graph.
 
@@ -593,7 +622,7 @@ Phase 1 (engine) — done; V only.
 - [x] **extraction performance** — the full V compiler repo went 616s → ~12s, via two independent fixes. (1) `graphify.exe` is built `-gc none`: V's default Boehm GC costs roughly 590µs *per call* on the repeated small `strings.Builder` appends that writing `graph.json` is made of, which is not an allocation problem — isolated benchmarks showed the same loop run instantly with the writes stripped. Safe because the CLI is a one-shot process that exits; `graphify-mcp.exe` deliberately keeps the GC, being long-lived. (2) batch workers run concurrently rather than one at a time (32s → 12s), verified byte-identical against the sequential path.
 - [x] Phase 2: MCP server (`query_graph`, `get_node`, `get_neighbors`, `shortest_path`) + `.mcp.json`
 - [x] Phase 3: Claude Code wiring — `SKILL.md`, `/graphify`, `SessionStart` + `PreToolUse` hooks, git rebuild hook
-- [x] **SHA256 incremental cache** (`.gf_cache.ndjson`) — a file whose content hash is unchanged since the last `extract` is reused as-is; only new/changed files are reparsed (~11s → ~4s on a full no-op re-run of the V compiler repo)
+- [x] **SHA256 incremental cache** (`.gf_cache.ndjson`) — a file whose content hash is unchanged since the last `extract` is reused as-is; only new/changed files are reparsed (~11s → ~4s on a full no-op re-run of the V compiler repo). Also tied to the running binary's own hash, not just each file's — see below.
 - [x] **call-edge disambiguation.** Call edges record the raw callee name and are matched to a declaration afterwards (`resolve_edges`). Ambiguity — not missing data — is the limit. Resolution narrows progressively, strongest signal first: globally unique name → method-vs-function (`x.foo()` can only be a method) → the caller's own file → its module → what the calling file can actually *see*, meaning its `import`s plus `builtin`, which V auto-imports. On the V compiler repo that takes **53.7% → 82.9%** of 167.6k call edges.
   Two ideas do most of the work. Candidates are compared by **id**, not by symbol count, so a function declared once per platform — `os.setenv` in both `environment.c.v` and `environment.js.v` — stops looking ambiguous: it is one function, and the shared id addresses it correctly. And an id is refused only when its declarations sit in separate **build units** that merely share a module name: every standalone `main` program, and every `_test.v` file, each of which V compiles as its own executable. Inside an ordinary module a repeat *cannot* be two different functions, because V would reject the redeclaration. Guessing there would point every consumer at whichever declaration was indexed first.
 - [x] **doc/rationale capture** — the `//` block directly above a declaration becomes its `doc`, surfaced in full (capped at 8 lines) by `explain`/`get_node`, and as a one-line preview per result by `query`/`query_graph`. A blank line between comment and declaration means it is a header or a note about the code above, not documentation, so it is dropped. Read from source rather than the AST: in `.toplevel_comments` mode V reports only the *first* line of a contiguous block as a top-level node, and reading directly also keeps the parse in the cheaper `.skip_comments` mode. 15.8k declarations documented on the V compiler repo, 5.8k of them multi-line. The `query` preview was added after a live benchmark round showed it omitted `doc` entirely, which a suggested "`query` first" workflow turned into full-body reads instead of ever trying `explain` — see Measured savings.
@@ -607,7 +636,9 @@ Phase 1 (engine) — done; V only.
   That is resolved at query time from the raw names already stored in the graph, *not* by emitting `AMBIGUOUS` edges to every candidate as originally sketched: measured on the V compiler repo, real fan-out adds 1.15M edges (4.2× the whole graph), and those guessed links would then leak into `shortest_path` and `query_graph` traversal. Keeping it query-side costs no graph growth and leaves traversal untouched.
 - [x] Phase 5, **`merge-graphs`** — combines any number of previously-extracted graphs into one, with every id namespaced by its source's label (default: root directory name, deduplicated with `-2`/`-3`/... on repeat) so a shared module name like `main` — the implicit module of every standalone V program — can never collide across inputs. `get_body` works against the merged result too: a `roots` map from each source's label chain to its own original root lets it pick the right root per symbol; a graph.json from before this map existed simply decodes with `roots` empty and falls back to the single `root` field, unchanged. See Usage.
 - [x] Phase 5, **`communities`** — Louvain-style modularity optimization (local-moving + multi-level aggregation) plus a connectivity-guaranteeing split pass, standing in for the Leiden paper's randomized refinement phase; see Usage for exactly what that trades away. Verified against Zachary's Karate Club (correctly separates its two documented rival factions every run; modularity reliably well above a random/degenerate partition across dozens of test runs) and against real V codebases, where the resulting communities are recognizable subsystems — `Checker`, `Builder`, `Parser`, `Fmt`, `JsGen`, `Table`, `Scope` on the V compiler repo, not noise. Surfaced a real, pre-existing limitation rather than papering over it: `Index.by_id` collapsed distinct declarations that share an id across build units (every standalone `main` program above all) into one node, which without `defines`-edge exclusion produced an artificial supermassive "main" community. Excluding containment edges (`defines`/`imports`/`implements`) from community weight remains independently well-motivated (containment isn't interaction) even now that the id-collision itself is fixed below — it also matters for the legitimate platform-variant ids that are still intentionally left collapsed.
-- [x] **`Index.by_id` id-collision fixed (2026-08-16).** `disambiguate_ids` (graphify.v) runs before edge resolution and gives colliding declarations their own distinct node identity — see the Usage section's Index.by_id note for the full mechanism and real before/after numbers (21.03% of all symbols silently discarded → 13.54%, with the fixable portion — genuine cross-build-unit collisions — going from 7,646 rows to 8). The 8 that remain are a distinct, root-caused, out-of-scope bug: a `fn C.foo`/`fn JS.foo` extern declaration colliding with a same-named V wrapper *in the same file*, which a file-qualified suffix can't separate.
+- [x] **`Index.by_id` id-collision fixed (2026-08-16).** `disambiguate_ids` (graphify.v) runs before edge resolution and gives colliding declarations their own distinct node identity — see the Usage section's Index.by_id note for the full mechanism and real before/after numbers (21.03% of all symbols silently discarded → 13.54%, with the fixable portion — genuine cross-build-unit collisions — going from 7,646 rows to 8).
+- [x] **`fn C.foo`/`fn JS.foo` extern-decl same-file collision fixed (2026-08-16).** The last 8 rows left over from the `Index.by_id` fix above were a distinct bug: `fn_id` (backend_v.v) doesn't preserve a declaration's `C.`/`JS.` language prefix in `short_name`, so a body-less extern binding and a same-named real V wrapper *in the same file* got an identical id — which a file-qualified suffix can't separate, since they already share a file. Fixed by skipping body-less non-V `FnDecl`s as symbols entirely; call resolution to an extern callee was already non-functional either way (the raw call name carries the `C.`/`JS.` prefix via a different parser field than `short_name` ever sees), so nothing that worked is lost. A fresh full-repo extraction shows 0 duplicate ids across all six kinds this pass targets, down from 4 ids / 8 symbols.
+- [x] **Incremental cache tied to the running binary, not just file hashes (2026-08-17).** `.gf_cache.ndjson` only ever checked each source file's own content hash — with no way to detect that graphify's *own extraction logic* had changed. The fix above changed which symbols get extracted from a file without changing `FileResult`'s on-disk shape, so a rebuilt binary kept serving pre-fix cached results indefinitely on an unchanged corpus: a daily-scheduled Windows extraction served stale, pre-fix symbol counts for weeks, caught only by comparing against a fresh macOS extraction of the identical commit. Fixed by hashing the running binary itself once per extract and stamping it into the cache header — a cache written by a *different* binary is discarded wholesale, even when every individual file's hash still matches, since the binary is what actually decides what a file's content extracts to. This subsumes the old hand-maintained `cache_format` version bump (any wire-format change necessarily changes the compiled binary anyway); `cache_format` itself is kept, now scoped to just the header's own envelope shape, so a pre-existing cache from before this fix is safely discarded rather than misparsed.
 - [x] Phase 5, **GraphML/Cypher export** — both formats emit one node per unique id (via `Index.by_id`, not the raw `Symbol` list) and only resolved edges, for the reasons the Usage section explains. A real bug was caught in the process, not just anticipated: a naive one-node-per-raw-`Symbol` version violated the Cypher export's own uniqueness constraint against this project's own files (they all declare `module graphify`), confirmed by actually running the export, not by inspection.
 - [x] Phase 5, **SVG export and `graph.html`** — both share one layout: communities (see above) arranged around an outer circle, each community's own members around a smaller circle centered on its spot, sized by degree and colored by community. Deterministic trigonometry, not a force-directed simulation — see Usage for why. `graph.html` adds a legend, hover-to-highlight-neighbors, and scroll-to-zoom/drag-to-pan — plain DOM/SVG, no framework. Capped at 300 symbols (proportional per-community, highest-degree first) with the cap always disclosed, never silent.
   Shipped once already believing it was verified, then genuinely wasn't: the first pass checked hover by dispatching a synthetic `mouseenter` in JS, which passed because it targets the element directly — it can't catch "the real click target is too small to hit," which is exactly what user feedback then reported. Re-verified with a real WebDriver session (`vebidor`, driving actual Edge) instead: a synthesized *pointer move*, not a dispatched event, landed dead-center on a node and measured its rendered size at ~4×4 CSS pixels. Fixed by decoupling the hover hit-target from the node's degree-sized visible dot (now independently sized, ~3× larger) and adding real zoom/pan, then re-confirmed the same honest way — synthesized pointer move on the new target, a dispatched wheel event, and a real drag — plus visual screenshots at each step.
