@@ -31,12 +31,54 @@ pub fn extract_v_text(source string, rel string) ([]Symbol, []Edge) {
 	return extract_from_ast(file, mut table, rel, source.split('\n'))
 }
 
+// module_id builds a module id from `rel`, the graph-root-relative path of the
+// file, instead of from V's `file.mod.name`. V qualifies that name by the
+// file's path relative to the parent of the *process working directory*, so the
+// same file yields a different name depending on where graphify was invoked
+// from: `ci/common/runner.v` parses as `vlang.ci.common` from inside the vlang
+// repo, `repo.vlang.ci.common` one level up, and a bare `common` from /tmp.
+// That made every id -- and so every edge endpoint -- depend on the caller's
+// cwd, which is why two machines extracting the same commit produced graphs
+// that could not be compared. `rel` is derived from the extraction root, which
+// is recorded in manifest.json, so it is stable across machines and callers.
+//
+// The directory is used as the whole identity, not just as a prefix on the
+// declared name: V allows one module per directory, so the path already
+// identifies it uniquely (`vlib/rand` and `vlib/crypto/rand` both declare
+// `module rand` and stay distinct as `vlib.rand` / `vlib.crypto.rand`). The
+// declared name deliberately does NOT contribute, because it cannot be read
+// back reliably -- when V qualifies, it *replaces* the declared name with the
+// path-derived one, so `examples/call_v_from_c/v_test_math.v` (which declares
+// `module test_math`) reports `examples.call_v_from_c` from inside the repo and
+// `test_math` from outside it. Only files with no directory of their own fall
+// back to V's name, which is all there is to go on for a single-file run.
+//
+// Two modules in one directory -- a `_test.v` declaring `module main` beside an
+// ordinary module -- therefore land on the same id here, which is precisely the
+// build-unit collision disambiguate_ids already splits by file.
+fn module_id(rel string, mod_name string) string {
+	dir := os.dir(rel)
+	if dir == '' || dir == '.' || dir == rel {
+		// V's `module x` is a single identifier, so anything before the last
+		// dot is qualification V added from the cwd, not part of the name.
+		declared := mod_name.all_after_last('.')
+		return if declared == '' { 'main' } else { declared }
+	}
+	return dir.replace('\\', '/').replace('/', '.')
+}
+
 fn extract_from_ast(file &ast.File, mut table ast.Table, rel string, src []string) ([]Symbol, []Edge) {
 	mut syms := []Symbol{}
 	mut edges := []Edge{}
 
-	mod := file.mod.name
-	mod_id := if mod == '' { 'main' } else { mod }
+	// Two different things, deliberately kept apart: `mod_id` is the stable id
+	// graphify builds ids from, `v_mod` is the name V itself used for this
+	// module in the types and declaration names it reports. Prefix with the
+	// former; strip with the latter. Conflating them silently re-introduces the
+	// cwd dependence, because V's names carry its own cwd-derived qualification
+	// (see module_id above).
+	mod_id := module_id(rel, file.mod.name)
+	v_mod := file.mod.name
 
 	// module node
 	syms << Symbol{
@@ -83,12 +125,12 @@ fn extract_from_ast(file &ast.File, mut table ast.Table, rel string, src []strin
 					// declarations that already share a file.
 					continue
 				}
-				id := fn_id(mod_id, stmt, mut table)
+				id := fn_id(mod_id, v_mod, stmt, mut table)
 				syms << Symbol{
 					id:        id
-					name:      if stmt.short_name != '' { stmt.short_name } else { stmt.name }
+					name:      if stmt.short_name != '' { stmt.short_name } else { stmt.name.all_after_last('.') }
 					kind:      if stmt.is_method { SymbolKind.method } else { SymbolKind.function }
-					signature: fn_signature(stmt, mut table, mod_id)
+					signature: fn_signature(stmt, mut table, v_mod)
 					file:      rel
 					line:      stmt.name_pos.line_nr + 1
 					end_line:  end_of(stmt.body_pos)
@@ -104,28 +146,29 @@ fn extract_from_ast(file &ast.File, mut table ast.Table, rel string, src []strin
 				// type references: receiver, params, return
 				mut rseen := map[string]bool{}
 				if stmt.is_method {
-					add_ref(id, base_type_name(table, stmt.receiver.typ, mod_id), rel, mut edges, mut
+					add_ref(id, base_type_name(table, stmt.receiver.typ, v_mod), rel, mut edges, mut
 						rseen)
 				}
 				pstart := if stmt.is_method { 1 } else { 0 }
 				for i := pstart; i < stmt.params.len; i++ {
-					add_ref(id, base_type_name(table, stmt.params[i].typ, mod_id), rel, mut edges, mut
+					add_ref(id, base_type_name(table, stmt.params[i].typ, v_mod), rel, mut edges, mut
 						rseen)
 				}
 				if stmt.return_type != ast.void_type && stmt.return_type != 0 {
-					add_ref(id, base_type_name(table, stmt.return_type, mod_id), rel, mut edges, mut
+					add_ref(id, base_type_name(table, stmt.return_type, v_mod), rel, mut edges, mut
 						rseen)
 				}
 				collect_calls(stmt.stmts, CallCtx{
 					from:      id
 					recv_name: if stmt.is_method { stmt.receiver.name } else { '' }
 					recv_type: if stmt.is_method {
-						'${mod_id}.' + clean_type(table, stmt.receiver.typ, mod_id).trim_left('&')
+						'${mod_id}.' + clean_type(table, stmt.receiver.typ, v_mod).trim_left('&')
 					} else {
 						''
 					}
 					table:  table
 					mod_id: mod_id
+					v_mod:  v_mod
 					file:   rel
 				}, mut edges)
 			}
@@ -152,7 +195,7 @@ fn extract_from_ast(file &ast.File, mut table ast.Table, rel string, src []strin
 				// fields as symbols, plus type-reference and embed edges
 				mut rseen := map[string]bool{}
 				for f in stmt.fields {
-					tname := clean_type(table, f.typ, mod_id)
+					tname := clean_type(table, f.typ, v_mod)
 					syms << Symbol{
 						id:        '${id}.${f.name}'
 						name:      f.name
@@ -169,7 +212,7 @@ fn extract_from_ast(file &ast.File, mut table ast.Table, rel string, src []strin
 						to:   '${id}.${f.name}'
 						kind: .defines
 					}
-					base := base_type_name(table, f.typ, mod_id)
+					base := base_type_name(table, f.typ, v_mod)
 					if f.is_embed {
 						edges << Edge{
 							from: id
@@ -225,7 +268,7 @@ fn extract_from_ast(file &ast.File, mut table ast.Table, rel string, src []strin
 			}
 			ast.ConstDecl {
 				for cf in stmt.fields {
-					id := '${mod_id}.${cf.name}'
+					id := '${mod_id}.${cf.name.all_after_last('.')}'
 					syms << Symbol{
 						id:        id
 						name:      cf.name.all_after_last('.')
@@ -254,47 +297,56 @@ fn extract_from_ast(file &ast.File, mut table ast.Table, rel string, src []strin
 }
 
 // fn_id builds a stable id for a function or method.
-fn fn_id(mod_id string, fd ast.FnDecl, mut table ast.Table) string {
+fn fn_id(mod_id string, v_mod string, fd ast.FnDecl, mut table ast.Table) string {
 	if fd.is_method {
-		recv := clean_type(table, fd.receiver.typ, mod_id).trim_left('&')
+		recv := clean_type(table, fd.receiver.typ, v_mod).trim_left('&')
 		return '${mod_id}.${recv}.${fd.short_name}'
 	}
-	short := if fd.short_name != '' { fd.short_name } else { fd.name }
+	// `fd.name` is V's fully qualified name; only its last segment is the
+	// declaration's own name, the rest is module qualification graphify
+	// re-derives itself.
+	short := if fd.short_name != '' { fd.short_name } else { fd.name.all_after_last('.') }
 	return '${mod_id}.${short}'
 }
 
 // fn_signature renders a body-less signature: the token-lean essence.
-fn fn_signature(fd ast.FnDecl, mut table ast.Table, mod_id string) string {
+fn fn_signature(fd ast.FnDecl, mut table ast.Table, v_mod string) string {
 	mut s := ''
 	if fd.is_pub {
 		s += 'pub '
 	}
 	s += 'fn '
 	if fd.is_method {
-		s += '(${fd.receiver.name} ${clean_type(table, fd.receiver.typ, mod_id)}) '
+		s += '(${fd.receiver.name} ${clean_type(table, fd.receiver.typ, v_mod)}) '
 	}
-	s += if fd.short_name != '' { fd.short_name } else { fd.name }
+	s += if fd.short_name != '' { fd.short_name } else { fd.name.all_after_last('.') }
 	s += '('
 	start := if fd.is_method { 1 } else { 0 } // params[0] is the receiver for methods
 	mut parts := []string{}
 	for i := start; i < fd.params.len; i++ {
 		p := fd.params[i]
-		parts << '${p.name} ${clean_type(table, p.typ, mod_id)}'
+		parts << '${p.name} ${clean_type(table, p.typ, v_mod)}'
 	}
 	s += parts.join(', ')
 	s += ')'
 	if fd.return_type != ast.void_type && fd.return_type != 0 {
-		s += ' ${clean_type(table, fd.return_type, mod_id)}'
+		s += ' ${clean_type(table, fd.return_type, v_mod)}'
 	}
 	return s
 }
 
 // clean_type renders a type name, dropping the current module's prefix so the
 // skeleton reads like the original source (`User`, not `demo.User`).
-fn clean_type(table &ast.Table, typ ast.Type, mod_id string) string {
+fn clean_type(table &ast.Table, typ ast.Type, v_mod string) string {
 	// drop the current module's prefix wherever it appears, so `&graphify.Graph`
-	// and `[]graphify.Symbol` read as `&Graph` and `[]Symbol`.
-	return table.type_to_str(typ).replace('${mod_id}.', '')
+	// and `[]graphify.Symbol` read as `&Graph` and `[]Symbol`. This must be V's
+	// own module name, not graphify's `mod_id` -- V spells the prefix inside
+	// these type strings itself, and it is the one place graphify still has to
+	// speak V's naming rather than its own.
+	if v_mod == '' {
+		return table.type_to_str(typ)
+	}
+	return table.type_to_str(typ).replace('${v_mod}.', '')
 }
 
 // doc_from collects the `//` block directly above `line` (1-based) from the
@@ -334,8 +386,8 @@ fn end_of(pos token.Pos) int {
 // base_type_name reduces a (possibly decorated) type like `&User`, `[]User`, or
 // `map[string]User` to its trailing identifier (`User`), so it can be matched to
 // a declared type symbol. Builtins/externals simply won't resolve and are dropped.
-fn base_type_name(table &ast.Table, typ ast.Type, mod_id string) string {
-	name := clean_type(table, typ, mod_id)
+fn base_type_name(table &ast.Table, typ ast.Type, v_mod string) string {
+	name := clean_type(table, typ, v_mod)
 	mut out := ''
 	for ch in name {
 		if (ch >= `a` && ch <= `z`) || (ch >= `A` && ch <= `Z`)
@@ -376,6 +428,7 @@ struct CallCtx {
 	recv_type string // id of the receiver's type, e.g. `v3.transform.Transformer`
 	table     &ast.Table = unsafe { nil }
 	mod_id    string
+	v_mod     string // V's own name for the module; strip with this, prefix with mod_id
 	file      string // the file being extracted, stamped onto each calls edge -- see Edge.file
 	locals    map[string]string
 }
@@ -488,13 +541,14 @@ fn track_assign(stmt ast.AssignStmt, ctx CallCtx) CallCtx {
 		return ctx
 	}
 	mut locals := ctx.locals.clone()
-	locals[name] = recv_type_str(ctx.table, ctx.mod_id, si.typ)
+	locals[name] = recv_type_str(ctx.table, ctx.mod_id, ctx.v_mod, si.typ)
 	return CallCtx{
 		from:      ctx.from
 		recv_name: ctx.recv_name
 		recv_type: ctx.recv_type
 		table:     ctx.table
 		mod_id:    ctx.mod_id
+		v_mod:     ctx.v_mod
 		locals:    locals
 	}
 }
@@ -519,8 +573,8 @@ fn struct_init_of(e ast.Expr) ast.StructInit {
 // prefix (see its own doc comment), so this re-adds it only when clean_type
 // actually stripped something, and leaves an already-qualified foreign type
 // (`other.Bar`) untouched.
-fn recv_type_str(table &ast.Table, mod_id string, typ ast.Type) string {
-	resolved := clean_type(table, typ, mod_id).trim_left('&')
+fn recv_type_str(table &ast.Table, mod_id string, v_mod string, typ ast.Type) string {
+	resolved := clean_type(table, typ, v_mod).trim_left('&')
 	return if resolved.contains('.') { resolved } else { '${mod_id}.${resolved}' }
 }
 
@@ -552,7 +606,7 @@ fn walk_call(ce ast.CallExpr, ctx CallCtx, mut edges []Edge, mut seen map[string
 					}
 				}
 			} else if left is ast.StructInit && left.typ != ast.void_type && left.typ != 0 {
-				rt = recv_type_str(ctx.table, ctx.mod_id, left.typ)
+				rt = recv_type_str(ctx.table, ctx.mod_id, ctx.v_mod, left.typ)
 			}
 		}
 		edges << Edge{
