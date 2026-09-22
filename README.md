@@ -394,11 +394,12 @@ graphify.write_bundle(g, 'graphify-out')!
 println(g.query('auth flow', 2000, false))
 ```
 
-## MCP server (for Claude Code)
+## MCP server (for Claude Code and Codex)
 
 `cmd/mcp` is a JSON-RPC-over-stdio MCP server that loads a persisted
 `graph.json` once and exposes graph traversal as tools, so the model queries
-the graph instead of reading source files:
+the graph instead of reading source files. The same server works with both
+Claude Code and Codex:
 
 | Tool | Purpose |
 | --- | --- |
@@ -409,8 +410,7 @@ the graph instead of reading source files:
 | `get_neighbors(node)` | names of all directly linked symbols |
 | `shortest_path(a, b)` | relationship path between two symbols |
 
-Build and register (project-scoped via `.mcp.json`, already in this repo).
-`cmd/cli` and `cmd/hooks` both build `-gc none`: both are one-shot, short-lived
+Build and register it with the client you use. `cmd/cli` and `cmd/hooks` both build `-gc none`: both are one-shot, short-lived
 processes — `graphify extract`'s own README section above already explains why
 (Boehm GC's per-call overhead caused a ~500x slowdown on the graph.json write
 path, 616s -> 32s on the full vlang repo). Do NOT add `-gc none` to
@@ -424,6 +424,8 @@ v -prod -gc none -o bin/graphify-hook    cmd/hooks/graphify_hook.vsh   # Claude 
 v -prod            -o bin/graphify-mcp   cmd/mcp
 bin/graphify extract .                 # produce graphify-out/graph.json first
 ```
+
+### Claude Code
 
 `.mcp.json` (already in this repo, gitignored — copy `.mcp.json.example` if
 you don't have one) uses Claude Code's `${CLAUDE_PROJECT_DIR}` path expansion,
@@ -441,8 +443,38 @@ so it works unedited on any machine; the one thing to check per OS is the
 }
 ```
 
-Or register globally: `claude mcp add graphify -- /path/to/bin/graphify-mcp <path-to-graph.json>`.
-Smoke-test the protocol without Claude: `cat cmd/mcp/test_session.jsonl | bin/graphify-mcp graphify-out/graph.json`.
+Or register globally:
+
+```
+claude mcp add graphify -- /path/to/bin/graphify-mcp /path/to/graph_data/vlang/graph.json
+```
+
+### Codex
+
+Codex reads MCP registrations from `~/.codex/config.toml` (or a trusted
+project-scoped `.codex/config.toml`). Register the same server against the
+graph extracted from the V-language repository:
+
+```toml
+[mcp_servers.graphify]
+command = "/path/to/graphify/bin/graphify-mcp"
+args = ["/path/to/graph_data/vlang/graph.json"]
+enabled = true
+```
+
+The equivalent CLI command is:
+
+```
+codex mcp add graphify -- /path/to/graphify/bin/graphify-mcp /path/to/graph_data/vlang/graph.json
+```
+
+Restart the client after registering or switching the graph so it reloads the
+MCP server configuration. Smoke-test the protocol independently of either
+client with:
+
+```
+cat cmd/mcp/test_session.jsonl | bin/graphify-mcp /path/to/graph_data/vlang/graph.json
+```
 
 ## Operational scripts
 
@@ -620,7 +652,7 @@ Phase 1 (engine) — done; V only.
 - [x] `extract` / `query` (BFS/DFS + token budget) / `path` / `explain` / `body` / `skeleton`
 - [x] **resilient extraction** — files parsed in worker-process batches across `nr_cpus()` concurrent workers, so a file that panics V's parser is skipped + reported, not fatal. Torture-tested on the full V compiler repo: 103,253 symbols in ~12s cold, 3 unparseable files isolated.
 - [x] **extraction performance** — the full V compiler repo went 616s → ~12s, via two independent fixes. (1) `graphify.exe` is built `-gc none`: V's default Boehm GC costs roughly 590µs *per call* on the repeated small `strings.Builder` appends that writing `graph.json` is made of, which is not an allocation problem — isolated benchmarks showed the same loop run instantly with the writes stripped. Safe because the CLI is a one-shot process that exits; `graphify-mcp.exe` deliberately keeps the GC, being long-lived. (2) batch workers run concurrently rather than one at a time (32s → 12s), verified byte-identical against the sequential path.
-- [x] Phase 2: MCP server (`query_graph`, `get_node`, `get_neighbors`, `shortest_path`) + `.mcp.json`
+- [x] Phase 2: MCP server (`query_graph`, `get_node`, `get_neighbors`, `shortest_path`) + Claude Code `.mcp.json` and Codex `config.toml` registration
 - [x] Phase 3: Claude Code wiring — `SKILL.md`, `/graphify`, `SessionStart` + `PreToolUse` hooks, git rebuild hook
 - [x] **SHA256 incremental cache** (`.gf_cache.ndjson`) — a file whose content hash is unchanged since the last `extract` is reused as-is; only new/changed files are reparsed (~11s → ~4s on a full no-op re-run of the V compiler repo). Also tied to the running binary's own hash, not just each file's — see below.
 - [x] **call-edge disambiguation.** Call edges record the raw callee name and are matched to a declaration afterwards (`resolve_edges`). Ambiguity — not missing data — is the limit. Resolution narrows progressively, strongest signal first: globally unique name → method-vs-function (`x.foo()` can only be a method) → the caller's own file → its module → what the calling file can actually *see*, meaning its `import`s plus `builtin`, which V auto-imports. On the V compiler repo that takes **53.7% → 82.9%** of 167.6k call edges.
