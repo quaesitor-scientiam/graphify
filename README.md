@@ -416,12 +416,19 @@ processes — `graphify extract`'s own README section above already explains why
 path, 616s -> 32s on the full vlang repo). Do NOT add `-gc none` to
 `graphify-mcp` below — it's a long-lived server process and needs bounded
 memory. The binary name gets an `.exe` suffix on Windows only; the rest of
-this doc omits it:
+this doc omits it.
+
+All three need `-old-compiler`, and so does `v -old-compiler test .`: they
+import graphify's extractor, which uses V's V1 frontend (`v.ast`). Current V
+provides that frontend only through its V 0.5.2 compatibility compiler, and
+only when asked for explicitly. See
+[FUTURE_WORK.md §6](FUTURE_WORK.md#6-the-extractor-depends-on-vs-removed-v1-frontend)
+for setup (`make v1`) and the port plan.
 
 ```
-v -prod -gc none -o bin/graphify         cmd/cli     # extract, query, etc.
-v -prod -gc none -o bin/graphify-hook    cmd/hooks/graphify_hook.vsh   # Claude Code hook, see below
-v -prod            -o bin/graphify-mcp   cmd/mcp
+v -old-compiler -prod -gc none -o bin/graphify         cmd/cli     # extract, query, etc.
+v -old-compiler -prod -gc none -o bin/graphify-hook    cmd/hooks/graphify_hook.vsh   # Claude Code hook, see below
+v -old-compiler -prod            -o bin/graphify-mcp   cmd/mcp
 bin/graphify extract .                 # produce graphify-out/graph.json first
 ```
 
@@ -646,6 +653,9 @@ For the MCP server, pass the local source root as a 2nd arg (or set
 ## Status
 
 Phase 1 (engine) — done; V only.
+
+Known gaps and evidence-gated future work are recorded in
+[FUTURE_WORK.md](FUTURE_WORK.md).
 
 - [x] V backend: module, imports, structs, enums, interfaces, consts, fns/methods, body-less signatures, call edges
 - [x] `graphify-out/` bundle: `graph.json`, `GRAPH_REPORT.md`, `manifest.json`
