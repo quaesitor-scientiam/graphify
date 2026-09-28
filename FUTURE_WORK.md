@@ -137,31 +137,38 @@ fails to extract on the current commit — is already covered by the
 incremental cache's own prior result for that file, not by another branch's
 graph.
 
-Three narrower, real gaps remain:
+**Done (commit `22023d8`).** The three narrower gaps this section identified,
+plus the audit command, are all implemented:
 
-- **Publishing `graph.json` is not atomic.** `store.v`'s `save()` writes it
-  in place. A reader (e.g. a long-lived MCP server restarting mid-update)
-  could see a partially-written file. Write to a temp file in the same
-  directory and rename it into place.
-- **A file that fails to parse is indistinguishable from a deleted file.**
-  `build_graph_resilient` records a failed file's path in `failed`, but does
-  not carry its previous cache entry into `new_cache` — so a transient
-  parser crash silently drops that file's symbols from the graph, the same
-  as if the file had been deleted. The previous extraction is already
-  sitting in `old_cache`; carry it forward (marked stale) instead of
-  dropping it, and decide explicitly what happens when a file that *changed*
-  then fails to parse, since its stale symbols would describe code that no
-  longer exists.
-- **`manifest.json` carries too little to tell a clean graph from a degraded
-  one.** It has only tool, version, root, timestamp, and counts. Add the
-  source commit (when available), the extractor binary hash already used
-  for cache invalidation, and the list of files that failed or were carried
-  forward stale.
+- **`graph.json` publishes atomically.** `save_graph` writes to a temp file
+  and publishes it with `atomic_replace`. Windows needed real attention:
+  `os.rename` FAILS outright there when the destination already exists
+  (verified against the actual Windows C runtime), so Windows publishes via
+  `MoveFileExW`/`MOVEFILE_REPLACE_EXISTING`, a genuine single-operation
+  replace — `os.mv`'s fallback (copy then delete the source) would have
+  reintroduced the exact torn-read window this exists to avoid.
+- **A file that fails to parse now falls back to its last successful
+  extraction, marked stale**, instead of silently vanishing from the graph.
+  `CacheEntry` gained a `stale` flag; `stale_fallback_for`/`fresh_reuse_of`
+  in `graphify.v` decide when to serve it and when to clear it (a hash match
+  against current content directly reverifies the file, clearing `stale`
+  even if it was previously carried forward). Both places in
+  `build_graph_resilient` that used to drop a file's symbols outright — a
+  crashed worker, and a listfile write failure — use this now.
+- **`manifest.json` records `binary_hash`, a best-effort `source_commit`,
+  and `failed`/`stale` file lists**, via a new `ExtractReport` threaded from
+  `build_graph_resilient` through `write_bundle`.
+- **`graphify diff <old.json> <new.json>`** lists symbols in `old` missing
+  from `new`, grouped by file, classified from `new`'s manifest as
+  parse-failed / stale / file-removed / symbol-specifically-missing — this
+  is the audit trail, and it does cover losses beyond a merge, such as a
+  walker or skip-list change.
 
-A `graphify diff <old.json> <new.json>` command — listing symbols present in
-`old` but missing from `new`, grouped by file and that file's extraction
-status — would give an audit trail for "did anything unexpectedly
-disappear" without the base/overlay machinery, and it would also catch
-losses the reconciliation framing misses entirely, such as a walker or
-skip-list change that drops files with no merge involved.
+Known gap left from this work: the stale-carry-forward *wiring* inside
+`build_graph_resilient` has no test that triggers a real worker crash —
+vlang's own permanently-unparseable files have never succeeded even once, so
+there's nothing for them to fall back to, and constructing a reliable
+artificial crash is fragile. The pure decision helpers are unit-tested
+directly instead; the wiring is covered by review, the full test suite, and
+a real full-corpus run, not a targeted crash-injection test.
 
