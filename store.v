@@ -17,8 +17,59 @@ import strings
 // ever runs as a short-lived, one-shot process (extract, or a single query)
 // that exits and lets the OS reclaim everything — do NOT apply -gc none to
 // graphify-mcp.exe (cmd/mcp), which stays resident for a whole session.
+//
+// The write itself is staged through a temp file and published with
+// atomic_replace, so a reader of `path` (a long-lived graphify-mcp.exe, or a
+// concurrent `graphify query`) never observes a partially-written file —
+// only the complete previous content or the complete new content. The temp
+// file's name includes this process's pid so two extracts racing on the same
+// `path` never collide on the temp file itself (only one of them wins the
+// final publish; the loser's own write is otherwise undisturbed).
 pub fn save_graph(g Graph, path string) ! {
-	os.write_file(path, graph_to_json(g))!
+	tmp := '${path}.tmp.${os.getpid()}'
+	os.write_file(tmp, graph_to_json(g)) or {
+		os.rm(tmp) or {}
+		return err
+	}
+	atomic_replace(tmp, path) or {
+		os.rm(tmp) or {}
+		return err
+	}
+}
+
+$if windows {
+	#include <windows.h>
+}
+
+fn C.MoveFileExW(lp_existing_file_name &u16, lp_new_file_name &u16, dw_flags u32) int
+
+const move_file_replace_existing = 0x1
+
+// atomic_replace moves `src` onto `dst`, replacing any existing `dst`, as a
+// single filesystem operation — the whole point being that no reader of
+// `dst` can ever observe a state that is neither the old content nor the new
+// content.
+//
+// POSIX `rename()` (what os.rename wraps on non-Windows) already does this.
+// Windows' C runtime `rename()` instead FAILS outright when `dst` already
+// exists — confirmed empirically here, not assumed from documentation — so
+// plain os.rename would error on every publish after the first one, when
+// graph.json already exists. os.mv's cross-platform fallback for a failed
+// rename is copy-then-delete-source, which reintroduces the exact torn-read
+// window this function exists to avoid (a reader could see `dst` mid-copy),
+// so it is deliberately not used here. Windows instead goes through
+// MoveFileEx with MOVEFILE_REPLACE_EXISTING, which — like POSIX rename — is
+// a single atomic filesystem operation when `src` and `dst` are on the same
+// volume, which they always are here (same output directory).
+fn atomic_replace(src string, dst string) ! {
+	$if windows {
+		ok := C.MoveFileExW(src.to_wide(), dst.to_wide(), u32(move_file_replace_existing))
+		if ok == 0 {
+			return error('failed to publish ${dst} (MoveFileEx)')
+		}
+	} $else {
+		os.rename(src, dst)!
+	}
 }
 
 // load_graph reads a graph previously written by save_graph.

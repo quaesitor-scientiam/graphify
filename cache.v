@@ -9,6 +9,16 @@ struct CacheEntry {
 	rel  string
 	hash string
 	fr   FileResult
+mut:
+	// stale is true exactly when `fr` has NOT been verified against the
+	// file's current on-disk content this run: this run's attempt to parse
+	// it crashed, and `fr`/`hash` are carried forward from the last run that
+	// did succeed. false whenever `fr` is either freshly extracted this run
+	// or reused because `hash` was directly matched against current content
+	// (see stale_fallback_for/fresh_reuse_of in graphify.v). Mutable so those
+	// two helpers can flip it on a cheap copy of an existing entry instead of
+	// rebuilding one field-by-field.
+	stale bool
 }
 
 // cache_file_name is the incremental-cache artifact written alongside
@@ -63,14 +73,22 @@ fn load_cache(out_dir string, bin_hash string) map[string]CacheEntry {
 		if i < 2 || line.trim_space() == '' {
 			continue // [0] format marker, [1] binary hash, both already validated
 		}
-		parts := line.split_nth('\t', 3)
-		if parts.len < 3 {
+		// rel, hash, stale flag ('1'/'0'), then the FileResult's own encoding
+		// (which may itself contain further \x01-\x04-escaped structure, so it
+		// is always the last, unsplit field — see batch_proto.v). Adding the
+		// stale field here does not need a cache_format bump: a binary-hash
+		// mismatch above already discards the whole cache before any per-line
+		// parsing happens, so a binary old enough to predate this field can
+		// never misparse a line written by a newer one, or vice versa.
+		parts := line.split_nth('\t', 4)
+		if parts.len < 4 {
 			continue
 		}
 		out[parts[0]] = CacheEntry{
-			rel:  parts[0]
-			hash: parts[1]
-			fr:   decode_file_result(parts[2])
+			rel:   parts[0]
+			hash:  parts[1]
+			stale: parts[2] == '1'
+			fr:    decode_file_result(parts[3])
 		}
 	}
 	return out
@@ -87,7 +105,8 @@ fn save_cache(out_dir string, bin_hash string, entries []CacheEntry) {
 	lines << cache_format
 	lines << 'binary:${bin_hash}'
 	for e in entries {
-		lines << '${e.rel}\t${e.hash}\t${encode_file_result(e.fr)}'
+		stale_flag := if e.stale { '1' } else { '0' }
+		lines << '${e.rel}\t${e.hash}\t${stale_flag}\t${encode_file_result(e.fr)}'
 	}
 	os.write_file(os.join_path(out_dir, cache_file_name), lines.join('\n')) or {}
 }

@@ -390,7 +390,9 @@ Library:
 import graphify
 
 g := graphify.build_graph(graphify.Options{ root: 'path/to/project' })
-graphify.write_bundle(g, 'graphify-out')!
+// build_graph (unlike build_graph_resilient) doesn't track a binary hash or
+// per-file failures, so its ExtractReport is empty.
+graphify.write_bundle(g, 'graphify-out', graphify.ExtractReport{})!
 println(g.query('auth flow', 2000, false))
 ```
 
