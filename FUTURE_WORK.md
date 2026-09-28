@@ -124,3 +124,44 @@ establish:
 The incremental cache is already keyed on the extractor binary's hash, so a
 ported extractor will not reuse cache entries produced by the V1-based one.
 
+## 7. Publishing, degraded extractions, and manifest detail
+
+A full three-way reconciliation between a common-base graph, another
+branch's overlay, and the graph rebuilt from a merged commit is not needed.
+Git already reconciles the *source*; the graph is derived only from current
+source plus the extractor, so anything another branch contributed that
+survived the merge is already reachable from current source, and anything
+that did not survive is correctly excluded by the rule that the graph must
+not retain symbols whose source is gone. The one real gap — a file that
+fails to extract on the current commit — is already covered by the
+incremental cache's own prior result for that file, not by another branch's
+graph.
+
+Three narrower, real gaps remain:
+
+- **Publishing `graph.json` is not atomic.** `store.v`'s `save()` writes it
+  in place. A reader (e.g. a long-lived MCP server restarting mid-update)
+  could see a partially-written file. Write to a temp file in the same
+  directory and rename it into place.
+- **A file that fails to parse is indistinguishable from a deleted file.**
+  `build_graph_resilient` records a failed file's path in `failed`, but does
+  not carry its previous cache entry into `new_cache` — so a transient
+  parser crash silently drops that file's symbols from the graph, the same
+  as if the file had been deleted. The previous extraction is already
+  sitting in `old_cache`; carry it forward (marked stale) instead of
+  dropping it, and decide explicitly what happens when a file that *changed*
+  then fails to parse, since its stale symbols would describe code that no
+  longer exists.
+- **`manifest.json` carries too little to tell a clean graph from a degraded
+  one.** It has only tool, version, root, timestamp, and counts. Add the
+  source commit (when available), the extractor binary hash already used
+  for cache invalidation, and the list of files that failed or were carried
+  forward stale.
+
+A `graphify diff <old.json> <new.json>` command — listing symbols present in
+`old` but missing from `new`, grouped by file and that file's extraction
+status — would give an audit trail for "did anything unexpectedly
+disappear" without the base/overlay machinery, and it would also catch
+losses the reconciliation framing misses entirely, such as a walker or
+skip-list change that drops files with no merge involved.
+
