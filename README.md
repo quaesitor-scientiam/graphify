@@ -429,10 +429,16 @@ for setup (`make v1`) and the port plan.
 
 ```
 v -old-compiler -prod -gc none -o bin/graphify         cmd/cli     # extract, query, etc.
-v -old-compiler -prod -gc none -o bin/graphify-hook    cmd/hooks/graphify_hook.vsh   # Claude Code hook, see below
+v -old-compiler -prod -gc none -o bin/graphify-hook    build cmd/hooks/graphify_hook.vsh   # Claude Code hook, see below
 v -old-compiler -prod            -o bin/graphify-mcp   cmd/mcp
 bin/graphify extract .                 # produce graphify-out/graph.json first
 ```
+
+The hook needs the `build` subcommand because its source is a `.vsh` script.
+Without it, V treats the file as a script to compile *and run*. Each build
+then executes the hook as a side effect, and the build goes through V's
+compile-and-run cache, which can leave an existing `bin/graphify-hook` in
+place instead of rebuilding it — while still exiting 0.
 
 ### Claude Code
 

@@ -37,7 +37,8 @@ jobs:
         run: v -old-compiler -prod -gc none -o bin/graphify cmd/cli
 
       - name: Build hook binary
-        run: v -old-compiler -prod -gc none -o bin/graphify-hook cmd/hooks/graphify_hook.vsh
+        # `build`, not plain `v file.vsh`: a .vsh is otherwise compiled AND run.
+        run: v -old-compiler -prod -gc none -o bin/graphify-hook build cmd/hooks/graphify_hook.vsh
 
       - name: Build MCP server
         run: v -old-compiler -prod -o bin/graphify-mcp cmd/mcp
@@ -56,3 +57,4 @@ jobs:
       - name: Smoke test — hook binary handles empty stdin without crashing
         run: |
           printf '' | ./bin/graphify-hook
+
