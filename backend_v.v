@@ -4,6 +4,7 @@ import os
 import v.ast
 import v.parser
 import v.pref
+import v.scanner
 import v.token
 
 // extract_v_file parses one .v file with V's own frontend and returns the
@@ -26,12 +27,7 @@ pub fn extract_v_file_result(path string, rel string) FileResult {
 	pref_ := extract_prefs()
 	file := parser.parse_file(path, mut table, .skip_comments, pref_)
 	src := os.read_file(path) or { '' }
-	syms, edges := extract_from_ast(file, mut table, rel, src.split('\n'))
-	return FileResult{
-		symbols:     syms
-		edges:       edges
-		parse_error: first_parse_error(file)
-	}
+	return extract_parsed(file, mut table, src, path, rel)
 }
 
 // extract_v_text is the same as extract_v_file but takes source directly,
@@ -47,12 +43,131 @@ pub fn extract_v_text_result(source string, rel string) FileResult {
 	mut table := ast.new_table()
 	pref_ := extract_prefs()
 	file := parser.parse_text(source, rel, mut table, .skip_comments, pref_)
-	syms, edges := extract_from_ast(file, mut table, rel, source.split('\n'))
+	return extract_parsed(file, mut table, source, rel, rel)
+}
+
+// extract_parsed extracts from a whole-file parse and, when that parse hit a
+// syntax error, re-parses the file one declaration at a time (see
+// reparse_by_declaration).
+fn extract_parsed(file &ast.File, mut table ast.Table, source string, path string, rel string) FileResult {
+	lines := source.split('\n')
+	mut syms, mut edges := extract_from_ast(file, mut table, rel, lines)
+	if file.errors.len > 0 {
+		syms, edges = reparse_by_declaration(source, path, rel, lines, syms, edges)
+	}
 	return FileResult{
 		symbols:     syms
 		edges:       edges
 		parse_error: first_parse_error(file)
 	}
+}
+
+// reparse_by_declaration confines a syntax error to the declaration it is in.
+// After some errors the V 0.5.2 parser does not just skip a token: it returns
+// from the middle of a statement, its brace nesting goes out of step with the
+// source, and it reads the bodies of the following functions as garbage at file
+// scope until it happens to fall back into step. Shadowing a local with a loop
+// variable (`name := ...` then `for name, typ in m`), which V3 accepts and V
+// 0.5.2 rejects, cost 320 of the 501 functions in vlib/v/types/
+// checker_ownership_d_ownership.v that way.
+//
+// Each top-level declaration is parsed again on its own, behind the file's
+// header (its module and imports) and padded with blank lines so that line
+// numbers stay those of the file. Anything the whole-file parse found that the
+// per-declaration parses did not is kept as well, so this never loses a symbol
+// the whole-file parse had.
+fn reparse_by_declaration(source string, path string, rel string, lines []string, whole_syms []Symbol, whole_edges []Edge) ([]Symbol, []Edge) {
+	starts := decl_start_lines(source)
+	if starts.len < 2 {
+		return whole_syms, whole_edges
+	}
+	pref_ := extract_prefs()
+	mut table := ast.new_table()
+	// every header line keeps its newline, so declaration `start` lands on line
+	// `start` after padding even when the header is empty
+	header := lines[..starts[0]].map(it + '\n').join('')
+	chunk := fn [lines, starts, header] (i int) string {
+		start := starts[i]
+		end := if i + 1 < starts.len { starts[i + 1] } else { lines.len }
+		return header + '\n'.repeat(start - starts[0]) + lines[start..end].join('\n')
+	}
+	base := parser.parse_text(chunk(0), path, mut table, .skip_comments, pref_)
+	mut stmts := base.stmts.clone()
+	for i in 1 .. starts.len {
+		f := parser.parse_text(chunk(i), path, mut table, .skip_comments, pref_)
+		// the header's module and imports were already taken from the first one
+		for stmt in f.stmts {
+			if stmt.pos.line_nr >= starts[i] {
+				stmts << stmt
+			}
+		}
+	}
+	merged := &ast.File{
+		...*base
+		stmts: stmts
+	}
+	syms, edges := extract_from_ast(merged, mut table, rel, lines)
+	mut have := map[string]bool{}
+	for sym in syms {
+		have[sym.id] = true
+	}
+	mut extra := map[string]bool{}
+	mut out_syms := syms.clone()
+	for sym in whole_syms {
+		if !have[sym.id] && !extra[sym.id] {
+			extra[sym.id] = true
+			out_syms << sym
+		}
+	}
+	mut out_edges := edges.clone()
+	for e in whole_edges {
+		if extra[e.from] || (e.kind == .defines && extra[e.to]) {
+			out_edges << e
+		}
+	}
+	return out_syms, out_edges
+}
+
+// decl_start_lines returns the 0-based lines on which a top-level declaration
+// starts: a declaration keyword, a file-scope `$if`, or an `@[...]` attribute
+// as the first token in column 1. It goes by the scanner's tokens rather than
+// by text, so code quoted inside a string is never taken for a declaration.
+// A declaration under one or more attribute lines starts at the first of them.
+// Nothing at or above the last `module` or `import` line counts, so the header
+// always holds them (a file may open with `@[has_globals]` above `module`).
+fn decl_start_lines(source string) []int {
+	mut s := scanner.new_scanner(source, .skip_comments, extract_prefs())
+	mut starts := []int{}
+	mut prev_attr := false
+	mut last_line := -1
+	mut header_end := -1
+	for {
+		t := s.scan()
+		if t.kind == .eof {
+			break
+		}
+		if t.line_nr == last_line {
+			continue
+		}
+		last_line = t.line_nr
+		if t.col != 1 {
+			continue
+		}
+		if t.kind in [.key_module, .key_import] {
+			header_end = t.line_nr - 1
+		}
+		is_attr := t.kind == .at
+		if t.kind in [.key_fn, .key_pub, .key_struct, .key_enum, .key_interface, .key_const,
+			.key_type, .key_union, .key_global, .dollar, .at] {
+			if !prev_attr {
+				starts << t.line_nr - 1
+			}
+			prev_attr = is_attr
+		} else {
+			prev_attr = false
+		}
+	}
+	return starts.filter(it > header_end)
 }
 
 // extract_prefs are the parser preferences extraction uses. The parser's

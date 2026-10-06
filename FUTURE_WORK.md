@@ -160,9 +160,27 @@ aborts at the first syntax error, while in `.silent` mode it records the
 error, skips the bad token and keeps going, as `v -check-syntax` does.
 Extraction now parses in `.silent` mode. On vlang `414f15fb7b` that brought
 the functions missing relative to V3 from 3,548 down to 561, with no function
-lost and no spurious one added. The remaining 561 sit in 45 files, most of
-them outside any syntax error (320 in
+lost and no spurious one added. The remaining 561 sat in 45 files (320 in
 `vlib/v/types/checker_ownership_d_ownership.v` alone).
+
+**Per-declaration re-parse (October 2026).** The 320 were not outside a syntax
+error, as first written here. That file shadows a local with a loop variable
+(`name := ...`, then `for name, typ in m`), which V3 accepts and V 0.5.2
+rejects. The parser returns from the middle of the `for` without closing its
+scope, so every later method whose receiver is also `tc` fails as a
+"redefinition of parameter" and its body is read as garbage at file scope;
+only functions with other parameter names survived. Recovery cannot fix that
+inside one parse, so a file whose parse reports an error is now parsed again
+one top-level declaration at a time (`reparse_by_declaration` in
+`backend_v.v`): each declaration behind the file's module and imports, padded
+so line numbers stay the file's own, with boundaries taken from scanner tokens
+in column 1 so code quoted in a string is never split on. Anything the
+whole-file parse found that the per-declaration parses did not is kept too. On
+vlang `1b4ecb9c05` this added 394 symbols (295 methods, 74 functions, the rest
+types and fields), 298 of them in the ownership file, which now has all 501
+of its functions; it lost none, and corrected the line numbers of the few
+methods the broken parse had placed at the top of the file. A full extraction
+still takes about 3.4 seconds.
 
 Recovery has one side effect: in script-style files (top-level statements, no
 `fn main`), skipping a statement can land the parser on an anonymous `fn`

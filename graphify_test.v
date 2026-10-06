@@ -112,6 +112,97 @@ fn always() {}
 	}
 }
 
+fn test_syntax_error_costs_only_its_own_declaration() {
+	// V 0.5.2 rejects a loop variable shadowing a local and returns from the
+	// middle of the `for` without closing its scope. Every later method whose
+	// receiver has the same name then fails as a "redefinition of parameter"
+	// and its body is read as garbage at file scope; functions with other
+	// parameter names survive. Shape from vlib/v/types/
+	// checker_ownership_d_ownership.v, which lost 320 of 501 functions to it.
+	src := 'module demo
+
+import os
+
+struct Checker {}
+
+fn (c Checker) shadows(m map[string]int) bool {
+	name := os.args[0]
+	for name, v in m {
+		if v > 0 {
+			return name.len > 0
+		}
+	}
+	return false
+}
+
+@[inline]
+fn (c Checker) after_one() int {
+	return 1
+}
+
+fn plain() {}
+
+struct After {
+	x int
+}
+
+fn (c Checker) after_two(a After) int {
+	return a.x
+}
+
+const quoted = \'
+fn not_a_declaration() {}
+\'
+'
+	fr := extract_v_text_result(src, 'demo.v')
+	assert fr.parse_error != ''
+	by_id := maps_by_id(fr.symbols)
+	for id in ['demo.Checker', 'demo.Checker.shadows', 'demo.Checker.after_one', 'demo.plain',
+		'demo.After', 'demo.After.x', 'demo.Checker.after_two', 'demo.quoted'] {
+		assert id in by_id, id
+	}
+	assert 'demo.not_a_declaration' !in by_id
+	assert by_id['demo.Checker.after_one'].line == 18
+	assert by_id['demo.After'].line == 24
+	assert by_id['demo.Checker.after_two'].line == 28
+	assert fr.symbols.filter(it.kind == .import_).len == 1
+	assert fr.symbols.filter(it.kind == .mod_).len == 1
+	assert fr.symbols.all(it.name != '')
+}
+
+fn test_reparse_keeps_header_when_an_attribute_precedes_module() {
+	src := '@[has_globals]
+module demo
+
+struct Checker {}
+
+fn (c Checker) first() {
+	name := 1
+	for name in [1] {
+		_ = name
+	}
+}
+
+fn (c Checker) second() {}
+
+struct Third {}
+'
+	fr := extract_v_text_result(src, 'demo.v')
+	assert fr.parse_error != ''
+	by_id := maps_by_id(fr.symbols)
+	assert 'demo.Checker.second' in by_id
+	assert 'demo.Third' in by_id
+	assert by_id['demo.Checker.second'].line == 13
+}
+
+fn maps_by_id(syms []Symbol) map[string]Symbol {
+	mut m := map[string]Symbol{}
+	for s in syms {
+		m[s.id] = s
+	}
+	return m
+}
+
 fn test_js_extern_decl_does_not_collide_with_same_name_v_wrapper() {
 	// Same bug, JS backend -- matches
 	// examples/wasm/change_color_by_id/change_color_by_id.wasm.v.
