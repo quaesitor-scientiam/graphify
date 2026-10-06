@@ -195,6 +195,102 @@ struct Third {}
 	assert by_id['demo.Checker.second'].line == 13
 }
 
+// assert_import_edges_match_symbols checks the invariant extract_from_ast
+// establishes and every later step must keep: each import symbol has its
+// `imports` edge from the module, and each `imports` edge has its import symbol.
+fn assert_import_edges_match_symbols(fr FileResult) {
+	for s in fr.symbols.filter(it.kind == .import_) {
+		assert fr.edges.any(it.kind == .imports && it.from == s.parent && it.to == s.name), 'import symbol ${s.id} has no imports edge'
+	}
+	for e in fr.edges.filter(it.kind == .imports) {
+		assert fr.symbols.any(it.kind == .import_ && it.parent == e.from && it.name == e.to), 'imports edge ${e.from} -> ${e.to} has no import symbol'
+	}
+}
+
+fn import_edges_to(fr FileResult, mod string) int {
+	return fr.edges.filter(it.kind == .imports && it.to == mod).len
+}
+
+fn test_reparse_keeps_the_imports_edge_of_an_implicit_import() {
+	// The parser adds `builtin.closure` itself when it reaches a closure. Here
+	// the closure sits in a declaration after the one with the syntax error, so
+	// the per-declaration re-parse's header (module and imports) never sees it:
+	// the whole-file parse alone supplies the symbol, and its edge must come
+	// along with it.
+	src := r'module demo
+
+import os
+
+fn broken(y []int) {
+	x := [1, ...(y)]
+	println(x)
+}
+
+fn later() {
+	f := fn () {
+		println(os.args)
+	}
+	f()
+}
+
+fn last() {}
+'
+	fr := extract_v_text_result(src, 'demo.v')
+	assert fr.parse_error != ''
+	assert fr.symbols.any(it.kind == .import_ && it.name == 'builtin.closure')
+	assert import_edges_to(fr, 'builtin.closure') == 1
+	assert import_edges_to(fr, 'os') == 1 // an explicit import is not duplicated
+	assert_import_edges_match_symbols(fr)
+}
+
+fn test_reparse_keeps_the_imports_edges_of_every_implicit_import() {
+	// Same rule for imports other than the closure one: `spawn` makes the parser
+	// import the threading modules, again from a later declaration.
+	src := r'module demo
+
+fn broken(y []int) {
+	x := [1, ...(y)]
+	println(x)
+}
+
+fn threaded() {
+	t := spawn println(1)
+	t.wait()
+}
+
+fn last() {}
+'
+	fr := extract_v_text_result(src, 'demo.v')
+	assert fr.parse_error != ''
+	assert fr.symbols.filter(it.kind == .import_).len >= 1 // the fixture really triggers one
+	assert_import_edges_match_symbols(fr)
+}
+
+fn test_import_edges_match_import_symbols_when_a_file_parses_cleanly() {
+	// The other side of the invariant, which never involved the re-parse: with no
+	// syntax error the same shapes give the same one-to-one symbols and edges.
+	src := r'module demo
+
+import os
+
+fn later() {
+	f := fn () {
+		println(os.args)
+	}
+	f()
+}
+
+fn threaded() {
+	t := spawn println(1)
+	t.wait()
+}
+'
+	fr := extract_v_text_result(src, 'demo.v')
+	assert fr.parse_error == ''
+	assert import_edges_to(fr, 'builtin.closure') == 1
+	assert_import_edges_match_symbols(fr)
+}
+
 fn maps_by_id(syms []Symbol) map[string]Symbol {
 	mut m := map[string]Symbol{}
 	for s in syms {

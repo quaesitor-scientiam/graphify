@@ -121,11 +121,23 @@ fn reparse_by_declaration(source string, path string, rel string, lines []string
 	}
 	mut out_edges := edges.clone()
 	for e in whole_edges {
-		if extra[e.from] || (e.kind == .defines && extra[e.to]) {
+		// An `imports` edge runs from the module, never from the import's own
+		// symbol, so it is carried by that symbol: the whole-file parse alone sees
+		// the imports the parser adds itself when it reaches later code (a closure
+		// brings in `builtin.closure`, `spawn` the threading modules).
+		if extra[e.from] || (e.kind == .defines && extra[e.to])
+			|| (e.kind == .imports && extra[import_id(e.from, e.to)]) {
 			out_edges << e
 		}
 	}
 	return out_syms, out_edges
+}
+
+// import_id is the id of the symbol for module `mod_id` importing `imported`.
+// extract_from_ast builds import symbols with it and reparse_by_declaration
+// matches their edges by it.
+fn import_id(mod_id string, imported string) string {
+	return '${mod_id}::import::${imported}'
 }
 
 // decl_start_lines returns the 0-based lines on which a top-level declaration
@@ -256,7 +268,7 @@ fn extract_from_ast(file &ast.File, mut table ast.Table, rel string, src []strin
 	// imports
 	for imp in file.imports {
 		syms << Symbol{
-			id:        '${mod_id}::import::${imp.mod}'
+			id:        import_id(mod_id, imp.mod)
 			name:      imp.mod
 			kind:      .import_
 			signature: 'import ${imp.mod}' + if imp.alias != imp.mod && imp.alias != '' {
