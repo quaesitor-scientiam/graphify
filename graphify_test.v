@@ -785,8 +785,8 @@ fn test_merge_graphs_explicit_labels_override_defaults() {
 // one) and returns their Graphs, ready to merge. Callers must remove the
 // returned roots when done.
 fn merge_get_body_fixture() (Graph, Graph, string, string) {
-	root_a := os.join_path(os.temp_dir(), 'graphify_test_merge_a')
-	root_b := os.join_path(os.temp_dir(), 'graphify_test_merge_b')
+	root_a := os.join_path(os.temp_dir(), 'graphify_test_merge_a_${os.getpid()}')
+	root_b := os.join_path(os.temp_dir(), 'graphify_test_merge_b_${os.getpid()}')
 	os.rmdir_all(root_a) or {}
 	os.rmdir_all(root_b) or {}
 	os.mkdir_all(root_a) or { panic(err) }
@@ -1549,7 +1549,7 @@ fn test_rel_path_is_case_insensitive() {
 // cache_test_dir returns a fresh scratch dir for one cache.v test, so
 // separate tests never share (or race on) the same .gf_cache.ndjson.
 fn cache_test_dir(name string) string {
-	dir := os.join_path(os.temp_dir(), 'graphify_test_cache_${name}')
+	dir := os.join_path(os.temp_dir(), 'graphify_test_cache_${name}_${os.getpid()}')
 	os.rmdir_all(dir) or {}
 	os.mkdir_all(dir) or { panic(err) }
 	return dir
