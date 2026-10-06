@@ -80,6 +80,38 @@ pub fn get_string_array() &&char {
 	assert fns[0].name == 'get_string_array'
 }
 
+fn test_top_level_comptime_if_declarations_are_extracted() {
+	// A file-scope `$if` parses to an ExprStmt wrapping a comptime IfExpr, so
+	// the declarations inside it were never reached. The parser keeps only the
+	// branch the host takes, so exactly one of each pair must appear --
+	// whichever host runs this test. Matches the shape in vlib/os/os_darwin.c.v.
+	src := 'module demo
+
+$if windows {
+	fn picked_a() {}
+	struct PickedA {}
+} $else {
+	fn picked_b() {}
+	struct PickedB {}
+	$if windows {
+		fn nested_a() {}
+	} $else {
+		fn nested_b() {}
+	}
+}
+
+fn always() {}
+'
+	syms, _ := extract_v_text(src, 'demo.v')
+	ids := syms.map(it.id)
+	assert 'demo.always' in ids
+	assert ('demo.picked_a' in ids) != ('demo.picked_b' in ids)
+	assert ('demo.PickedA' in ids) != ('demo.PickedB' in ids)
+	if 'demo.picked_b' in ids {
+		assert ('demo.nested_a' in ids) != ('demo.nested_b' in ids)
+	}
+}
+
 fn test_js_extern_decl_does_not_collide_with_same_name_v_wrapper() {
 	// Same bug, JS backend -- matches
 	// examples/wasm/change_color_by_id/change_color_by_id.wasm.v.

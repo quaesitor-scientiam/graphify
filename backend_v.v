@@ -161,7 +161,7 @@ fn extract_from_ast(file &ast.File, mut table ast.Table, rel string, src []strin
 	}
 
 	// top-level declarations
-	for stmt in file.stmts {
+	for stmt in top_level_decls(file.stmts) {
 		match stmt {
 			ast.FnDecl {
 				if stmt.language != .v && stmt.no_body {
@@ -351,6 +351,26 @@ fn extract_from_ast(file &ast.File, mut table ast.Table, rel string, src []strin
 }
 
 // fn_id builds a stable id for a function or method.
+// top_level_decls flattens file-scope `$if` blocks into the statements around
+// them. The parser has already evaluated each condition against the prefs and
+// kept only the taken branch's statements, so this adds exactly the
+// declarations that host compiles -- the same set `file.imports` reflects.
+fn top_level_decls(stmts []ast.Stmt) []ast.Stmt {
+	mut out := []ast.Stmt{cap: stmts.len}
+	for stmt in stmts {
+		if stmt is ast.ExprStmt {
+			if stmt.expr is ast.IfExpr && stmt.expr.is_comptime {
+				for branch in stmt.expr.branches {
+					out << top_level_decls(branch.stmts)
+				}
+				continue
+			}
+		}
+		out << stmt
+	}
+	return out
+}
+
 fn fn_id(mod_id string, v_mod string, fd ast.FnDecl, mut table ast.Table) string {
 	if fd.is_method {
 		recv := clean_type(table, fd.receiver.typ, v_mod).trim_left('&')

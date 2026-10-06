@@ -323,12 +323,18 @@ top-level `$if` whose condition is false for the target is skipped
 `vlib/v/parser/if_match.v`). That holds for architecture conditions such as
 `$if amd64` as well as for OS conditions.
 
-Separately, graphify's own extractor does not descend into top-level `$if`
-blocks, so a function declared inside one is missing on every host, not only
-on the platforms where the condition is false. (Imports are unaffected: the
-parser collects those itself.) On vlang this affects 16 functions in 3 files:
-small, and fixable independently of the platform question, by treating the
-declarations in each branch of a top-level `$if` as top-level declarations.
+Graphify's own extractor used not to descend into top-level `$if` blocks, so
+a declaration inside one was missing on every host, not only on the platforms
+where the condition is false. (Imports were unaffected: the parser collects
+those itself.) Fixed in October 2026: `top_level_decls` in `backend_v.v`
+flattens the branch the parser kept into the file's top-level statements. On
+vlang `414f15fb7b` that added 180 symbols in 25 files (functions, methods,
+constants, structs, enums and fields; an earlier count of 16 covered functions
+only) and lost none. One id changed form: three test files each declare `ret`
+inside a top-level `$if`, so it is now split per file by the usual collision
+disambiguation. The fix makes the platform difference below somewhat larger,
+since declarations in a taken branch now appear on the hosts that take it
+instead of on none.
 
 Consequences:
 
