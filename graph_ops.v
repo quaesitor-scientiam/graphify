@@ -405,15 +405,33 @@ pub fn (g Graph) get_body(node string) string {
 			}
 		}
 		end = next - 1
-		// The gap before the next *extracted* symbol can hold blank lines, doc
-		// comments for the next declaration, and declarations graphify does not
-		// model at all (a `__global`, say) — all of which would be served as if
-		// they were part of this body. Trim back to this declaration's own
-		// closing brace, which vfmt puts alone on its line.
-		for e := end; e > start; e-- {
-			if lines[e - 1].trim_space() == '}' {
-				end = e
-				break
+		// A declaration indented inside a block (a file-scope `$if`) is followed by
+		// that block's closing brace and by the text of branches the parser did not
+		// keep, so the last brace in the gap is not necessarily its own; only its
+		// indentation tells them apart. A top-level declaration has nothing around
+		// it, so it takes the trim below, which also survives a `}` at column 0
+		// inside a multi-line string.
+		// (start can lie past the end of a file that shrank since the graph was
+		// built; the `(no source)` check below handles that.)
+		indent := if start < lines.len {
+			lines[start][..lines[start].len - lines[start].trim_left(' \t').len]
+		} else {
+			''
+		}
+		own_end := if indent != '' { nested_decl_end(lines, start, end, indent) } else { 0 }
+		if own_end > 0 {
+			end = own_end
+		} else {
+			// The gap before the next *extracted* symbol can hold blank lines, doc
+			// comments for the next declaration, and declarations graphify does not
+			// model at all (a `__global`, say) — all of which would be served as if
+			// they were part of this body. Trim back to this declaration's own
+			// closing brace, which vfmt puts alone on its line.
+			for e := end; e > start; e-- {
+				if lines[e - 1].trim_space() == '}' {
+					end = e
+					break
+				}
 			}
 		}
 	}
@@ -424,6 +442,28 @@ pub fn (g Graph) get_body(node string) string {
 		return '(no source)'
 	}
 	return '// ${s.file}:${s.line}-${end}\n' + lines[start..end].join('\n')
+}
+
+// nested_decl_end finds where a declaration that is indented inside a block
+// ends, as a 1-based line number, or 0 when it cannot tell. `start` is the
+// 0-based index of its first line, `gap_end` the 1-based last line it may use
+// (just before the next declaration), `indent` the whitespace its first line
+// starts with. A one-line declaration closes on its own line; otherwise the
+// first line after the header that is a lone `}` at exactly `indent` closes it,
+// because everything inside the body is indented deeper and everything that
+// follows it at the same depth is another declaration.
+fn nested_decl_end(lines []string, start int, gap_end int, indent string) int {
+	first := lines[start].trim_space()
+	if first.ends_with('}') && first.contains('{') {
+		return start + 1
+	}
+	for i in start + 1 .. gap_end {
+		line := lines[i]
+		if line.trim_space() == '}' && line[..line.len - line.trim_left(' \t').len] == indent {
+			return i + 1
+		}
+	}
+	return 0
 }
 
 // names maps a list of symbol ids to their display names (for path output).

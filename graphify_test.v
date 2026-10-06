@@ -888,6 +888,217 @@ fn test_get_body_unmerged_graph_still_uses_single_root() {
 	assert body.contains('hello from a')
 }
 
+// body_fixture extracts `src` with the real extractor and writes it as demo.v
+// under a per-process temp root, so get_body reads real on-disk text at the
+// real symbols' line numbers. Callers must remove the returned root.
+fn body_fixture(src string) (Graph, string) {
+	root := os.join_path(os.temp_dir(), 'graphify_test_body_${os.getpid()}')
+	os.rmdir_all(root) or {}
+	os.mkdir_all(root) or { panic(err) }
+	os.write_file(os.join_path(root, 'demo.v'), src) or { panic(err) }
+	syms, edges := extract_v_text(src, 'demo.v')
+	mut g := Graph{
+		root: root
+	}
+	g.symbols = syms
+	g.edges = edges
+	return g, root
+}
+
+// own_closer is the closing brace a declaration named `name` should end with:
+// a `}` at the same indentation as its `fn` line in `src`.
+fn own_closer(src string, name string) string {
+	for line in src.split('\n') {
+		t := line.trim_space()
+		if t.starts_with('fn ${name}(') || t.starts_with('pub fn ${name}(') {
+			return line[..line.len - line.trim_left(' \t').len] + '}'
+		}
+	}
+	return ''
+}
+
+// assert_body_ends_at_own_brace checks every fn in `names` that the extractor
+// kept: get_body must stop at that fn's own closing brace, never at an
+// enclosing block's. Returns how many were checked.
+fn assert_body_ends_at_own_brace(g Graph, src string, names []string) int {
+	mut checked := 0
+	for name in names {
+		if !g.symbols.any(it.name == name) {
+			continue
+		}
+		body := g.get_body(name)
+		want := own_closer(src, name)
+		assert want != ''
+		assert body.split('\n').last() == want, 'get_body(${name}) ended at the wrong brace:\n${body}'
+		checked++
+	}
+	return checked
+}
+
+fn test_get_body_of_a_fn_in_a_file_level_comptime_if_ends_at_its_own_brace() {
+	// get_body has no reliable end line for fns, so it trims back from the next
+	// declaration to a closing brace. A fn inside a file-scope `$if` is followed
+	// by the `$if`'s own `}`, which must not be taken for the fn's.
+	src := r'module demo
+
+$if windows {
+	fn win_last() {
+		println(1)
+	}
+} $else {
+	fn other_last() {
+		println(1)
+	}
+}
+
+fn after() {
+	println(2)
+}
+'
+	g, root := body_fixture(src)
+	defer {
+		os.rmdir_all(root) or {}
+	}
+	// the parser keeps exactly the host's branch
+	assert assert_body_ends_at_own_brace(g, src, ['win_last', 'other_last']) == 1
+	body := g.get_body(if g.symbols.any(it.name == 'win_last') { 'win_last' } else { 'other_last' })
+	assert body.contains('println(1)')
+	assert !body.contains('after')
+}
+
+fn test_get_body_in_nested_and_sibling_comptime_ifs_ends_at_the_fns_own_brace() {
+	// The general rule: whatever encloses a fn, get_body stops at the closing
+	// brace at the fn's own indentation. Every host keeps exactly one of
+	// deep_a..deep_d (two levels down) and one of mid_a/mid_b (one level down,
+	// with the nested `$if` closing right above it).
+	src := r'module demo
+
+$if windows {
+	$if amd64 {
+		fn deep_a() {
+			println(1)
+		}
+	} $else {
+		fn deep_b() {
+			println(1)
+		}
+	}
+	fn mid_a() {
+		println(2)
+	}
+} $else {
+	$if amd64 {
+		fn deep_c() {
+			println(1)
+		}
+	} $else {
+		fn deep_d() {
+			println(1)
+		}
+	}
+	fn mid_b() {
+		println(2)
+	}
+}
+'
+	g, root := body_fixture(src)
+	defer {
+		os.rmdir_all(root) or {}
+	}
+	assert assert_body_ends_at_own_brace(g, src, ['deep_a', 'deep_b', 'deep_c', 'deep_d']) == 1
+	assert assert_body_ends_at_own_brace(g, src, ['mid_a', 'mid_b']) == 1
+}
+
+fn test_get_body_of_a_plain_fn_skips_the_next_declarations_doc_comment() {
+	// Unchanged behavior the indentation-aware trim must keep: the gap before
+	// the next declaration holds blank lines and its doc comment, none of which
+	// belong to this fn's body.
+	src := 'module demo
+
+fn first() {
+	println(1)
+}
+
+// second is documented.
+fn second() {
+	println(2)
+}
+'
+	g, root := body_fixture(src)
+	defer {
+		os.rmdir_all(root) or {}
+	}
+	assert assert_body_ends_at_own_brace(g, src, ['first', 'second']) == 2
+	assert !g.get_body('first').contains('documented')
+}
+
+fn test_get_body_of_a_one_line_fn_in_a_comptime_if_is_just_that_line() {
+	// An indented one-liner has no closing brace line of its own, so it must not
+	// reach for the enclosing `$if`'s.
+	src := r'module demo
+
+$if windows {
+	fn tiny_win() int { return 1 }
+} $else {
+	fn tiny_other() int { return 1 }
+}
+
+fn after() {
+	println(2)
+}
+'
+	g, root := body_fixture(src)
+	defer {
+		os.rmdir_all(root) or {}
+	}
+	name := if g.symbols.any(it.name == 'tiny_win') { 'tiny_win' } else { 'tiny_other' }
+	assert g.get_body(name).split('\n').len == 2, g.get_body(name) // header + the one line
+	assert g.get_body(name).split('\n').last() == '\tfn ${name}() int { return 1 }'
+}
+
+fn test_get_body_for_a_line_past_the_end_of_a_shrunken_file_has_no_source() {
+	// The graph can outlive an edit that shortened the file. An unknown end line
+	// plus a start past EOF must report no source, not index out of range.
+	src := 'module demo\n\nfn only() {\n\tprintln(1)\n}\n'
+	mut g, root := body_fixture(src)
+	defer {
+		os.rmdir_all(root) or {}
+	}
+	g.symbols = [
+		Symbol{
+			id:   'demo.gone'
+			name: 'gone'
+			kind: .function
+			file: 'demo.v'
+			line: 99
+		},
+	]
+	assert g.get_body('gone') == '(no source)'
+}
+
+fn test_get_body_falls_back_to_any_closing_brace_when_none_matches_the_indent() {
+	// Not vfmt'd: the fn starts at column 0 but its brace is indented. No brace
+	// matches the declaration's indentation, so get_body must still end at the
+	// nearest closing brace rather than reaching back to the header.
+	src := 'module demo
+
+fn odd() {
+	println(1)
+	}
+
+fn next_one() {
+	println(2)
+}
+'
+	g, root := body_fixture(src)
+	defer {
+		os.rmdir_all(root) or {}
+	}
+	body := g.get_body('odd')
+	assert body.split('\n').last() == '\t}', body
+	assert body.contains('println(1)')
+}
+
 fn test_merge_graphs_nested_merge_propagates_roots() {
 	// Merging an already-merged graph must re-prefix its inner labels rather
 	// than collapsing to its cosmetic `root` (a " + "-joined display string,
