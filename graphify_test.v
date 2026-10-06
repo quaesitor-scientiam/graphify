@@ -1954,3 +1954,26 @@ fn test_manifest_json_carries_the_extract_report() {
 	assert decoded.failed == ['x.v']
 	assert decoded.stale == ['y.v']
 }
+
+fn test_git_commit_of_is_blank_outside_a_git_repository() {
+	// A missing commit is recorded as absent, never an error that could stop
+	// an extract from publishing.
+	dir := store_test_dir('git_commit_none')
+	inside := os.exec(['git', '-C', dir, 'rev-parse', '--is-inside-work-tree'])
+	if inside.exit_code == 0 {
+		return // the scratch dir happens to sit inside someone's work tree; nothing to assert
+	}
+	assert git_commit_of(dir) == ''
+}
+
+fn test_git_commit_of_matches_git_rev_parse_in_a_real_repository() {
+	// This checkout, when the sources really are in a git work tree (skipped
+	// for e.g. an exported tarball, where there is no commit to find).
+	expected := os.exec(['git', '-C', @VMODROOT, 'rev-parse', 'HEAD'])
+	if expected.exit_code != 0 {
+		return
+	}
+	got := git_commit_of(@VMODROOT)
+	assert got != ''
+	assert got == expected.output.trim_space()
+}

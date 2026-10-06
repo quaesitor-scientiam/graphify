@@ -40,7 +40,7 @@ pub fn load_manifest(path string) !Manifest {
 // command otherwise fails — a missing commit is recorded as absent, never
 // treated as an error that should stop an extract from publishing.
 fn git_commit_of(root string) string {
-	result := os.execute('git -C ${os.quoted_path(root)} rev-parse HEAD')
+	result := os.exec(['git', '-C', root, 'rev-parse', 'HEAD'])
 	if result.exit_code != 0 {
 		return ''
 	}

@@ -51,7 +51,7 @@ fn main() {
 
 	if !no_pull {
 		log_line(log_path, 'git pull...')
-		pull := os.execute('git -C ${os.quoted_path(vlang)} pull --ff-only')
+		pull := os.exec(['git', '-C', vlang, 'pull', '--ff-only'])
 		log_line(log_path, pull.output.trim_space())
 		if pull.output.contains('Already up to date') {
 			log_line(log_path, 'No new commits. Skipping extract.')
@@ -62,7 +62,7 @@ fn main() {
 
 	log_line(log_path, 'extracting graph...')
 	start := time.now()
-	result := os.execute('${os.quoted_path(graphify_exe)} extract ${os.quoted_path(vlang)} --store ${os.quoted_path(store)}')
+	result := os.exec([graphify_exe, 'extract', vlang, '--store', store])
 	for line in result.output.split_into_lines() {
 		if line.trim_space() != '' {
 			log_line(log_path, line)
