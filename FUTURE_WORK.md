@@ -172,3 +172,76 @@ artificial crash is fragile. The pure decision helpers are unit-tested
 directly instead; the wiring is covered by review, the full test suite, and
 a real full-corpus run, not a targeted crash-injection test.
 
+## 8. Extraction depends on the build host's OS and architecture
+
+The same vlang commit extracted on an arm64 Mac and an x86_64 Windows machine
+gives different graphs: 108,812 versus 108,848 symbols, from the same 6,238
+files. The whole difference sits in six files:
+
+- five inline-assembly tests, `vlib/v/slow_tests/assembly/*.amd64.v` and
+  `*.i386.v`, which yield 37 more symbols on the x86_64 host;
+- `vlib/x/multiwindow/service_native_appkit_readback_metal_red_test.v`, whose
+  code sits behind `$if darwin`, which yields 1 more symbol on the Mac.
+
+`extract_v_file` parses with `pref.new_preferences()`, which defaults the
+target OS and architecture to the host's. The V1 parser makes decisions
+against those preferences at parse time: a top-level `$if` whose condition is
+false for the target is skipped (`comptime_skip_curr_stmts` and
+`skip_scope()` in V 0.5.2's `vlib/v/parser/if_match.v`), and a file named for
+an architecture, such as `.amd64.v`, gets a per-file architecture mode
+(`file_backend_mode` in `vlib/v/parser/parser.v`). The exact path by which the
+assembly files lose symbols on a non-matching host has not been traced.
+
+Consequences:
+
+- graphs in a store shared between machines differ by platform, even after
+  symbol ids were made independent of the working directory (`5170207`);
+- `graphify diff` across two machines' graphs reports symbols as missing that
+  are only another platform's code;
+- the difference is small for vlang today, but grows with the amount of
+  platform-specific code in a project.
+
+Options:
+
+- pin the target OS and architecture in the parser preferences, so every host
+  extracts one canonical view. This is deterministic, but omits code that only
+  exists for other platforms;
+- extract every branch of each platform conditional, if the parser offers a
+  mode for it. Whether V1's preferences support this has not been checked.
+
+Because §6 replaces this frontend, treat host independence as a requirement
+of the V3 port rather than patching the V1 path. If the shared store needs
+identical graphs sooner, pinning OS and architecture is the cheap stopgap.
+
+## 9. Building inside a git worktree compiles the main checkout
+
+`cmd/cli`, `cmd/mcp`, and `cmd/hooks/graphify_hook.vsh` all `import graphify`,
+and V resolves that import by directory name, walking up from the program
+being built. Claude Code worktrees live at `.claude/worktrees/<name>/`, so from
+a worktree the nearest directory named `graphify` is the main checkout. The
+build succeeds, but every binary built in a worktree contains the main
+checkout's code, not the worktree's.
+
+Tests are not affected the same way: `graphify_test.v` is itself
+`module graphify` in the repository root, so `v test` compiles the worktree's
+sources directly. A change can therefore pass its tests in a worktree while
+the binaries built there do not contain it. This happened while fixing the
+symbol id scheme. `v -print-v-files cmd/cli` shows which sources a build will
+use.
+
+Workaround, from a worktree:
+
+```
+mkdir -p /tmp/gfshim && ln -s "$PWD" /tmp/gfshim/graphify
+v -old-compiler -path "/tmp/gfshim|@vlib|@vmodules" -prod -gc none -o bin/graphify cmd/cli
+```
+
+Related: `v test .` from the main checkout also descends into
+`.claude/worktrees/` and runs every worktree's copy of the tests, each against
+whatever commit that worktree has checked out. Since `77742d7` and `e48a80c`
+those copies no longer race on shared temp directories, but their results
+describe stale code. Test the main checkout with an explicit path
+(`v -old-compiler test graphify_test.v`) when that matters.
+
+A durable fix could be a build script that detects a worktree and adds the
+module path itself, or at least a README note in the build section.
