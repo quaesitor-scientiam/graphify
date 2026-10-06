@@ -145,13 +145,21 @@ fn main() {
 					relevant = file_path.ends_with('.v')
 				}
 			} else {
-				blob := '${(ti['path'] or { json2.Any('') }).str()} ${(ti['glob'] or {
-					json2.Any('')
-				}).str()} ${(ti['pattern'] or { json2.Any('') }).str()} ${(ti['type'] or {
-					json2.Any('')
-				}).str()}'
+				// Each field is checked on its own. These used to be joined into one
+				// string and tested with ends_with('.v'), which only ever saw the
+				// LAST non-empty field -- so a Grep on `path: foo.v` with any
+				// `pattern` (i.e. nearly every real Grep) never matched. Checking
+				// per field is a strict superset of the old test: '*.v' contains no
+				// space, so it could never have spanned two joined fields.
 				type_str := (ti['type'] or { json2.Any('') }).str()
-				relevant = type_str == 'v' || blob.contains('*.v') || blob.trim_space().ends_with('.v')
+				relevant = type_str == 'v'
+				for key in ['path', 'glob', 'pattern', 'type'] {
+					field := (ti[key] or { json2.Any('') }).str().trim_space()
+					if field.contains('*.v') || field.ends_with('.v') {
+						relevant = true
+						break
+					}
+				}
 			}
 			if relevant {
 				println(emit('PreToolUse', pretooluse_context))

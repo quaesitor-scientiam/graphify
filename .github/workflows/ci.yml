@@ -58,3 +58,17 @@ jobs:
         run: |
           printf '' | ./bin/graphify-hook
 
+      # The PreToolUse reminder must fire for a Grep scoped to a .v path that
+      # also carries a pattern -- i.e. nearly every real Grep. It once didn't:
+      # the input fields were joined into one string, so only the last one was
+      # checked for `.v`. Also asserts a non-V path still gets no reminder.
+      - name: Smoke test — hook fires for a Grep on a .v path, not on others
+        run: |
+          mkdir -p /tmp/graphify-hook-proj/graphify-out
+          cp /tmp/graphify-ci-out/graph.json /tmp/graphify-hook-proj/graphify-out/
+          grep_on() {
+            printf '{"hook_event_name":"PreToolUse","tool_name":"Grep","tool_input":{"pattern":"fn main","path":"%s"}}' "$1" \
+              | CLAUDE_PROJECT_DIR=/tmp/graphify-hook-proj ./bin/graphify-hook
+          }
+          grep_on /tmp/graphify-hook-proj/main.v | grep -q additionalContext
+          test "$(grep_on /tmp/graphify-hook-proj/README.md)" = '{}'
