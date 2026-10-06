@@ -29,11 +29,18 @@ mut:
 // stale file failed this run too — but not every failed file is stale: a
 // file crashing on its very first sighting has no prior extraction to fall
 // back to, so it is in `failed` but not `stale`.
+//
+// `partial` lists files that parsed with syntax errors (see
+// FileResult.parse_error). They are served from this run's recovered parse,
+// not from an older cached copy: the recovered parse reflects the file's
+// current content and line numbers, which get_body reads from, whereas an
+// older copy's line ranges would point at the wrong code once anything moved.
 pub struct ExtractReport {
 pub:
 	binary_hash string
 	failed      []string
 	stale       []string
+	partial     []string
 }
 
 // stale_fallback_for looks up a file's last successful extraction to serve
@@ -87,6 +94,7 @@ pub fn build_graph_resilient(root string, worker_exe string, out_dir string) (Gr
 	}
 	mut failed := []string{}
 	mut stale := []string{}
+	mut partial := []string{}
 	// save_cache below needs out_dir to exist; write_bundle also creates it
 	// later, but that's after this function returns.
 	os.mkdir_all(out_dir) or {}
@@ -115,6 +123,9 @@ pub fn build_graph_resilient(root string, worker_exe string, out_dir string) (Gr
 			g.symbols << reused.fr.symbols
 			g.edges << reused.fr.edges
 			new_cache << reused
+			if reused.fr.parse_error != '' {
+				partial << rel
+			}
 			continue
 		}
 		queue << WorkItem{
@@ -190,6 +201,9 @@ pub fn build_graph_resilient(root string, worker_exe string, out_dir string) (Gr
 				g.symbols << fr.symbols
 				g.edges << fr.edges
 				if i < job.batch.len {
+					if fr.parse_error != '' {
+						partial << job.batch[i].rel
+					}
 					new_cache << CacheEntry{
 						rel:  job.batch[i].rel
 						hash: job.batch[i].hash
@@ -230,6 +244,7 @@ pub fn build_graph_resilient(root string, worker_exe string, out_dir string) (Gr
 		binary_hash: bin_hash
 		failed:      failed
 		stale:       stale
+		partial:     partial
 	}
 }
 

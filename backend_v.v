@@ -15,20 +15,68 @@ import v.token
 // across a whole project — for accurate cross-file resolution — is the next
 // step.
 pub fn extract_v_file(path string, rel string) ([]Symbol, []Edge) {
+	fr := extract_v_file_result(path, rel)
+	return fr.symbols, fr.edges
+}
+
+// extract_v_file_result is extract_v_file plus the parser's first error, if
+// any. This is what the per-file workers use.
+pub fn extract_v_file_result(path string, rel string) FileResult {
 	mut table := ast.new_table()
-	pref_ := pref.new_preferences()
+	pref_ := extract_prefs()
 	file := parser.parse_file(path, mut table, .skip_comments, pref_)
 	src := os.read_file(path) or { '' }
-	return extract_from_ast(file, mut table, rel, src.split('\n'))
+	syms, edges := extract_from_ast(file, mut table, rel, src.split('\n'))
+	return FileResult{
+		symbols:     syms
+		edges:       edges
+		parse_error: first_parse_error(file)
+	}
 }
 
 // extract_v_text is the same as extract_v_file but takes source directly,
 // which makes it convenient for tests.
 pub fn extract_v_text(source string, rel string) ([]Symbol, []Edge) {
+	fr := extract_v_text_result(source, rel)
+	return fr.symbols, fr.edges
+}
+
+// extract_v_text_result is extract_v_text plus the parser's first error; see
+// extract_v_file_result.
+pub fn extract_v_text_result(source string, rel string) FileResult {
 	mut table := ast.new_table()
-	pref_ := pref.new_preferences()
+	pref_ := extract_prefs()
 	file := parser.parse_text(source, rel, mut table, .skip_comments, pref_)
-	return extract_from_ast(file, mut table, rel, source.split('\n'))
+	syms, edges := extract_from_ast(file, mut table, rel, source.split('\n'))
+	return FileResult{
+		symbols:     syms
+		edges:       edges
+		parse_error: first_parse_error(file)
+	}
+}
+
+// extract_prefs are the parser preferences extraction uses. The parser's
+// default output mode, .stdout, makes it print its first syntax error and
+// abort, returning only what it read up to that point -- every declaration
+// after the error was silently missing from the graph. In .silent mode it
+// records the error, skips past the bad token and keeps going, the same way
+// `v -check-syntax` does. On the V compiler's own tree that recovered about
+// 2,990 functions in files using syntax newer than the V 0.5.2 parser, with
+// no function lost relative to aborting.
+fn extract_prefs() &pref.Preferences {
+	mut p := pref.new_preferences()
+	p.output_mode = .silent
+	return p
+}
+
+// first_parse_error renders the parser's first error as `line:col: message`,
+// or '' when there is none.
+fn first_parse_error(file &ast.File) string {
+	if file.errors.len == 0 {
+		return ''
+	}
+	e := file.errors[0]
+	return '${e.pos.line_nr + 1}:${e.pos.col + 1}: ${e.message}'
 }
 
 // module_id builds a module id from `rel`, the graph-root-relative path of the
@@ -123,6 +171,12 @@ fn extract_from_ast(file &ast.File, mut table ast.Table, rel string, src []strin
 					// collides with a same-named V wrapper declared in the
 					// SAME file; a file-qualified suffix can't separate two
 					// declarations that already share a file.
+					continue
+				}
+				if stmt.short_name == '' && stmt.name.all_after_last('.') == '' {
+					// No name: not a real declaration. Error recovery produces these
+					// (one per skipped top-level statement in some script-style
+					// files), and their ids would all collapse to `<module>.`.
 					continue
 				}
 				id := fn_id(mod_id, v_mod, stmt, mut table)

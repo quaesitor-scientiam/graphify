@@ -5,9 +5,10 @@ module graphify
 // in the hot loop (5000+ calls per extraction).
 //
 // Format (one line per FileResult):
-//   <sym_section>\x03<edge_section>
+//   <sym_section>\x03<edge_section>\x03<parse_error>
 //   sym_section : sym\x02sym\x02...   (empty if no symbols)
 //   edge_section: edge\x02edge\x02... (empty if no edges)
+//   parse_error : FileResult.parse_error (empty if the file parsed cleanly)
 //   sym  : id\x01name\x01kind_int\x01sig\x01file\x01line\x01end_line\x01is_pub\x01parent\x01doc
 //   edge : from\x01to\x01kind_int\x01is_method\x01recv_type
 //
@@ -53,13 +54,14 @@ pub fn encode_file_result(fr FileResult) string {
 			'0'
 		}}${bp_fs}${bp_clean(e.recv_type)}'
 	}
-	return sym_parts.join(bp_rs) + bp_ss + edge_parts.join(bp_rs)
+	return sym_parts.join(bp_rs) + bp_ss + edge_parts.join(bp_rs) + bp_ss + bp_clean(fr.parse_error)
 }
 
 pub fn decode_file_result(line string) FileResult {
 	sections := line.split(bp_ss)
 	sym_sec  := sections[0]
 	edge_sec := if sections.len > 1 { sections[1] } else { '' }
+	parse_error := if sections.len > 2 { bp_restore(sections[2]) } else { '' }
 
 	mut symbols := []Symbol{}
 	if sym_sec != '' {
@@ -98,5 +100,5 @@ pub fn decode_file_result(line string) FileResult {
 		}
 	}
 
-	return FileResult{ symbols: symbols, edges: edges }
+	return FileResult{ symbols: symbols, edges: edges, parse_error: parse_error }
 }

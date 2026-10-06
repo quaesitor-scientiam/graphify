@@ -1915,6 +1915,7 @@ fn test_diff_graphs_marks_status_from_the_new_graphs_manifest() {
 		binary_hash: 'bh1'
 		failed:      ['failed.v']
 		stale:       ['stale.v']
+		partial:     ['partial.v']
 	}
 	// only manifest.json matters to diff_graphs, but write_bundle needs a
 	// real graph to also succeed at writing graph.json/GRAPH_REPORT.md.
@@ -1924,6 +1925,7 @@ fn test_diff_graphs_marks_status_from_the_new_graphs_manifest() {
 		symbols: [
 			diff_symbol('demo.failed', 'failed.v'),
 			diff_symbol('demo.stale', 'stale.v'),
+			diff_symbol('demo.partial', 'partial.v'),
 			diff_symbol('demo.removed', 'removed.v'),
 			diff_symbol('demo.present_sibling', 'present.v'),
 			diff_symbol('demo.vanished', 'present.v'),
@@ -1938,6 +1940,7 @@ fn test_diff_graphs_marks_status_from_the_new_graphs_manifest() {
 	}
 	assert status_by_file['failed.v'] == FileLossStatus.parse_failed
 	assert status_by_file['stale.v'] == FileLossStatus.stale
+	assert status_by_file['partial.v'] == FileLossStatus.partially_parsed
 	assert status_by_file['removed.v'] == FileLossStatus.file_removed
 	assert status_by_file['present.v'] == FileLossStatus.symbol_missing
 }
@@ -1948,11 +1951,13 @@ fn test_manifest_json_carries_the_extract_report() {
 		binary_hash: 'abc123'
 		failed:      ['x.v']
 		stale:       ['y.v']
+		partial:     ['z.v']
 	}
 	decoded := json2.decode[Manifest](g.manifest_json(report)) or { panic(err) }
 	assert decoded.binary_hash == 'abc123'
 	assert decoded.failed == ['x.v']
 	assert decoded.stale == ['y.v']
+	assert decoded.partial == ['z.v']
 }
 
 fn test_git_commit_of_is_blank_outside_a_git_repository() {
@@ -1976,4 +1981,95 @@ fn test_git_commit_of_matches_git_rev_parse_in_a_real_repository() {
 	got := git_commit_of(@VMODROOT)
 	assert got != ''
 	assert got == expected.output.trim_space()
+}
+
+// The V 0.5.2 parser does not know the array-literal spread on line 8. With
+// its default settings it would stop there and drop everything after it;
+// extraction runs it in recovery mode instead (extract_prefs), so it reports
+// the error and still reads the rest of the file.
+const partial_parse_src = 'module demo
+
+fn before() int {
+	return 1
+}
+
+fn broken() []int {
+	x := [1, ...(parts()), 4]
+	return x
+}
+
+fn after() int {
+	return 2
+}
+'
+
+fn test_extract_reports_a_parse_error_and_recovers_past_it() {
+	fr := extract_v_text_result(partial_parse_src, 'demo.v')
+	assert fr.parse_error.starts_with('8:'), fr.parse_error
+	names := fr.symbols.map(it.name)
+	assert 'before' in names
+	assert 'after' in names
+}
+
+// A script-style file (top-level statements, no `fn main`) with an anonymous
+// fn inside a top-level call: recovering past the first "bad top level
+// statement", the parser reaches that `fn` and records it as a top-level
+// declaration with no name. Such a node is not a real declaration and must
+// not become a symbol -- its id would just be `<module>.`.
+fn test_extract_drops_nameless_fn_declarations_from_error_recovery() {
+	src := 'import gg
+
+gg.start(
+	frame_fn: fn (ctx &gg.Context) {
+		ctx.begin()
+	}
+)
+'
+	fr := extract_v_text_result(src, 'demo.v')
+	assert fr.parse_error != ''
+	for s in fr.symbols {
+		assert s.name != '', 'nameless symbol: ${s.id}'
+	}
+}
+
+fn test_extract_clean_file_has_no_parse_error() {
+	fr := extract_v_text_result('module demo\n\nfn ok() int {\n\treturn 1\n}\n', 'demo.v')
+	assert fr.parse_error == ''
+	assert fr.symbols.map(it.name).contains('ok')
+}
+
+fn test_file_result_parse_error_round_trips_through_the_batch_protocol() {
+	fr := extract_v_text_result(partial_parse_src, 'demo.v')
+	back := decode_file_result(encode_file_result(fr))
+	assert back.parse_error == fr.parse_error
+	assert back.symbols.len == fr.symbols.len
+	clean := decode_file_result(encode_file_result(FileResult{}))
+	assert clean.parse_error == ''
+}
+
+fn test_cache_round_trips_a_partial_results_parse_error() {
+	// A file with syntax errors that does not change is reused from the cache
+	// next run rather than reparsed, so the cache must keep its parse error.
+	dir := cache_test_dir('partial_roundtrip')
+	save_cache(dir, 'binhash1', [
+		CacheEntry{
+			rel:  'part.v'
+			hash: 'h1'
+			fr:   FileResult{
+				symbols:     [Symbol{ id: 'demo.before', name: 'before', kind: .function }]
+				parse_error: '8:11: invalid expression: unexpected token `...`'
+			}
+		},
+		CacheEntry{
+			rel:  'whole.v'
+			hash: 'h2'
+			fr:   FileResult{
+				symbols: [Symbol{ id: 'demo.ok', name: 'ok', kind: .function }]
+			}
+		},
+	])
+	loaded := load_cache(dir, 'binhash1')
+	assert loaded['part.v'].fr.parse_error == '8:11: invalid expression: unexpected token `...`'
+	assert loaded['part.v'].fr.symbols.len == 1
+	assert loaded['whole.v'].fr.parse_error == ''
 }

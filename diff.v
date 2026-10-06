@@ -11,6 +11,7 @@ pub enum FileLossStatus {
 	unknown        // no manifest.json alongside `new` to consult
 	parse_failed   // new-manifest lists this file as failed, no fallback
 	stale          // new-manifest lists this file as stale (serving old data)
+	partially_parsed // new-manifest lists this file as having parsed with syntax errors
 	file_removed   // file has no symbols anywhere in `new`
 	symbol_missing // file still has other symbols in `new`; this one specifically is gone
 }
@@ -20,6 +21,7 @@ pub fn (s FileLossStatus) str() string {
 		.unknown { 'unknown (no manifest.json found next to the new graph)' }
 		.parse_failed { 'failed to parse this run — symbols genuinely dropped, not moved' }
 		.stale { 'failed to reparse this run — new graph is serving a stale cached copy' }
+		.partially_parsed { 'parsed with syntax errors this run — symbols near an error may be missing' }
 		.file_removed { 'file has no symbols at all in the new graph' }
 		.symbol_missing { 'file is still present in the new graph; this symbol specifically is gone' }
 	}
@@ -56,6 +58,7 @@ pub fn diff_graphs(old Graph, new Graph, new_manifest_dir string) []FileLoss {
 	has_manifest := new_manifest_dir != '' && os.exists(manifest_path)
 	mut failed_files := map[string]bool{}
 	mut stale_files := map[string]bool{}
+	mut partial_files := map[string]bool{}
 	if has_manifest {
 		// best-effort: an unreadable/corrupt manifest is treated the same as
 		// a missing one (`.unknown`), not a hard error for the whole diff.
@@ -65,6 +68,9 @@ pub fn diff_graphs(old Graph, new Graph, new_manifest_dir string) []FileLoss {
 		}
 		for f in m.stale {
 			stale_files[f] = true
+		}
+		for f in m.partial {
+			partial_files[f] = true
 		}
 	}
 
@@ -88,6 +94,8 @@ pub fn diff_graphs(old Graph, new Graph, new_manifest_dir string) []FileLoss {
 			FileLossStatus.parse_failed
 		} else if file in stale_files {
 			FileLossStatus.stale
+		} else if file in partial_files {
+			FileLossStatus.partially_parsed
 		} else if file in new_files {
 			FileLossStatus.symbol_missing
 		} else {

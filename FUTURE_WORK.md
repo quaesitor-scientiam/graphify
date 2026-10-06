@@ -101,10 +101,11 @@ consequences:
   "The system cannot find the path specified". Having `make` on `PATH` is not
   sufficient; make also needs a POSIX `sh`, such as Git for Windows'
   `usr\bin`;
-- V 0.5.2 cannot parse syntax V3 has added, and the vlang tree already uses it
-  (see "Silent truncation" below). This shows up as functions missing from the
-  graph, not as files skipped as unparseable, so the update log's unparseable
-  count does not track it;
+- V 0.5.2 cannot parse syntax V3 has added, and the vlang tree already uses
+  it. Extraction recovers past such errors and lists the affected files in the
+  manifest's `partial` list (see "Silent truncation" below), but whatever the
+  parser cannot read around an error is still lost, and new V3-only constructs
+  keep adding to it;
 - when upstream drops the fallback, graphify stops building on every
   platform. In September 2026 the V maintainer said the fallback will stay
   available for one year, so the port needs to land by about September 2027.
@@ -132,11 +133,12 @@ of the same commit as the baseline. Conclusion: a V3 port is feasible, and it
 is needed sooner than the fallback deadline, because the V1 extractor is
 already losing code.
 
-**Silent truncation in the V1 extractor.** When V 0.5.2 meets syntax it does
-not know, its parser stops and keeps what it had. graphify's parse worker
-discards stderr and stores that partial result, so the file is not counted as
-unparseable. Compared with V3, 190 files lose functions: about 3,500 of
-roughly 70,000 (5%), while the update log reported 3 unparseable files.
+**Silent truncation in the V1 extractor (since fixed, see below).** When V
+0.5.2's parser met syntax it did not know, it stopped and returned what it had
+read so far. graphify's parse worker discarded stderr and stored that partial
+result, so the file was not counted as unparseable. Compared with V3, 190
+files lost functions: about 3,500 of roughly 70,000 (5%), while the update log
+reported 3 unparseable files.
 
 - 153 files stop partway; every function V3 finds after that point is missing
   (2,957);
@@ -152,9 +154,33 @@ named variants, newer generics rules); 13 files (81 functions) have no V1
 syntax error and differ for other reasons. The spread has appeared in later
 vlang commits too, so the loss grows regardless of the port.
 
-Before or alongside the port, the V1 path should surface parse errors and mark
-such files degraded (the stale fallback and manifest `failed` list from §7),
-instead of publishing a partial file as complete.
+**Fixed (October 2026).** The stopping was graphify's configuration, not a
+limit of the parser: in its default `.stdout` output mode V 0.5.2's parser
+aborts at the first syntax error, while in `.silent` mode it records the
+error, skips the bad token and keeps going, as `v -check-syntax` does.
+Extraction now parses in `.silent` mode. On vlang `414f15fb7b` that brought
+the functions missing relative to V3 from 3,548 down to 561, with no function
+lost and no spurious one added. The remaining 561 sit in 45 files, most of
+them outside any syntax error (320 in
+`vlib/v/types/checker_ownership_d_ownership.v` alone).
+
+Recovery has one side effect: in script-style files (top-level statements, no
+`fn main`), skipping a statement can land the parser on an anonymous `fn`
+inside a top-level call, which it records as a declaration with no name.
+Extraction drops nameless function declarations; on vlang there were 338.
+
+Files whose parse reported an error are listed in the manifest's new `partial`
+list (245 on vlang), counted in `graphify extract`'s output, and classified by
+`graphify diff` as parsed with syntax errors. They are served from the
+current, recovered parse rather than from an older cached copy: an older
+copy's line ranges would point `get_body` at the wrong code once anything in
+the file moved. Compared with V 0.5.2's own `-check-syntax`, the list agrees
+on 212 files; the 33 it lists that the check does not are script-style files,
+whose top-level statements the check accepts as a standalone program but which
+recover fully here; and the 37 the check flags that are not listed are type
+conflicts from `-check-syntax` registering vlib/builtin types twice (33), the
+3 files that crash the parser (listed under `failed`), and one call to a
+function named `byte` that only parses without the built-in type table.
 
 **Single-file isolation (first question): yes.** `parser.Parser.new(prefs)`
 and `parse_file(path)` return a `flat.FlatAst` for one file, from a program

@@ -124,6 +124,15 @@ fn cmd_extract(args []string) {
 		}
 		println(msg)
 	}
+	if report.partial.len > 0 {
+		shown := if report.partial.len > 8 { report.partial#[..8] } else { report.partial }
+		mut msg := '${report.partial.len} file(s) parsed with syntax errors (recovered; declarations near an error may be missing): ' +
+			shown.join(', ')
+		if report.partial.len > 8 {
+			msg += ' …'
+		}
+		println(msg)
+	}
 	println('wrote ${out}/graph.json, GRAPH_REPORT.md, manifest.json')
 }
 
@@ -164,8 +173,7 @@ fn cmd_parse_batch(args []string) {
 			f.flush()
 			continue
 		}
-		syms, edges := graphify.extract_v_file(parts[0], parts[1])
-		f.writeln(graphify.encode_file_result(graphify.FileResult{ symbols: syms, edges: edges })) or {}
+		f.writeln(graphify.encode_file_result(graphify.extract_v_file_result(parts[0], parts[1]))) or {}
 		f.flush()
 	}
 	f.close()

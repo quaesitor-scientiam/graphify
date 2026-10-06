@@ -27,6 +27,7 @@ pub:
 	edges         int
 	failed        []string
 	stale         []string
+	partial       []string
 }
 
 // load_manifest reads a manifest.json previously written by write_bundle.
@@ -135,6 +136,7 @@ pub fn (g Graph) manifest_json(report ExtractReport) string {
 		edges:         g.edges.len
 		failed:        report.failed
 		stale:         report.stale
+		partial:       report.partial
 	}
 	return json2.encode(m, prettify: true)
 }
