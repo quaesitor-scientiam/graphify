@@ -496,9 +496,10 @@ cat cmd/mcp/test_session.jsonl | bin/graphify-mcp /path/to/graph_data/vlang/grap
 Beyond the `graphify` CLI itself, `bin/` and `bench/` hold V shell scripts
 (`.vsh`, run via `v run` — no separate scripting language or interpreter to
 install, since every machine running this already has V) for running this
-against a large external repo (vlang) day to day. The one exception is the
+against a large external repo (vlang) day to day. The exceptions are the
 Claude Code hook (below), which is prebuilt for latency reasons rather than
-run via `v run`.
+run via `v run`, and the scheduled refresh on Windows, which also runs as a
+prebuilt exe (see **Scheduling**).
 
 **One-time setup:** copy `graphify.config.json.example` to
 `graphify.config.json` (repo root) and edit the two paths for your machine:
@@ -513,11 +514,11 @@ run via `v run`.
 errors with a pointer back to the `.example` template instead of silently
 using the wrong paths.
 
-### `bin/update-vlang-graph.vsh` — daily graph refresh
+### `bin/update-vlang-graph.vsh` — scheduled graph refresh
 
 Pulls the target repo and re-extracts only if there were new commits. Wired
-into a daily scheduler — Windows Task Scheduler, macOS `launchd`, or Linux
-`cron`, see **Scheduling** below; can also be run by hand.
+into a scheduler — Windows Task Scheduler, macOS `launchd`, or Linux `cron`,
+see **Scheduling** below; can also be run by hand.
 
 ```
 v run bin/update-vlang-graph.vsh              # git pull, extract only if new commits
@@ -589,19 +590,62 @@ v run bench/extract_bench.vsh -Source /path/to/myproject -Out /tmp/gf-bench-mypr
 
 ### Scheduling — Windows / macOS / Linux
 
-- **Windows**: register `update-vlang-graph.vsh` in Task Scheduler (`v run
-  <path>` as the action), daily. No script for this in-repo — it's a couple
-  of clicks in the Task Scheduler GUI, or `schtasks /create`.
+All three schedule the same `bin/update-vlang-graph.vsh`; how often is up to
+you. With no new commits it exits right after the pull, and with new ones the
+incremental cache keeps a re-extract of the vlang repo to tens of seconds, so
+a frequent schedule is cheap (the author's Windows task repeats every 2
+hours).
+
+- **Windows**: the task runs a *prebuilt* `bin\update-vlang-graph.exe` through
+  a hidden `pwsh`, not `v run`. Build it first:
+
+  ```
+  v -prod -gc none -o bin\update-vlang-graph.exe build bin\update-vlang-graph.vsh
+  ```
+
+  Then create the task in the Task Scheduler GUI with:
+
+  - **Trigger**: time-based, repeating at the interval you want.
+  - **Action**: program `pwsh.exe`, arguments
+    `-NoProfile -WindowStyle Hidden -Command "& 'C:\path\to\graphify\bin\update-vlang-graph.exe'"`.
+    (The author's task also sets *Start in* to the repo root, but nothing in
+    the script depends on the working directory.)
+  - **Settings**: keep "do not start a new instance" as the rule when a run is
+    still going, and set an execution time limit (the author's is 1 hour) so
+    a run that gets stuck is ended instead of blocking every later one.
+
+  Three details are easy to get wrong:
+
+  - **Use the `build` subcommand.** Without it V treats a `.vsh` as
+    compile-*and-run*, so building the exe would execute a real pull and
+    extract on the spot (see the hook build note above for the stale-binary
+    side of the same problem).
+  - **The exe is a snapshot.** It bakes in the checkout path (`@VMODROOT`),
+    which is how it finds `graphify.config.json` and `bin\graphify.exe`. Rebuild
+    it after changing the script, and after moving the checkout.
+  - **The `pwsh` wrapper is what hides the window.** Task Scheduler's *Hidden*
+    option only hides the task from its list; a console program that an
+    interactive-logon task launches directly still opens a window. A child of
+    `pwsh -WindowStyle Hidden` inherits the hidden console through the `&` call
+    operator (`Start-Process` would open a new, visible one). `-NoProfile`
+    keeps your PowerShell profile out of an unattended run.
 - **macOS**: copy `bin/com.graphify.vlang-update.plist.example` to
   `~/Library/LaunchAgents/com.graphify.vlang-update.plist`, edit the
   `/path/to/...` placeholders, then `launchctl bootstrap gui/$(id -u)
-  ~/Library/LaunchAgents/com.graphify.vlang-update.plist`. Chosen over cron:
-  modern macOS restricts cron from accessing files outside a few whitelisted
-  locations without manually granting it Full Disk Access, so a stock cron
-  job for this fails silently; launchd needs no such grant.
+  ~/Library/LaunchAgents/com.graphify.vlang-update.plist`. Unlike Windows, the
+  plist runs `v run` on the script directly, so there is no separate build
+  step for the script itself. Chosen over cron: modern macOS restricts cron
+  from accessing files outside a few whitelisted locations without manually
+  granting it Full Disk Access, so a stock cron job for this fails silently;
+  launchd needs no such grant.
 - **Linux**: a plain crontab line is enough for one daily command —
   `crontab -e` and add
   `0 3 * * * v run /path/to/graphify/bin/update-vlang-graph.vsh >> /path/to/graph_data/cron.log 2>&1`.
+
+On every platform the job runs the prebuilt `bin/graphify`, so after pulling
+extractor changes, rebuild it (build commands above). The first extract after
+a rebuild is a full re-parse, because the incremental cache is tied to the
+binary that wrote it.
 
 ## Claude Code wiring
 
