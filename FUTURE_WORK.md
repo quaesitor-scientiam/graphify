@@ -296,23 +296,32 @@ a real full-corpus run, not a targeted crash-injection test.
 
 ## 8. Extraction depends on the build host's OS and architecture
 
-The same vlang commit extracted on an arm64 Mac and an x86_64 Windows machine
-gives different graphs: 108,812 versus 108,848 symbols, from the same 6,238
-files. The whole difference sits in six files:
+The same vlang commit can extract to different graphs on different hosts.
+Compared on vlang `1b4ecb9c05` (October 2026), an arm64 Mac against an x86_64
+Windows machine, after symbol ids were made independent of the working
+directory (`5170207`) and extraction began recovering past syntax errors
+(`b2f253b`): of 132,735 symbols found on both, none differ in id. What remains
+is 3 import symbols and 11 call edges, all inside `$if darwin` or
+`$if windows` blocks, plus one file, `vlib/net/http/util.v`, that only the Mac
+reports as having a syntax error, in its Windows-only branch.
 
-- five inline-assembly tests, `vlib/v/slow_tests/assembly/*.amd64.v` and
-  `*.i386.v`, which yield 37 more symbols on the x86_64 host;
-- `vlib/x/multiwindow/service_native_appkit_readback_metal_red_test.v`, whose
-  code sits behind `$if darwin`, which yields 1 more symbol on the Mac.
+An earlier comparison (vlang `d2a18d9`, September 2026: 108,812 versus 108,848
+symbols) attributed most of its gap, 37 more symbols on x86_64 in five
+inline-assembly tests (`vlib/v/slow_tests/assembly/*.amd64.v` and `*.i386.v`),
+to the CPU architecture. That was mistaken. V 0.5.2 cannot parse those tests'
+asm syntax on either host, and before `b2f253b` each host's parser stopped at
+its first error, at different points. With recovery both hosts read all 16
+such files in full and extract the same symbols from them. The architecture
+played no part beyond where the parser happened to stop.
 
-`extract_v_file` parses with `pref.new_preferences()`, which defaults the
-target OS and architecture to the host's. The V1 parser makes decisions
-against those preferences at parse time: a top-level `$if` whose condition is
-false for the target is skipped (`comptime_skip_curr_stmts` and
-`skip_scope()` in V 0.5.2's `vlib/v/parser/if_match.v`), and a file named for
-an architecture, such as `.amd64.v`, gets a per-file architecture mode
-(`file_backend_mode` in `vlib/v/parser/parser.v`). The exact path by which the
-assembly files lose symbols on a non-matching host has not been traced.
+Host dependence now comes only from platform conditionals. Extraction parses
+with preferences from `pref.new_preferences()` (`extract_prefs` in
+`backend_v.v`), which default the target OS and architecture to the host's,
+and the V1 parser evaluates conditionals against them at parse time: a
+top-level `$if` whose condition is false for the target is skipped
+(`comptime_skip_curr_stmts` and `skip_scope()` in V 0.5.2's
+`vlib/v/parser/if_match.v`). That holds for architecture conditions such as
+`$if amd64` as well as for OS conditions.
 
 Consequences:
 
@@ -320,8 +329,9 @@ Consequences:
   symbol ids were made independent of the working directory (`5170207`);
 - `graphify diff` across two machines' graphs reports symbols as missing that
   are only another platform's code;
-- the difference is small for vlang today, but grows with the amount of
-  platform-specific code in a project.
+- the difference is small for vlang today (3 symbols and 11 edges between the
+  Mac and Windows), but grows with the amount of platform-specific code in a
+  project.
 
 Options:
 
