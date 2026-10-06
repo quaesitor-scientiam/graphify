@@ -101,9 +101,10 @@ consequences:
   "The system cannot find the path specified". Having `make` on `PATH` is not
   sufficient; make also needs a POSIX `sh`, such as Git for Windows'
   `usr\bin`;
-- V 0.5.2 parses the current vlang tree today, but new V3-era syntax will
-  eventually appear. The first visible sign is a growing list of files
-  skipped as unparseable in the update log;
+- V 0.5.2 cannot parse syntax V3 has added, and the vlang tree already uses it
+  (see "Silent truncation" below). This shows up as functions missing from the
+  graph, not as files skipped as unparseable, so the update log's unparseable
+  count does not track it;
 - when upstream drops the fallback, graphify stops building on every
   platform. In September 2026 the V maintainer said the fallback will stay
   available for one year, so the port needs to land by about September 2027.
@@ -112,7 +113,7 @@ The eventual fix is porting the extractor to V3's frontend. V3's parser
 produces a flat arena AST (`vlib/v/flat`: `NodeId` indices into a node array,
 a single `NodeKind` enum, and node payloads held in a process-global table).
 That is an internal compiler representation, not a stable API. Before any port,
-establish:
+establish the following (the feasibility spike below answers all three):
 
 - whether the V3 parser can parse a single file in isolation, as the
   per-file workers, crash isolation, and incremental cache require;
@@ -123,6 +124,101 @@ establish:
 
 The incremental cache is already keyed on the extractor binary's hash, so a
 ported extractor will not reuse cache entries produced by the V1-based one.
+
+### Feasibility spike (October 2026)
+
+Run against vlang `612eda2c73` (7,467 `.v` files), with a fresh V1 extraction
+of the same commit as the baseline. Conclusion: a V3 port is feasible, and it
+is needed sooner than the fallback deadline, because the V1 extractor is
+already losing code.
+
+**Silent truncation in the V1 extractor.** When V 0.5.2 meets syntax it does
+not know, its parser stops and keeps what it had. graphify's parse worker
+discards stderr and stores that partial result, so the file is not counted as
+unparseable. Compared with V3, 190 files lose functions: about 3,500 of
+roughly 70,000 (5%), while the update log reported 3 unparseable files.
+
+- 153 files stop partway; every function V3 finds after that point is missing
+  (2,957);
+- 26 files yield no functions at all (232);
+- 11 files differ in the middle (311).
+
+177 of the 190 fail V 0.5.2's `-check-syntax`. Grouped by the commit that last
+touched the failing line: 75 files (1,988 functions) come from vlang
+`70ee511b35`, which migrated `os` command strings to argument arrays using the
+array spread `[..., ...(expr), ...]`; 102 files (1,431 functions) use V3-only
+features with no V1 form (raw and Intel inline-asm blocks, sum types with
+named variants, newer generics rules); 13 files (81 functions) have no V1
+syntax error and differ for other reasons. The spread has appeared in later
+vlang commits too, so the loss grows regardless of the port.
+
+Before or alongside the port, the V1 path should surface parse errors and mark
+such files degraded (the stale fallback and manifest `failed` list from §7),
+instead of publishing a partial file as complete.
+
+**Single-file isolation (first question): yes.** `parser.Parser.new(prefs)`
+and `parse_file(path)` return a `flat.FlatAst` for one file, from a program
+built with plain V (no `-old-compiler`). All 7,467 files parse in one process
+in 1.85 s with no crashes. A per-file hash over every node's kind, value,
+type, position and child count is identical whether the file is parsed in a
+shared process or in its own, for every file but one:
+`vlib/v/tests/comptime/comptime_at_test.v`, whose `@BUILD_DATE`, `@BUILD_TIME`
+and `@BUILD_TIMESTAMP` are filled from the clock at parse time, so it differs
+between isolated runs as well. Batching files per worker process, as today, is
+therefore safe. Speed is not an argument either way: V1's full extraction of
+the same tree takes 2.4 s with parallel workers.
+
+**Declarations, ranges, calls and ids (second question): yes, with known
+work.**
+
+- Every kind graphify extracts has a V3 node kind (`module_decl`,
+  `import_decl`, `fn_decl`, `struct_decl`/`field_decl`, `enum_decl`,
+  `interface_decl`, `type_decl`, `const_field`, `global_decl`). Extern `fn
+  C.foo()` is a separate `c_fn_decl`, so it no longer needs special handling.
+- `fn_decl.value` is receiver-qualified for methods (`Point.dist`) and `typ`
+  holds the return type. A call's callee is its first child: an `ident`, or a
+  `selector` whose own child is the receiver or module. That is the same
+  information the V1 extractor records.
+- Struct line ranges are correct. `fn_decl` has no end offset (`pos.end` is 0)
+  and `enum_decl` spans only its name, so end lines must be derived, for
+  example from the last descendant and the closing brace. `get_body` depends
+  on this.
+- `import_decl.value` is the module path as written and `typ` the alias. V1
+  recorded the resolved path (`import json2` became `x.json2`), so matching it
+  needs module resolution in graphify (196 imports differ).
+- Of 125,665 symbols found by both at the same file and line, 97.8% get
+  identical ids from a naive mapping (`<module_id>.<value>`). Nearly all of
+  the rest follow three rules: strip the `C.`/`JS.` prefix V3 keeps on C and
+  JS declarations (2,236), map V3's static-method form `T@static@f` to V1's
+  `T__static__f` (297), and strip V's `@` escape on keyword names (`@type`). A
+  few remaining differences are V1 bugs, such as `shared St.g`, where V1 kept
+  the receiver modifier in the id.
+- On one side only: V1's 1,741 extra imports are compiler-injected pseudo-
+  imports (`builtin.closure`, `sync.threads`) placed where a closure or
+  `spawn` occurs, not real imports. V3 additionally yields type aliases
+  (1,976) and globals (256), kinds the V1 extractor never emitted.
+
+**Tracking V3's frontend (third question).** Depend on the narrowest surface:
+`Parser.new`, `parse_file`, the parser's `diagnostics`, and each node's
+`kind`, `value`, `typ`, children and byte offsets, computing line numbers from
+the source rather than through `token.File`. Pin the vlang commit graphify
+builds against, and keep the spike's comparison (V3-derived ids against a V1
+extraction of the same commit, grouped by cause) as a check when moving that
+pin, for as long as V1 still builds.
+
+**Errors.** V3 also stops at a syntax error, but it records the error in the
+parser's `diagnostics` with line and column, so a ported extractor can mark
+the file degraded instead of hiding it.
+
+**Running both.** A V1 and a V3 backend cannot share one binary: they need
+different compilers, and both define `v.parser`. They can coexist as two
+worker binaries behind the existing `_parse-batch` protocol, which would allow
+V1 as a per-file fallback and as a cross-check during the transition. That
+requires the core module to build without either frontend, under both
+compilers, which has not been checked.
+
+The spike's probe programs were not kept; the method above is enough to repeat
+it.
 
 ## 7. Publishing, degraded extractions, and manifest detail
 
@@ -212,6 +308,22 @@ Options:
 Because §6 replaces this frontend, treat host independence as a requirement
 of the V3 port rather than patching the V1 path. If the shared store needs
 identical graphs sooner, pinning OS and architecture is the cheap stopgap.
+
+**V3 resolves this (October 2026 spike, §6).** V3's parser has a
+`preserve_comptime_conditionals` preference. With it set, every platform
+branch is kept, inside `comptime_if` nodes that carry the condition text
+(`windows`, `macos`), so a ported extractor can be host-independent and could
+record which platform a declaration belongs to. Without it, V3 evaluates
+conditionals against the host, as V1 does.
+
+The effect is larger than the Mac/Windows comparison suggests. On the Mac,
+V3's default mode hides 892 functions, 205 structs, 863 fields and 19,030
+calls in vlang compared with preserve mode, mostly Linux-only code (X11,
+Wayland, `sapp_wayland_linux.v`). Today's V1 graph matches V3's default mode
+on those files. Linux-only code is therefore missing from graphs built on both
+the Mac and Windows, and can never show up in a comparison between the two.
+Preserve mode parsed all 7,467 files without crashing, and no file had fewer
+functions than in default mode.
 
 ## 9. Building inside a git worktree compiles the main checkout
 
