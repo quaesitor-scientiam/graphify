@@ -80,7 +80,7 @@ fn main() {
 		os.mkdir_all(out) or {}
 
 		start := time.now()
-		result := os.execute('${os.quoted_path(exe)} extract ${os.quoted_path(source)} --out ${os.quoted_path(out)}')
+		result := os.exec([exe, 'extract', source, '--out', out])
 		secs := int(time.now().unix() - start.unix())
 		times << secs
 

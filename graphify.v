@@ -20,22 +20,73 @@ mut:
 	proc &os.Process = unsafe { nil }
 }
 
+// ExtractReport carries metadata about one extract run that isn't intrinsic
+// to the resulting Graph itself, but that a manifest or a caller needs: which
+// binary produced it, which files failed to parse this run, and which files'
+// contribution to the graph is currently stale (carried forward from an
+// earlier successful parse because this run's attempt crashed).
+// `stale` is always a subset of `failed`'s *files*, in the sense that every
+// stale file failed this run too — but not every failed file is stale: a
+// file crashing on its very first sighting has no prior extraction to fall
+// back to, so it is in `failed` but not `stale`.
+pub struct ExtractReport {
+pub:
+	binary_hash string
+	failed      []string
+	stale       []string
+}
+
+// stale_fallback_for looks up a file's last successful extraction to serve
+// when this run's attempt to (re)parse it crashed, so a transient failure
+// doesn't make the file's symbols vanish from the graph as if it had been
+// deleted. Returns none when there is nothing to fall back to — a file
+// crashing on its very first sighting was never in `old_cache` at all.
+//
+// The returned entry is always marked stale, regardless of the entry's own
+// stale flag coming in: staleness reflects whether THIS run has verified the
+// file's current content, and this call is happening precisely because it
+// could not.
+fn stale_fallback_for(old_cache map[string]CacheEntry, rel string) ?CacheEntry {
+	cached := old_cache[rel] or { return none }
+	mut carried := cached
+	carried.stale = true
+	return carried
+}
+
+// fresh_reuse_of returns `cached` with its extraction data unchanged but
+// staleness cleared. Used when the file's current content hash matches this
+// entry's hash: even if the entry was previously carried forward stale (an
+// earlier attempt at some OTHER content crashed), a direct hash match means
+// the current content has now been verified against this exact known-good
+// extraction, so it is no longer merely assumed to be good — it is confirmed.
+fn fresh_reuse_of(cached CacheEntry) CacheEntry {
+	mut reused := cached
+	reused.stale = false
+	return reused
+}
+
 // build_graph_resilient builds a graph by parsing files in *worker processes*,
 // running up to nr_cpus() of them concurrently (each parses its own batch),
 // so a file that makes V's parser panic is skipped and reported instead of
 // aborting the whole run. Only when a batch's worker crashes is the offending
-// file isolated and the rest of that batch requeued for a later wave.
+// file isolated and the rest of that batch requeued for a later wave. When a
+// crashed file has a prior successful extraction cached, that extraction is
+// carried forward into the graph marked stale (see stale_fallback_for)
+// instead of the file's symbols simply disappearing, indistinguishable from
+// the file having been deleted.
 //
 // Files whose content hash matches `out_dir`'s cache from the previous run
 // are reused directly, skipping re-parsing entirely — but only when that
 // cache was also written by this same worker_exe binary; see cache.v.
-// Returns the graph and the list of files that failed to parse.
-pub fn build_graph_resilient(root string, worker_exe string, out_dir string) (Graph, []string) {
+// Returns the graph and a report of the binary hash used plus which files
+// failed to parse and/or are being served stale this run.
+pub fn build_graph_resilient(root string, worker_exe string, out_dir string) (Graph, ExtractReport) {
 	abs_root := os.real_path(root)
 	mut g := Graph{
 		root: abs_root
 	}
 	mut failed := []string{}
+	mut stale := []string{}
 	// save_cache below needs out_dir to exist; write_bundle also creates it
 	// later, but that's after this function returns.
 	os.mkdir_all(out_dir) or {}
@@ -60,10 +111,10 @@ pub fn build_graph_resilient(root string, worker_exe string, out_dir string) (Gr
 		if hash != '' && rel in old_cache && old_cache[rel].hash == hash {
 			// unchanged since the last extract — reuse its symbols/edges
 			// instead of spending a worker parsing it again.
-			cached := old_cache[rel]
-			g.symbols << cached.fr.symbols
-			g.edges << cached.fr.edges
-			new_cache << cached
+			reused := fresh_reuse_of(old_cache[rel])
+			g.symbols << reused.fr.symbols
+			g.edges << reused.fr.edges
+			new_cache << reused
 			continue
 		}
 		queue << WorkItem{
@@ -96,8 +147,17 @@ pub fn build_graph_resilient(root string, worker_exe string, out_dir string) (Gr
 				lines << '${w.path}\t${w.rel}'
 			}
 			os.write_file(listfile, lines.join('\n')) or {
+				// none of this batch's files got a parse attempt this run —
+				// same class of gap as a crashed worker, so the same
+				// stale-fallback treatment applies to each of them.
 				for w in batch {
 					failed << w.rel
+					if fallback := stale_fallback_for(old_cache, w.rel) {
+						g.symbols << fallback.fr.symbols
+						g.edges << fallback.fr.edges
+						new_cache << fallback
+						stale << w.rel
+					}
 				}
 				continue
 			}
@@ -142,7 +202,14 @@ pub fn build_graph_resilient(root string, worker_exe string, out_dir string) (Gr
 			if completed < n {
 				// the file at index `completed` crashed this worker — skip it
 				// and requeue the rest of the batch for the next wave.
-				failed << job.batch[completed].rel
+				crashed_rel := job.batch[completed].rel
+				failed << crashed_rel
+				if fallback := stale_fallback_for(old_cache, crashed_rel) {
+					g.symbols << fallback.fr.symbols
+					g.edges << fallback.fr.edges
+					new_cache << fallback
+					stale << crashed_rel
+				}
 				for i := completed + 1; i < n; i++ {
 					retry << job.batch[i]
 				}
@@ -159,7 +226,11 @@ pub fn build_graph_resilient(root string, worker_exe string, out_dir string) (Gr
 	save_cache(out_dir, bin_hash, new_cache)
 	disambiguate_ids(mut g)
 	resolve_edges(mut g)
-	return g, failed
+	return g, ExtractReport{
+		binary_hash: bin_hash
+		failed:      failed
+		stale:       stale
+	}
 }
 
 // Options controls a graph build.

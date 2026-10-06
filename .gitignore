@@ -6,6 +6,7 @@ bench/*.exe
 bench/*.def
 bench/session_stats
 bench/extract_bench
+.*.v3cc.*/
 graphify-out/
 .idea/
 *.log

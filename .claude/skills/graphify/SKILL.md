@@ -12,6 +12,11 @@ file to find one thing.
 
 Tools (MCP `graphify`, or `bin/graphify <cmd>` — `bin/graphify.exe` on Windows — via Bash):
 
+The MCP server is shared by Claude Code and Codex. Claude Code uses the
+project `.mcp.json`; Codex uses its global or trusted project-scoped
+`config.toml`. Both should point at the graph extracted from the V-language
+repository.
+
 - `overview` / `skeleton <path>` — body-less map of the codebase
 - `query_graph(text)` / `query` — token-bounded traversal from matching symbols
 - `get_node(node)` / `explain` — a symbol + its relationships (defines, references, embeds, calls), each with `file:line`

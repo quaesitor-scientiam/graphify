@@ -19,6 +19,9 @@ usage:
                                             split the graph into subsystems (Leiden-style)
   graphify export <graphml|cypher|svg|html> [--out F]
                                             write the graph in that format
+  graphify diff    <old.json> <new.json>   list symbols in <old> missing from <new>,
+                                            grouped by file and why (parse failure,
+                                            stale cache, or a genuine change)
 
 query options:
   --budget <n>   token budget for the result (default 2000)
@@ -81,6 +84,9 @@ fn main() {
 		'export' {
 			cmd_export(rest)
 		}
+		'diff' {
+			cmd_diff(rest)
+		}
 		'_parse-batch' {
 			cmd_parse_batch(rest)
 		}
@@ -98,13 +104,22 @@ fn cmd_extract(args []string) {
 	// parser is skipped (and reported) rather than aborting the whole extract.
 	// Files unchanged since the last extract to `out` are reused from its
 	// cache instead of being reparsed.
-	g, failed := graphify.build_graph_resilient(path, os.executable(), out)
-	graphify.write_bundle(g, out) or { fail('write failed: ${err}') }
+	g, report := graphify.build_graph_resilient(path, os.executable(), out)
+	graphify.write_bundle(g, out, report) or { fail('write failed: ${err}') }
 	println('extracted ${g.symbols.len} symbols, ${g.edges.len} edges')
-	if failed.len > 0 {
-		shown := if failed.len > 8 { failed#[..8] } else { failed }
-		mut msg := 'skipped ${failed.len} unparseable file(s): ' + shown.join(', ')
-		if failed.len > 8 {
+	if report.failed.len > 0 {
+		shown := if report.failed.len > 8 { report.failed#[..8] } else { report.failed }
+		mut msg := 'skipped ${report.failed.len} unparseable file(s): ' + shown.join(', ')
+		if report.failed.len > 8 {
+			msg += ' …'
+		}
+		println(msg)
+	}
+	if report.stale.len > 0 {
+		shown := if report.stale.len > 8 { report.stale#[..8] } else { report.stale }
+		mut msg := 'serving ${report.stale.len} file(s) from a stale cache (failed to reparse): ' +
+			shown.join(', ')
+		if report.stale.len > 8 {
 			msg += ' …'
 		}
 		println(msg)
@@ -267,6 +282,39 @@ fn cmd_export(args []string) {
 	out := str_flag(args, '--out') or { default_out }
 	os.write_file(out, content) or { fail('write failed: ${err}') }
 	println('wrote ${out}')
+}
+
+// cmd_diff audits what disappeared between two extracts of the same project:
+// every symbol id in <old.json> that isn't in <new.json>, grouped by file and
+// (when a manifest.json sits next to <new.json>) why — a parse failure, a
+// stale cache carry-forward, or a genuine change, so an expected loss (a file
+// that failed to reparse) doesn't read the same as an unexplained one.
+fn cmd_diff(args []string) {
+	old_path := positional(args, 0) or { fail('diff: needs <old.json> and <new.json>') }
+	new_path := positional(args, 1) or { fail('diff: needs <old.json> and <new.json>') }
+	old := graphify.load_graph(old_path) or { fail('cannot read ${old_path}: ${err}') }
+	new := graphify.load_graph(new_path) or { fail('cannot read ${new_path}: ${err}') }
+	losses := graphify.diff_graphs(old, new, os.dir(new_path))
+	if losses.len == 0 {
+		println('no symbols disappeared between ${old_path} and ${new_path}')
+		return
+	}
+	mut total := 0
+	for loss in losses {
+		total += loss.symbols.len
+	}
+	println('${total} symbol(s) across ${losses.len} file(s) disappeared:\n')
+	for loss in losses {
+		println('${loss.file} (${loss.status})')
+		shown := if loss.symbols.len > 8 { loss.symbols#[..8] } else { loss.symbols }
+		for s in shown {
+			println('  - ${s.id} (${s.kind.str()})   // was ${s.loc()}')
+		}
+		if loss.symbols.len > shown.len {
+			println('  … and ${loss.symbols.len - shown.len} more')
+		}
+		println('')
+	}
 }
 
 // store_dir returns the central graph store (--store flag or GRAPHIFY_STORE

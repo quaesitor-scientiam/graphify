@@ -1,6 +1,7 @@
 module graphify
 
 import os
+import x.json2
 
 const sample = 'module demo
 
@@ -1633,6 +1634,104 @@ fn test_cache_not_trusted_or_written_when_binary_hash_is_blank() {
 	assert load_cache(dir, '').len == 0
 }
 
+fn test_cache_round_trips_the_stale_flag() {
+	dir := cache_test_dir('stale_roundtrip')
+	entries := [
+		CacheEntry{
+			rel:   'fresh.v'
+			hash:  'h1'
+			stale: false
+			fr:    FileResult{
+				symbols: [Symbol{ id: 'demo.fresh', name: 'fresh', kind: .function }]
+			}
+		},
+		CacheEntry{
+			rel:   'flaky.v'
+			hash:  'h2'
+			stale: true
+			fr:    FileResult{
+				symbols: [Symbol{ id: 'demo.flaky', name: 'flaky', kind: .function }]
+			}
+		},
+	]
+	save_cache(dir, 'binhash1', entries)
+	loaded := load_cache(dir, 'binhash1')
+	assert loaded.len == 2
+	assert loaded['fresh.v'].stale == false
+	assert loaded['flaky.v'].stale == true
+	// a pre-fix 3-field line (no stale column) under an otherwise-valid
+	// header must not be silently misparsed as if its FileResult text were
+	// the stale flag -- it should simply be skipped, exactly like any other
+	// malformed line, rather than crashing or fabricating a bogus entry.
+	three_field_line := 'legacy.v\th3\t' + encode_file_result(FileResult{
+		symbols: [Symbol{ id: 'demo.legacy', name: 'legacy', kind: .function }]
+	})
+	os.write_file(os.join_path(dir, cache_file_name), [cache_format, 'binary:binhash1', three_field_line].join('\n')) or {
+		panic(err)
+	}
+	assert load_cache(dir, 'binhash1').len == 0
+}
+
+fn test_stale_fallback_for_returns_the_prior_entry_marked_stale() {
+	old_cache := {
+		'demo.v': CacheEntry{
+			rel:   'demo.v'
+			hash:  'h1'
+			stale: false
+			fr:    FileResult{
+				symbols: [Symbol{ id: 'demo.greet', name: 'greet', kind: .function }]
+			}
+		}
+	}
+	fallback := stale_fallback_for(old_cache, 'demo.v') or { panic('expected a fallback') }
+	assert fallback.hash == 'h1'
+	assert fallback.fr.symbols[0].id == 'demo.greet'
+	assert fallback.stale == true
+}
+
+fn test_stale_fallback_for_returns_none_when_file_was_never_previously_cached() {
+	old_cache := map[string]CacheEntry{}
+	fallback := stale_fallback_for(old_cache, 'never_seen.v')
+	assert fallback == none
+}
+
+fn test_stale_fallback_for_marks_stale_even_when_the_prior_entry_already_was() {
+	// a file that keeps crashing across multiple runs should keep serving
+	// the SAME original known-good extraction, not lose it after one cycle.
+	old_cache := {
+		'demo.v': CacheEntry{
+			rel:   'demo.v'
+			hash:  'h1'
+			stale: true
+			fr:    FileResult{
+				symbols: [Symbol{ id: 'demo.greet', name: 'greet', kind: .function }]
+			}
+		}
+	}
+	fallback := stale_fallback_for(old_cache, 'demo.v') or { panic('expected a fallback') }
+	assert fallback.stale == true
+	assert fallback.fr.symbols[0].id == 'demo.greet'
+}
+
+fn test_fresh_reuse_of_clears_a_previously_stale_flag() {
+	// a hash match against the file's current content is a direct
+	// verification, so a prior stale flag must not survive it -- otherwise a
+	// file that recovers (or simply reverts to known-good content) would be
+	// stuck reporting itself stale forever.
+	cached := CacheEntry{
+		rel:   'demo.v'
+		hash:  'h1'
+		stale: true
+		fr:    FileResult{
+			symbols: [Symbol{ id: 'demo.greet', name: 'greet', kind: .function }]
+		}
+	}
+	reused := fresh_reuse_of(cached)
+	assert reused.stale == false
+	assert reused.hash == 'h1'
+	assert reused.fr.symbols[0].id == 'demo.greet'
+}
+
 // hub_spoke_graph builds one `hub_fn` symbol calling `n` `leaf_N` symbols --
 // a single connected component reachable in one hop from the hub, used to
 // exercise query()/shortest_path() traversal without needing a real corpus.
@@ -1717,4 +1816,164 @@ fn test_shortest_path_returns_empty_for_unreachable_or_unknown_nodes() {
 	disjoint.symbols << g2.symbols
 	disjoint.edges << g.edges
 	assert disjoint.shortest_path('demo.leaf_0', 'other.thing') == []
+}
+
+// store_test_dir returns a fresh scratch dir for one store.v test.
+fn store_test_dir(name string) string {
+	dir := os.join_path(os.temp_dir(), 'graphify_test_store_${name}')
+	os.rmdir_all(dir) or {}
+	os.mkdir_all(dir) or { panic(err) }
+	return dir
+}
+
+fn test_atomic_replace_replaces_an_existing_destination_file() {
+	// The actual regression this guards against: Windows' C runtime
+	// rename() FAILS outright when the destination already exists (verified
+	// directly against the real Windows API, not assumed from docs) -- a
+	// naive `os.rename(src, dst)` on Windows would error here every time,
+	// since `dst` already exists. This is the exact scenario save_graph
+	// hits on every publish after the first one (graph.json already exists).
+	dir := store_test_dir('atomic_replace_direct')
+	src := os.join_path(dir, 'src.txt')
+	dst := os.join_path(dir, 'dst.txt')
+	os.write_file(src, 'NEW') or { panic(err) }
+	os.write_file(dst, 'OLD') or { panic(err) } // destination already exists
+	atomic_replace(src, dst) or { panic(err) }
+	assert (os.read_file(dst) or { panic(err) }) == 'NEW'
+	assert !os.exists(src)
+}
+
+fn test_save_graph_works_when_the_target_already_exists() {
+	// Integration-level sanity check on top of the direct atomic_replace
+	// test above: a second save_graph to the same path (an ordinary repeat
+	// extract) succeeds and fully replaces the previous content, with no
+	// leftover `.tmp.<pid>` file from either write.
+	dir := store_test_dir('atomic_replace')
+	path := os.join_path(dir, 'graph.json')
+
+	mut first := Graph{ root: 'r1' }
+	first.symbols << Symbol{ id: 'demo.a', name: 'a', kind: .function }
+	save_graph(first, path) or { panic(err) }
+	loaded1 := load_graph(path) or { panic(err) }
+	assert loaded1.symbols.len == 1
+	assert loaded1.symbols[0].id == 'demo.a'
+
+	mut second := Graph{ root: 'r2' }
+	second.symbols << Symbol{ id: 'demo.b', name: 'b', kind: .function }
+	second.symbols << Symbol{ id: 'demo.c', name: 'c', kind: .function }
+	save_graph(second, path) or { panic(err) }
+	loaded2 := load_graph(path) or { panic(err) }
+	assert loaded2.symbols.len == 2
+	assert loaded2.symbols.map(it.id) == ['demo.b', 'demo.c']
+
+	// no leftover `.tmp.<pid>` file from either write.
+	leftover := os.ls(dir) or { panic(err) }.filter(it.contains('.tmp.'))
+	assert leftover.len == 0
+}
+
+fn diff_symbol(id string, file string) Symbol {
+	return Symbol{
+		id:   id
+		name: id
+		kind: .function
+		file: file
+		line: 1
+	}
+}
+
+fn test_diff_graphs_returns_empty_when_nothing_disappeared() {
+	old := Graph{ symbols: [diff_symbol('demo.a', 'a.v')] }
+	new := Graph{ symbols: [diff_symbol('demo.a', 'a.v')] }
+	assert diff_graphs(old, new, '') == []
+}
+
+fn test_diff_graphs_reports_symbols_missing_from_new_grouped_by_file() {
+	old := Graph{
+		symbols: [
+			diff_symbol('demo.a', 'a.v'),
+			diff_symbol('demo.b', 'b.v'),
+			diff_symbol('demo.c', 'b.v'),
+		]
+	}
+	new := Graph{ symbols: [diff_symbol('demo.a', 'a.v')] }
+	losses := diff_graphs(old, new, '')
+	assert losses.len == 1
+	assert losses[0].file == 'b.v'
+	assert losses[0].symbols.map(it.id) == ['demo.b', 'demo.c']
+}
+
+fn test_diff_graphs_reports_unknown_status_without_a_manifest() {
+	old := Graph{ symbols: [diff_symbol('demo.a', 'a.v')] }
+	new := Graph{}
+	losses := diff_graphs(old, new, '')
+	assert losses[0].status == FileLossStatus.unknown
+}
+
+fn test_diff_graphs_marks_status_from_the_new_graphs_manifest() {
+	dir := store_test_dir('diff_manifest')
+	report := ExtractReport{
+		binary_hash: 'bh1'
+		failed:      ['failed.v']
+		stale:       ['stale.v']
+	}
+	// only manifest.json matters to diff_graphs, but write_bundle needs a
+	// real graph to also succeed at writing graph.json/GRAPH_REPORT.md.
+	write_bundle(Graph{ root: dir }, dir, report) or { panic(err) }
+
+	old := Graph{
+		symbols: [
+			diff_symbol('demo.failed', 'failed.v'),
+			diff_symbol('demo.stale', 'stale.v'),
+			diff_symbol('demo.removed', 'removed.v'),
+			diff_symbol('demo.present_sibling', 'present.v'),
+			diff_symbol('demo.vanished', 'present.v'),
+		]
+	}
+	new := Graph{ symbols: [diff_symbol('demo.present_sibling', 'present.v')] }
+	losses := diff_graphs(old, new, dir)
+
+	mut status_by_file := map[string]FileLossStatus{}
+	for loss in losses {
+		status_by_file[loss.file] = loss.status
+	}
+	assert status_by_file['failed.v'] == FileLossStatus.parse_failed
+	assert status_by_file['stale.v'] == FileLossStatus.stale
+	assert status_by_file['removed.v'] == FileLossStatus.file_removed
+	assert status_by_file['present.v'] == FileLossStatus.symbol_missing
+}
+
+fn test_manifest_json_carries_the_extract_report() {
+	g := Graph{ root: 'r' }
+	report := ExtractReport{
+		binary_hash: 'abc123'
+		failed:      ['x.v']
+		stale:       ['y.v']
+	}
+	decoded := json2.decode[Manifest](g.manifest_json(report)) or { panic(err) }
+	assert decoded.binary_hash == 'abc123'
+	assert decoded.failed == ['x.v']
+	assert decoded.stale == ['y.v']
+}
+
+fn test_git_commit_of_is_blank_outside_a_git_repository() {
+	// A missing commit is recorded as absent, never an error that could stop
+	// an extract from publishing.
+	dir := store_test_dir('git_commit_none')
+	inside := os.exec(['git', '-C', dir, 'rev-parse', '--is-inside-work-tree'])
+	if inside.exit_code == 0 {
+		return // the scratch dir happens to sit inside someone's work tree; nothing to assert
+	}
+	assert git_commit_of(dir) == ''
+}
+
+fn test_git_commit_of_matches_git_rev_parse_in_a_real_repository() {
+	// This checkout, when the sources really are in a git work tree (skipped
+	// for e.g. an exported tarball, where there is no commit to find).
+	expected := os.exec(['git', '-C', @VMODROOT, 'rev-parse', 'HEAD'])
+	if expected.exit_code != 0 {
+		return
+	}
+	got := git_commit_of(@VMODROOT)
+	assert got != ''
+	assert got == expected.output.trim_space()
 }

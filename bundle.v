@@ -7,25 +7,55 @@ import x.json2
 // default output directory, matching Python Graphify's `graphify-out/`.
 pub const out_dir_name = 'graphify-out'
 
-struct Manifest {
-	tool      string
-	version   string
-	root      string
-	generated string
-	files     int
-	symbols   int
-	edges     int
+// Manifest is manifest.json's shape — enough to tell a clean graph from a
+// degraded one without opening graph.json itself: which extractor binary
+// produced it (matches the incremental cache's own binary-hash gate), which
+// source commit it was extracted from (best-effort; '' outside a git repo or
+// if git isn't available), and which files fell short of a fresh, successful
+// parse this run. `pub` (struct and fields) so `load_manifest` can decode one
+// from outside this module, e.g. `graphify diff`'s comparison of two runs.
+pub struct Manifest {
+pub:
+	tool          string
+	version       string
+	root          string
+	source_commit string
+	binary_hash   string
+	generated     string
+	files         int
+	symbols       int
+	edges         int
+	failed        []string
+	stale         []string
+}
+
+// load_manifest reads a manifest.json previously written by write_bundle.
+pub fn load_manifest(path string) !Manifest {
+	content := os.read_file(path)!
+	return json2.decode[Manifest](content)!
+}
+
+// git_commit_of best-effort resolves `root`'s current commit hash, or ''
+// when `root` isn't inside a git repository, git isn't on PATH, or the
+// command otherwise fails — a missing commit is recorded as absent, never
+// treated as an error that should stop an extract from publishing.
+fn git_commit_of(root string) string {
+	result := os.exec(['git', '-C', root, 'rev-parse', 'HEAD'])
+	if result.exit_code != 0 {
+		return ''
+	}
+	return result.output.trim_space()
 }
 
 // write_bundle writes the Graphify-style output bundle into `out_dir`:
 //   graph.json        persistent, queryable graph
 //   GRAPH_REPORT.md   plain-language summary + suggested queries
 //   manifest.json     metadata + counts
-pub fn write_bundle(g Graph, out_dir string) ! {
+pub fn write_bundle(g Graph, out_dir string, report ExtractReport) ! {
 	os.mkdir_all(out_dir)!
 	save_graph(g, os.join_path(out_dir, 'graph.json'))!
 	os.write_file(os.join_path(out_dir, 'GRAPH_REPORT.md'), g.report())!
-	os.write_file(os.join_path(out_dir, 'manifest.json'), g.manifest_json())!
+	os.write_file(os.join_path(out_dir, 'manifest.json'), g.manifest_json(report))!
 }
 
 // report renders GRAPH_REPORT.md: counts, the most-connected nodes, and a few
@@ -88,19 +118,23 @@ pub fn (g Graph) report() string {
 }
 
 // manifest_json renders manifest.json.
-pub fn (g Graph) manifest_json() string {
+pub fn (g Graph) manifest_json(report ExtractReport) string {
 	mut files := map[string]bool{}
 	for s in g.symbols {
 		files[s.file] = true
 	}
 	m := Manifest{
-		tool:      'graphify'
-		version:   '0.0.1'
-		root:      g.root
-		generated: time.now().format_ss()
-		files:     files.len
-		symbols:   g.symbols.len
-		edges:     g.edges.len
+		tool:          'graphify'
+		version:       '0.0.1'
+		root:          g.root
+		source_commit: git_commit_of(g.root)
+		binary_hash:   report.binary_hash
+		generated:     time.now().format_ss()
+		files:         files.len
+		symbols:       g.symbols.len
+		edges:         g.edges.len
+		failed:        report.failed
+		stale:         report.stale
 	}
 	return json2.encode(m, prettify: true)
 }

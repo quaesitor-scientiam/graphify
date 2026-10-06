@@ -26,19 +26,24 @@ jobs:
           git clone --depth 1 https://github.com/vlang/v "$RUNNER_TEMP/v"
           cd "$RUNNER_TEMP/v"
           make
+          # graphify's extractor imports V's removed V1 frontend (v.ast), which
+          # current V provides only through its V 0.5.2 compatibility compiler,
+          # requested with -old-compiler below. Install it here so a provisioning
+          # failure shows up in this step (see FUTURE_WORK.md section 6).
+          make v1
           sudo ./v symlink
 
       - name: Build CLI
-        run: v -prod -gc none -o bin/graphify cmd/cli
+        run: v -old-compiler -prod -gc none -o bin/graphify cmd/cli
 
       - name: Build hook binary
-        run: v -prod -gc none -o bin/graphify-hook cmd/hooks/graphify_hook.vsh
+        run: v -old-compiler -prod -gc none -o bin/graphify-hook cmd/hooks/graphify_hook.vsh
 
       - name: Build MCP server
-        run: v -prod -o bin/graphify-mcp cmd/mcp
+        run: v -old-compiler -prod -o bin/graphify-mcp cmd/mcp
 
       - name: Run tests
-        run: v test .
+        run: v -old-compiler test .
 
       # Real end-to-end proof this platform's build actually works, not
       # just that it compiles — extracts graphify's own source.

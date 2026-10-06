@@ -157,7 +157,7 @@ fn main() {
 
 	if is_worktree {
 		vlang = positional
-		detect := os.execute('git -C ${os.quoted_path(vlang)} branch --show-current')
+		detect := os.exec(['git', '-C', vlang, 'branch', '--show-current'])
 		branch = detect.output.trim_space()
 		if branch == '' {
 			eprintln('Could not detect the branch checked out at ${vlang}')
@@ -168,7 +168,7 @@ fn main() {
 		}
 	} else {
 		if branch == '' {
-			detect := os.execute('git -C ${os.quoted_path(vlang)} branch --show-current')
+			detect := os.exec(['git', '-C', vlang, 'branch', '--show-current'])
 			branch = detect.output.trim_space()
 			if branch == '' {
 				eprintln('Could not detect current branch')
@@ -177,7 +177,7 @@ fn main() {
 		}
 		if do_checkout {
 			println('git checkout ${branch}...')
-			checkout := os.execute('git -C ${os.quoted_path(vlang)} checkout ${os.quoted_path(branch)}')
+			checkout := os.exec(['git', '-C', vlang, 'checkout', branch])
 			println(checkout.output.trim_space())
 		}
 	}
@@ -196,7 +196,7 @@ fn main() {
 		}
 		println("Extracting graph for branch '${branch}' (${vlang}) -> ${graph_dir} ...")
 		start := time.now()
-		result := os.execute('${os.quoted_path(graphify_exe)} extract ${os.quoted_path(vlang)} --out ${os.quoted_path(graph_dir)}')
+		result := os.exec([graphify_exe, 'extract', vlang, '--out', graph_dir])
 		println(result.output.trim_space())
 		elapsed_s := int(time.now().unix() - start.unix())
 		println('Done in ${elapsed_s}s')
