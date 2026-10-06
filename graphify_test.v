@@ -1820,7 +1820,7 @@ fn test_shortest_path_returns_empty_for_unreachable_or_unknown_nodes() {
 
 // store_test_dir returns a fresh scratch dir for one store.v test.
 fn store_test_dir(name string) string {
-	dir := os.join_path(os.temp_dir(), 'graphify_test_store_${name}')
+	dir := os.join_path(os.temp_dir(), 'graphify_test_store_${name}_${os.getpid()}')
 	os.rmdir_all(dir) or {}
 	os.mkdir_all(dir) or { panic(err) }
 	return dir
