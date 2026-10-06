@@ -323,6 +323,13 @@ top-level `$if` whose condition is false for the target is skipped
 `vlib/v/parser/if_match.v`). That holds for architecture conditions such as
 `$if amd64` as well as for OS conditions.
 
+Separately, graphify's own extractor does not descend into top-level `$if`
+blocks, so a function declared inside one is missing on every host, not only
+on the platforms where the condition is false. (Imports are unaffected: the
+parser collects those itself.) On vlang this affects 16 functions in 3 files:
+small, and fixable independently of the platform question, by treating the
+declarations in each branch of a top-level `$if` as top-level declarations.
+
 Consequences:
 
 - graphs in a store shared between machines differ by platform, even after
@@ -336,14 +343,34 @@ Consequences:
 Options:
 
 - pin the target OS and architecture in the parser preferences, so every host
-  extracts one canonical view. This is deterministic, but omits code that only
-  exists for other platforms;
-- extract every branch of each platform conditional, if the parser offers a
-  mode for it. Whether V1's preferences support this has not been checked.
+  extracts one canonical view. This would be deterministic but omit code that
+  only exists for other platforms, and it is not known to work in V1 (see
+  below);
+- extract every branch of each platform conditional. V3 supports this
+  (`preserve_comptime_conditionals`, measured below). V1 does not: see the
+  experiment below.
 
-Because §6 replaces this frontend, treat host independence as a requirement
-of the V3 port rather than patching the V1 path. If the shared store needs
-identical graphs sooner, pinning OS and architecture is the cheap stopgap.
+**V1 has no usable keep-all-branches mode (checked October 2026, vlang
+`414f15fb7b`).** V 0.5.2's parser skips false top-level `$if` branches unless
+`is_fmt` (set for `vfmt`) or `output_cross_c` (`-os cross`) is set, so both
+were tried as extraction preferences, against V3 as ground truth: V3 in
+preserve mode finds 2,254 symbols that its default mode does not, the code
+other platforms see, and today's graph has none of them. Formatter mode
+captured 48 of the 2,254, lost 62 real symbols (44 of them functions) and
+added 22 that V3 does not find; cross mode captured the same 48, lost 101
+(mostly struct fields) and added 8. Both only pick up some platform-gated
+imports, and both change parsing elsewhere.
+
+Overriding the target OS in V1's preferences also does not behave like a
+different host. In a fixture with `$if windows { import winonly }` and
+`$if macos { import maconly }`, the Mac with the target OS set to `windows`
+still resolved to `maconly`, and combined with formatter mode it lost
+`winonly` again. This was observed, not root-caused. It means cross-host
+behavior can only be verified on a real second host, and that pinning the
+preferences would need such a check before being relied on.
+
+Host independence therefore belongs to the V3 port (§6) rather than to the V1
+path.
 
 **V3 resolves this (October 2026 spike, §6).** V3's parser has a
 `preserve_comptime_conditionals` preference. With it set, every platform
