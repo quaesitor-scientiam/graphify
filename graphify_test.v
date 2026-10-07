@@ -105,6 +105,14 @@ fn always() {}
 	syms, _ := extract_v_text(src, 'demo.v')
 	ids := syms.map(it.id)
 	assert 'demo.always' in ids
+	$if graphify_v3 ? {
+		// every branch is kept, whichever host extracts
+		for id in ['demo.picked_a', 'demo.picked_b', 'demo.PickedA', 'demo.PickedB', 'demo.nested_a',
+			'demo.nested_b'] {
+			assert id in ids, id
+		}
+		return
+	}
 	assert ('demo.picked_a' in ids) != ('demo.picked_b' in ids)
 	assert ('demo.PickedA' in ids) != ('demo.PickedB' in ids)
 	if 'demo.picked_b' in ids {
@@ -1127,6 +1135,15 @@ fn own_closer(src string, name string) string {
 // assert_body_ends_at_own_brace checks every fn in `names` that the extractor
 // kept: get_body must stop at that fn's own closing brace, never at an
 // enclosing block's. Returns how many were checked.
+// branches_kept is how many of `n` alternative `$if` branches extraction keeps:
+// the V 0.5.2 extractor keeps the one this host takes, the V3 one keeps all.
+fn branches_kept(n int) int {
+	$if graphify_v3 ? {
+		return n
+	}
+	return 1
+}
+
 fn assert_body_ends_at_own_brace(g Graph, src string, names []string) int {
 	mut checked := 0
 	for name in names {
@@ -1167,7 +1184,7 @@ fn after() {
 		os.rmdir_all(root) or {}
 	}
 	// the parser keeps exactly the host's branch
-	assert assert_body_ends_at_own_brace(g, src, ['win_last', 'other_last']) == 1
+	assert assert_body_ends_at_own_brace(g, src, ['win_last', 'other_last']) == branches_kept(2)
 	body := g.get_body(if g.symbols.any(it.name == 'win_last') { 'win_last' } else { 'other_last' })
 	assert body.contains('println(1)')
 	assert !body.contains('after')
@@ -1212,8 +1229,8 @@ $if windows {
 	defer {
 		os.rmdir_all(root) or {}
 	}
-	assert assert_body_ends_at_own_brace(g, src, ['deep_a', 'deep_b', 'deep_c', 'deep_d']) == 1
-	assert assert_body_ends_at_own_brace(g, src, ['mid_a', 'mid_b']) == 1
+	assert assert_body_ends_at_own_brace(g, src, ['deep_a', 'deep_b', 'deep_c', 'deep_d']) == branches_kept(4)
+	assert assert_body_ends_at_own_brace(g, src, ['mid_a', 'mid_b']) == branches_kept(2)
 }
 
 fn test_get_body_of_a_plain_fn_skips_the_next_declarations_doc_comment() {

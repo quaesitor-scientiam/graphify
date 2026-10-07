@@ -65,7 +65,12 @@ mut:
 }
 
 fn extract_v3(path string, src string, rel string) FileResult {
-	prefs := pref.new_preferences()
+	mut prefs := pref.new_preferences()
+	// Keep every branch of a `$if`, at file scope and in bodies, instead of the
+	// one this machine would compile: the graph then no longer depends on the
+	// host's OS and architecture (FUTURE_WORK.md §8), and a call inside a
+	// `$if debug {}` is still a call.
+	prefs.preserve_comptime_conditionals = true
 	mut p := parser.Parser.new(prefs)
 	a := p.parse_file(path)
 	mut parse_error := ''
@@ -138,16 +143,27 @@ fn (f &V3File) line_is_pub(line int) bool {
 	return line >= 1 && line <= f.lines.len && f.lines[line - 1].trim_space().starts_with('pub ')
 }
 
-// field_is_pub reports whether a struct field on `field_line` sits under a
-// `pub:` or `pub mut:` label, scanning back to the struct's own line.
-fn (f &V3File) field_is_pub(struct_line int, field_line int) bool {
+// declares_extern reports whether `line` declares a `fn C.` or `fn JS.`
+// binding.
+fn (f &V3File) declares_extern(line int) bool {
+	if line < 1 || line > f.lines.len {
+		return false
+	}
+	t := f.lines[line - 1]
+	return t.contains('fn C.') || t.contains('fn JS.')
+}
+
+// field_is_pub reports whether a struct field on `field_line` is public: under
+// a `pub:` or `pub mut:` label, or, in a C struct, under no label at all, as V
+// treats those.
+fn (f &V3File) field_is_pub(struct_line int, field_line int, is_c bool) bool {
 	for l := field_line - 1; l > struct_line && l >= 1; l-- {
 		t := f.lines[l - 1].trim_space()
 		if (t.ends_with(':') && !t.contains(' ')) || t == 'pub mut:' {
 			return t.starts_with('pub')
 		}
 	}
-	return false
+	return is_c
 }
 
 // type_text renders a type as V 0.5.2 did for this file: as written, with an
@@ -195,11 +211,7 @@ fn (f &V3File) recv_type(t string) string {
 // `T@static@f` becomes `T__static__f`, and the `@` escape on a keyword name
 // (`@type`) and a `C.`/`JS.` prefix are dropped.
 fn decl_name(v string) string {
-	mut n := v.replace('@static@', '__static__')
-	if n.starts_with('@') {
-		n = n[1..]
-	}
-	return n.all_after_last('.')
+	return v.replace('@static@', '__static__').all_after_last('.').trim_left('@')
 }
 
 fn (mut f V3File) extract(root flat.NodeId) ([]Symbol, []Edge) {
@@ -263,7 +275,7 @@ fn (mut f V3File) extract(root flat.NodeId) ([]Symbol, []Edge) {
 	for id in f.top_level_decls(top) {
 		n := f.node(id)
 		match n.kind {
-			.fn_decl { f.extract_fn(id, mut syms, mut edges) }
+			.fn_decl, .c_fn_decl { f.extract_fn(id, mut syms, mut edges) }
 			.struct_decl { f.extract_struct(id, mut syms, mut edges) }
 			.enum_decl { f.extract_enum(id, mut syms, mut edges) }
 			.interface_decl { f.extract_interface(id, mut syms, mut edges) }
@@ -345,8 +357,18 @@ fn (mut f V3File) extract_fn(id flat.NodeId, mut syms []Symbol, mut edges []Edge
 	n := f.node(id)
 	kids := f.kids(id)
 	v := n.value
-	if v.starts_with('C.') || v.starts_with('JS.') {
-		// an extern binding written as a fn_decl; see c_fn_decl
+	if (v.starts_with('C.') || v.starts_with('JS.')) && v.count('.') == 1 {
+		// an extern binding; a method on a C type, `C.SSL.str`, is real V
+		return
+	}
+	if n.kind == .c_fn_decl && f.declares_extern(f.line_of(n.pos.offset)) {
+		// V3 parses both `fn C.puts(...)` and a body-less V declaration
+		// (`fn slopediv(num u32) int` in a .c.v file) as c_fn_decl, with the
+		// `C.` dropped from the name; only the source line tells them apart
+		return
+	}
+	if v.starts_with('__v_') {
+		// a function V3 synthesizes, such as one per file-scope $compile_error
 		return
 	}
 	is_static := v.contains('@static@')
@@ -476,15 +498,16 @@ fn (mut f V3File) extract_struct(id flat.NodeId, mut syms []Symbol, mut edges []
 		}
 		fline := f.line_of(fd.pos.offset)
 		tname := f.type_text(fd.typ)
+		fname := fd.value.trim_left('@')
 		f.add_symbol(mut syms, mut edges, Symbol{
-			id:        '${sid}.${fd.value}'
-			name:      fd.value
+			id:        '${sid}.${fname}'
+			name:      fname
 			kind:      .field
-			signature: '${fd.value} ${tname}'
+			signature: '${fname} ${tname}'
 			file:      f.rel
 			line:      fline
 			end_line:  f.line_of(fd.pos.end)
-			is_pub:    f.field_is_pub(line, fline)
+			is_pub:    f.field_is_pub(line, fline, n.value.starts_with('C.'))
 			parent:    sid
 		})
 		add_ref(sid, base, f.rel, mut edges, mut rseen)
@@ -739,7 +762,18 @@ fn (mut f V3File) record_call(callee_id flat.NodeId, ctx V3CallCtx, mut edges []
 			return
 		}
 		target := f.node(ks[0])
-		if target.kind == .ident && (target.value in ['C', 'JS'] || target.value in f.imports) {
+		if target.kind == .selector && c.value.len > 0 && target.value.len > 0
+			&& target.value[0].is_capital() {
+			// a static method through its module, `flat.FlatAst.new()`
+			tk := f.kids(ks[0])
+			if tk.len > 0 && f.node(tk[0]).kind == .ident {
+				if mod := f.imports[f.node(tk[0]).value] {
+					name = '${mod}.${target.value}__static__${c.value}'
+				}
+			}
+		}
+		if name != '' {
+		} else if target.kind == .ident && (target.value in ['C', 'JS'] || target.value in f.imports) {
 			mod := f.imports[target.value] or { target.value }
 			name = '${mod}.${c.value}'
 		} else if target.kind == .ident && target.value.len > 0 && target.value[0].is_capital()
@@ -759,7 +793,8 @@ fn (mut f V3File) record_call(callee_id flat.NodeId, ctx V3CallCtx, mut edges []
 			}
 		}
 	}
-	if name == '' || name in seen {
+	if name == '' || name in seen || name.starts_with('$') || name.starts_with('__v_') {
+		// `$` and `__v_` names are compile-time forms and V3's own stand-ins
 		return
 	}
 	seen[name] = true
