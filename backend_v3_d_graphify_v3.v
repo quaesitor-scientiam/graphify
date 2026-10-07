@@ -20,8 +20,8 @@ pub fn extract_v_file_result(path string, rel string) FileResult {
 	src := os.read_file(path) or { return FileResult{
 		parse_error: 'cannot read the file: ${err}'
 	} }
-	if src.contains('[if ') {
-		// see without_if_attrs: parse a copy with the guards blanked
+	if src.contains('[if ') || src.contains(r'$match @') {
+		// see without_if_attrs and with_every_match_branch: parse a rewritten copy
 		return extract_v_text_result(src, rel)
 	}
 	return extract_v3(path, src, rel)
@@ -39,13 +39,17 @@ pub fn extract_v_text_result(source string, rel string) FileResult {
 	dir := os.join_path(os.temp_dir(), 'graphify_v3_text_${os.getpid()}')
 	os.mkdir_all(dir) or {}
 	path := os.join_path(dir, os.file_name(rel))
-	os.write_file(path, without_if_attrs(source)) or { return FileResult{
+	// the extractor reads lines and slices from the `$match` rewrite, which
+	// adds text; blanking the `@[if]` guards adds none, and the original
+	// attribute lines stay visible to it
+	text := with_every_match_branch(source)
+	os.write_file(path, without_if_attrs(text)) or { return FileResult{
 		parse_error: 'cannot write a temporary file: ${err}'
 	} }
 	defer {
 		os.rm(path) or {}
 	}
-	return extract_v3(path, source, rel)
+	return extract_v3(path, text, rel)
 }
 
 // V3File is one parsed file and what the walk needs to read it.

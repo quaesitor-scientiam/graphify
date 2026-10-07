@@ -169,3 +169,12 @@ fn without_if_attrs(src string) string {
 	}
 	return b.bytestr()
 }
+
+// with_every_match_branch writes `$match @OS {` as `$match mut @OS {`. V3's
+// parser resolves a `$match` on a pseudo variable for this host and keeps one
+// branch, even with every `$if` kept; with `mut` it builds the `$if` chain
+// instead, which the extractor keeps whole, as V 0.5.2 did. The rewrite adds
+// text within the line, so line numbers stay the same.
+fn with_every_match_branch(src string) string {
+	return src.replace(r'$match @', r'$match mut @')
+}

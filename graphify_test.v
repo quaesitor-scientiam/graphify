@@ -3232,3 +3232,46 @@ fn traced() {
 	assert without_if_attrs('@[if a ?; inline]\nfn f() {}\n') == '@[${' '.repeat(8)}inline]\nfn f() {}\n'
 	assert without_if_attrs('\t@[if a]\nx').len == '\t@[if a]\nx'.len
 }
+
+fn test_comptime_match_on_the_os_keeps_every_branch() {
+	// V3's parser kept only this host's branch of `$match @OS`, so the const
+	// below was declared on a different line on Mac and Windows, and the
+	// body's call to `on_windows` existed only on Windows. (V 0.5.2's
+	// extractor records nothing from a file-scope `$match`; FUTURE_WORK §6.)
+	$if !graphify_v3 ? {
+		return
+	}
+	src := r"module m
+
+$match @OS {
+	'linux' {
+		const os = 'linux'
+	}
+	'windows' {
+		const os = 'windows'
+	}
+	$else {
+		const os = 'other'
+	}
+}
+
+fn on_windows() {}
+
+fn elsewhere() {}
+
+fn pick() {
+	$match @OS {
+		'windows' { on_windows() }
+		$else { elsewhere() }
+	}
+}
+"
+	fr := extract_v_text_result(src, 'm/m.v')
+	assert fr.parse_error == ''
+	consts := fr.symbols.filter(it.id == 'm.os')
+	assert consts.map(it.line) == [5, 8, 11]
+	for f in ['on_windows', 'elsewhere'] {
+		assert fr.edges.any(it.kind == .calls && it.from == 'm.pick' && it.to.ends_with(f)), f
+	}
+	assert with_every_match_branch(r'$match @OS {') == r'$match mut @OS {'
+}
