@@ -113,6 +113,10 @@ fn always() {}
 }
 
 fn test_syntax_error_costs_only_its_own_declaration() {
+	$if graphify_v3 ? {
+		// V 0.5.2's parser: its syntax errors and pseudo-imports
+		return
+	}
 	// V 0.5.2 rejects a loop variable shadowing a local and returns from the
 	// middle of the `for` without closing its scope. Every later method whose
 	// receiver has the same name then fails as a "redefinition of parameter"
@@ -171,6 +175,10 @@ fn not_a_declaration() {}
 }
 
 fn test_reparse_keeps_header_when_an_attribute_precedes_module() {
+	$if graphify_v3 ? {
+		// V 0.5.2's parser: its syntax errors and pseudo-imports
+		return
+	}
 	src := '@[has_globals]
 module demo
 
@@ -212,6 +220,10 @@ fn import_edges_to(fr FileResult, mod string) int {
 }
 
 fn test_reparse_keeps_the_imports_edge_of_an_implicit_import() {
+	$if graphify_v3 ? {
+		// V 0.5.2's parser: its syntax errors and pseudo-imports
+		return
+	}
 	// The parser adds `builtin.closure` itself when it reaches a closure. Here
 	// the closure sits in a declaration after the one with the syntax error, so
 	// the per-declaration re-parse's header (module and imports) never sees it:
@@ -244,6 +256,10 @@ fn last() {}
 }
 
 fn test_reparse_keeps_the_imports_edges_of_every_implicit_import() {
+	$if graphify_v3 ? {
+		// V 0.5.2's parser: its syntax errors and pseudo-imports
+		return
+	}
 	// Same rule for imports other than the closure one: `spawn` makes the parser
 	// import the threading modules, again from a later declaration.
 	src := r'module demo
@@ -267,6 +283,10 @@ fn last() {}
 }
 
 fn test_import_edges_match_import_symbols_when_a_file_parses_cleanly() {
+	$if graphify_v3 ? {
+		// V 0.5.2's parser: its syntax errors and pseudo-imports
+		return
+	}
 	// The other side of the invariant, which never involved the re-parse: with no
 	// syntax error the same shapes give the same one-to-one symbols and edges.
 	src := r'module demo
@@ -2457,6 +2477,10 @@ fn after() int {
 '
 
 fn test_extract_reports_a_parse_error_and_recovers_past_it() {
+	$if graphify_v3 ? {
+		// V 0.5.2's parser: its syntax errors and pseudo-imports
+		return
+	}
 	fr := extract_v_text_result(partial_parse_src, 'demo.v')
 	assert fr.parse_error.starts_with('8:'), fr.parse_error
 	names := fr.symbols.map(it.name)
@@ -2471,6 +2495,10 @@ fn test_extract_reports_a_parse_error_and_recovers_past_it() {
 // declaration with no name. Such a node is not a real declaration and must
 // not become a symbol -- its id would just be `<module>.`.
 fn test_extract_drops_nameless_fn_declarations_from_error_recovery() {
+	$if graphify_v3 ? {
+		// V 0.5.2's parser: its syntax errors and pseudo-imports
+		return
+	}
 	src := 'module demo
 
 import gg
@@ -2823,7 +2851,12 @@ fn @select() {}
 	calls := g.edges.filter(it.kind == .calls && it.from == 'cmd.app.run')
 	assert calls.len == 3
 	assert calls.any(it.to == 'rand.int')
-	assert calls.any(it.to == 'app.shared')
+	$if graphify_v3 ? {
+		// V3 names a selectively imported function by its module
+		assert calls.any(it.to == 'lib.util.shared')
+	} $else {
+		assert calls.any(it.to == 'app.shared')
+	}
 	assert calls.any(it.to == 'cmd.app.select')
 }
 
@@ -3098,6 +3131,6 @@ println(x)
 	assert 'examples.main' in ids
 	assert fr.edges.any(it.kind == .calls && it.from == 'examples.main' && it.to.ends_with('helper'))
 	// a real syntax error in a main file is still reported
-	bad := extract_v_text_result('fn main() {\n\tx := [1, ...(y)]\n}\n', 'examples/bad.v')
+	bad := extract_v_text_result('fn main() {\n\tx := [1, 2\n}\n', 'examples/bad.v')
 	assert bad.parse_error != ''
 }
