@@ -71,6 +71,10 @@ fn extract_v3(path string, src string, rel string) FileResult {
 	// host's OS and architecture (FUTURE_WORK.md §8), and a call inside a
 	// `$if debug {}` is still a call.
 	prefs.preserve_comptime_conditionals = true
+	// Inline assembly for another architecture parses fine; without this the
+	// parser still reports it as unsupported by the backend, so which files are
+	// flagged would depend on the host's architecture.
+	prefs.supports_inline_asm = true
 	mut p := parser.Parser.new(prefs)
 	a := p.parse_file(path)
 	mut parse_error := ''
