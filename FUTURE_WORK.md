@@ -327,17 +327,24 @@ against the V 0.5.2 extractor on the same tree:
 | calls resolved / total | 209,831 / 243,794 | 214,703 / 248,638 |
 | type references resolved / total | 80,442 / 117,066 | 82,273 / 120,023 |
 | embeds resolved / total | 668 / 678 | 668 / 678 |
-| files flagged with syntax errors | 220 (+3 unparseable) | 34 |
+| files flagged with syntax errors | 220 (+3 unparseable) | 5 |
 | full extraction | 2.90 s | 2.14 s |
 
 The symbols only V 0.5.2 has are its pseudo-imports (`builtin.closure`,
 2,042), nameless declarations from its parse failures, and generic receivers
 it spelled `Arc<T>` where every other id uses `Arc[T]`. The ones only V3 has
 are other platforms' declarations, the three files V 0.5.2 could not parse,
-and declarations V 0.5.2 lost to syntax it did not know. Of the 34 flagged
-files, 29 are inline assembly for an architecture other than the host's,
-which V3's parser rejects; the rest are in `x/multiwindow` and two test
-fixtures.
+and declarations V 0.5.2 lost to syntax it did not know. The 5 flagged
+files are in `x/multiwindow` (methods defined in more than one `$if` branch,
+which keeping every branch makes duplicates) and two test fixtures. Inline
+assembly for another architecture parses fine but is reported as unsupported
+by the backend unless `prefs.supports_inline_asm` is set, which the extractor
+does, so the flagged list doesn't depend on the host.
+
+Under V3, `import graphify` in `cmd/` resolves to the checkout at
+`~/repo/graphify` (the parent of the module directory is on the module path),
+not to a worktree beside it: build the V3 binaries from the main checkout, or
+a worktree's changes are silently left out.
 
 Mapping notes, for whoever moves this forward: methods are `fn_decl`s whose
 value is `Recv.name` with the receiver as the first `param`; a static method
