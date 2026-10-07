@@ -26,25 +26,17 @@ jobs:
           git clone --depth 1 https://github.com/vlang/v "$RUNNER_TEMP/v"
           cd "$RUNNER_TEMP/v"
           make
-          # graphify's extractor imports V's removed V1 frontend (v.ast), which
-          # current V provides only through its V 0.5.2 compatibility compiler,
-          # requested with -old-compiler below. Install it here so a provisioning
-          # failure shows up in this step (see FUTURE_WORK.md section 6).
-          make v1
           sudo ./v symlink
 
       - name: Build CLI
-        run: v -old-compiler -prod -gc none -o bin/graphify cmd/cli
+        run: v -prod -gc none -o bin/graphify cmd/cli
 
       - name: Build hook binary
         # `build`, not plain `v file.vsh`: a .vsh is otherwise compiled AND run.
-        run: v -old-compiler -prod -gc none -o bin/graphify-hook build cmd/hooks/graphify_hook.vsh
+        run: v -prod -gc none -o bin/graphify-hook build cmd/hooks/graphify_hook.vsh
 
       - name: Build MCP server
-        run: v -old-compiler -prod -o bin/graphify-mcp cmd/mcp
-
-      - name: Run tests
-        run: v -old-compiler test .
+        run: v -prod -o bin/graphify-mcp cmd/mcp
 
       # Real end-to-end proof this platform's build actually works, not
       # just that it compiles — extracts graphify's own source.
@@ -73,12 +65,11 @@ jobs:
           grep_on /tmp/graphify-hook-proj/main.v | grep -q additionalContext
           test "$(grep_on /tmp/graphify-hook-proj/README.md)" = '{}'
 
-  # The V3 extractor (`-d graphify_v3`, built by current V without
-  # -old-compiler; FUTURE_WORK.md section 6). Besides its tests, this checks
-  # that it extracts the same graph on every OS (section 8): each runner
-  # extracts the same vlang commit, the one V itself is built from, and
-  # v3-same-graph compares the results.
-  v3-pin-vlang:
+  # The tests, on every OS, and a check that extraction gives the same graph
+  # on every OS (FUTURE_WORK.md section 8): each runner extracts the same
+  # vlang commit, the one V itself is built from, and same-graph compares
+  # the results.
+  pin-vlang:
     runs-on: ubuntu-latest
     outputs:
       sha: ${{ steps.sha.outputs.sha }}
@@ -86,8 +77,8 @@ jobs:
       - id: sha
         run: echo "sha=$(git ls-remote https://github.com/vlang/v HEAD | cut -f1)" >> "$GITHUB_OUTPUT"
 
-  v3-extractor:
-    needs: v3-pin-vlang
+  extract-on-every-os:
+    needs: pin-vlang
     strategy:
       fail-fast: false
       matrix:
@@ -103,7 +94,7 @@ jobs:
         run: |
           git init -q "$RUNNER_TEMP/v"
           cd "$RUNNER_TEMP/v"
-          git fetch -q --depth 1 https://github.com/vlang/v ${{ needs.v3-pin-vlang.outputs.sha }}
+          git fetch -q --depth 1 https://github.com/vlang/v ${{ needs.pin-vlang.outputs.sha }}
           git checkout -q FETCH_HEAD
 
       - name: Build V
@@ -117,10 +108,10 @@ jobs:
         run: ./makev.bat && ./v symlink
 
       - name: Run tests
-        run: v -d graphify_v3 test .
+        run: v test .
 
       - name: Build CLI
-        run: v -d graphify_v3 -o bin/graphify-v3 cmd/cli
+        run: v -o bin/graphify cmd/cli
 
       # From a clean checkout of the same commit: building V leaves generated
       # files beside its sources, and they may differ between platforms.
@@ -128,23 +119,23 @@ jobs:
         shell: bash
         run: |
           git -C "$RUNNER_TEMP/v" worktree add -q "$RUNNER_TEMP/vlang" HEAD
-          ./bin/graphify-v3 extract "$RUNNER_TEMP/vlang" --out "$RUNNER_TEMP/v3-out"
-          cat "$RUNNER_TEMP/v3-out/GRAPH_REPORT.md"
+          ./bin/graphify extract "$RUNNER_TEMP/vlang" --out "$RUNNER_TEMP/graph-out"
+          cat "$RUNNER_TEMP/graph-out/GRAPH_REPORT.md"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: v3-graph-${{ matrix.os }}
-          path: ${{ runner.temp }}/v3-out/graph.json
+          name: graph-${{ matrix.os }}
+          path: ${{ runner.temp }}/graph-out/graph.json
           retention-days: 5
 
-  v3-same-graph:
-    needs: v3-extractor
+  same-graph:
+    needs: extract-on-every-os
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
-          pattern: v3-graph-*
+          pattern: graph-*
           path: graphs
       - name: Compare the graphs
         run: python3 .github/scripts/same_graph.py graphs/*/graph.json

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Fail unless every graph.json given has the same symbols and edges.
 
-Used by CI to check that the V3 extractor builds the same graph of the same
+Used by CI to check that extraction builds the same graph of the same
 tree on every OS (FUTURE_WORK.md section 8). `root`, the extraction's own
 absolute path, is expected to differ and is not compared.
 """

@@ -5,11 +5,11 @@ import v.flat
 import v.parser
 import v.pref
 
-// The V3 extractor, built with `-d graphify_v3` under plain V (no
-// -old-compiler). It produces the same symbols, ids and edges as the V 0.5.2
-// extractor in backend_v_notd_graphify_v3.v, from V3's flat AST: one node per
+// The extractor. It reads V3's flat AST (v.flat, from v.parser): one node per
 // syntax element with a kind, a value, a type written as source text, byte
-// offsets and children. See FUTURE_WORK.md §6 for the mapping it follows.
+// offsets and children. Its ids, signatures and lines follow the conventions
+// of the V 0.5.2-based extractor it replaced in October 2026; FUTURE_WORK.md
+// §6 records the mapping and where it deliberately differs.
 
 pub fn extract_v_file(path string, rel string) ([]Symbol, []Edge) {
 	fr := extract_v_file_result(path, rel)
@@ -44,7 +44,7 @@ pub fn extract_v_text_result(source string, rel string) FileResult {
 // extract_v3_rewritten parses the rewritten copy; `real_path` is the file it
 // came from, if any, for resolving its imports.
 fn extract_v3_rewritten(source string, rel string, real_path string) FileResult {
-	dir := os.join_path(os.temp_dir(), 'graphify_v3_text_${os.getpid()}')
+	dir := os.join_path(os.temp_dir(), 'graphify_text_${os.getpid()}')
 	os.mkdir_all(dir) or {}
 	path := os.join_path(dir, os.file_name(rel))
 	// the extractor reads lines and slices from the `$match` rewrite, which
@@ -961,8 +961,7 @@ struct V3CallCtx {
 
 // walk_list walks sibling nodes in order. A `:=` that names its type
 // (`x := Foo{}`) types `x` for the siblings after it and nothing outside this
-// list, which is ordinary lexical scoping; see track_assign in the V 0.5.2
-// extractor.
+// list, which is ordinary lexical scoping.
 fn (mut f V3File) walk_list(ids []flat.NodeId, ctx V3CallCtx, mut edges []Edge, mut seen map[string]bool) {
 	mut cur := ctx
 	for id in ids {

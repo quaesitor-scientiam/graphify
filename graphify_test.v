@@ -105,110 +105,11 @@ fn always() {}
 	syms, _ := extract_v_text(src, 'demo.v')
 	ids := syms.map(it.id)
 	assert 'demo.always' in ids
-	$if graphify_v3 ? {
-		// every branch is kept, whichever host extracts
-		for id in ['demo.picked_a', 'demo.picked_b', 'demo.PickedA', 'demo.PickedB', 'demo.nested_a',
-			'demo.nested_b'] {
-			assert id in ids, id
-		}
-		return
+	// every branch is kept, whichever host extracts
+	for id in ['demo.picked_a', 'demo.picked_b', 'demo.PickedA', 'demo.PickedB', 'demo.nested_a',
+		'demo.nested_b'] {
+		assert id in ids, id
 	}
-	assert ('demo.picked_a' in ids) != ('demo.picked_b' in ids)
-	assert ('demo.PickedA' in ids) != ('demo.PickedB' in ids)
-	if 'demo.picked_b' in ids {
-		assert ('demo.nested_a' in ids) != ('demo.nested_b' in ids)
-	}
-}
-
-fn test_syntax_error_costs_only_its_own_declaration() {
-	$if graphify_v3 ? {
-		// V 0.5.2's parser: its syntax errors and pseudo-imports
-		return
-	}
-	// V 0.5.2 rejects a loop variable shadowing a local and returns from the
-	// middle of the `for` without closing its scope. Every later method whose
-	// receiver has the same name then fails as a "redefinition of parameter"
-	// and its body is read as garbage at file scope; functions with other
-	// parameter names survive. Shape from vlib/v/types/
-	// checker_ownership_d_ownership.v, which lost 320 of 501 functions to it.
-	src := 'module demo
-
-import os
-
-struct Checker {}
-
-fn (c Checker) shadows(m map[string]int) bool {
-	name := os.args[0]
-	for name, v in m {
-		if v > 0 {
-			return name.len > 0
-		}
-	}
-	return false
-}
-
-@[inline]
-fn (c Checker) after_one() int {
-	return 1
-}
-
-fn plain() {}
-
-struct After {
-	x int
-}
-
-fn (c Checker) after_two(a After) int {
-	return a.x
-}
-
-const quoted = \'
-fn not_a_declaration() {}
-\'
-'
-	fr := extract_v_text_result(src, 'demo.v')
-	assert fr.parse_error != ''
-	by_id := maps_by_id(fr.symbols)
-	for id in ['demo.Checker', 'demo.Checker.shadows', 'demo.Checker.after_one', 'demo.plain',
-		'demo.After', 'demo.After.x', 'demo.Checker.after_two', 'demo.quoted'] {
-		assert id in by_id, id
-	}
-	assert 'demo.not_a_declaration' !in by_id
-	assert by_id['demo.Checker.after_one'].line == 18
-	assert by_id['demo.After'].line == 24
-	assert by_id['demo.Checker.after_two'].line == 28
-	assert fr.symbols.filter(it.kind == .import_).len == 1
-	assert fr.symbols.filter(it.kind == .mod_).len == 1
-	assert fr.symbols.all(it.name != '')
-}
-
-fn test_reparse_keeps_header_when_an_attribute_precedes_module() {
-	$if graphify_v3 ? {
-		// V 0.5.2's parser: its syntax errors and pseudo-imports
-		return
-	}
-	src := '@[has_globals]
-module demo
-
-struct Checker {}
-
-fn (c Checker) first() {
-	name := 1
-	for name in [1] {
-		_ = name
-	}
-}
-
-fn (c Checker) second() {}
-
-struct Third {}
-'
-	fr := extract_v_text_result(src, 'demo.v')
-	assert fr.parse_error != ''
-	by_id := maps_by_id(fr.symbols)
-	assert 'demo.Checker.second' in by_id
-	assert 'demo.Third' in by_id
-	assert by_id['demo.Checker.second'].line == 13
 }
 
 // assert_import_edges_match_symbols checks the invariant extract_from_ast
@@ -225,98 +126,6 @@ fn assert_import_edges_match_symbols(fr FileResult) {
 
 fn import_edges_to(fr FileResult, mod string) int {
 	return fr.edges.filter(it.kind == .imports && it.to == mod).len
-}
-
-fn test_reparse_keeps_the_imports_edge_of_an_implicit_import() {
-	$if graphify_v3 ? {
-		// V 0.5.2's parser: its syntax errors and pseudo-imports
-		return
-	}
-	// The parser adds `builtin.closure` itself when it reaches a closure. Here
-	// the closure sits in a declaration after the one with the syntax error, so
-	// the per-declaration re-parse's header (module and imports) never sees it:
-	// the whole-file parse alone supplies the symbol, and its edge must come
-	// along with it.
-	src := r'module demo
-
-import os
-
-fn broken(y []int) {
-	x := [1, ...(y)]
-	println(x)
-}
-
-fn later() {
-	f := fn () {
-		println(os.args)
-	}
-	f()
-}
-
-fn last() {}
-'
-	fr := extract_v_text_result(src, 'demo.v')
-	assert fr.parse_error != ''
-	assert fr.symbols.any(it.kind == .import_ && it.name == 'builtin.closure')
-	assert import_edges_to(fr, 'builtin.closure') == 1
-	assert import_edges_to(fr, 'os') == 1 // an explicit import is not duplicated
-	assert_import_edges_match_symbols(fr)
-}
-
-fn test_reparse_keeps_the_imports_edges_of_every_implicit_import() {
-	$if graphify_v3 ? {
-		// V 0.5.2's parser: its syntax errors and pseudo-imports
-		return
-	}
-	// Same rule for imports other than the closure one: `spawn` makes the parser
-	// import the threading modules, again from a later declaration.
-	src := r'module demo
-
-fn broken(y []int) {
-	x := [1, ...(y)]
-	println(x)
-}
-
-fn threaded() {
-	t := spawn println(1)
-	t.wait()
-}
-
-fn last() {}
-'
-	fr := extract_v_text_result(src, 'demo.v')
-	assert fr.parse_error != ''
-	assert fr.symbols.filter(it.kind == .import_).len >= 1 // the fixture really triggers one
-	assert_import_edges_match_symbols(fr)
-}
-
-fn test_import_edges_match_import_symbols_when_a_file_parses_cleanly() {
-	$if graphify_v3 ? {
-		// V 0.5.2's parser: its syntax errors and pseudo-imports
-		return
-	}
-	// The other side of the invariant, which never involved the re-parse: with no
-	// syntax error the same shapes give the same one-to-one symbols and edges.
-	src := r'module demo
-
-import os
-
-fn later() {
-	f := fn () {
-		println(os.args)
-	}
-	f()
-}
-
-fn threaded() {
-	t := spawn println(1)
-	t.wait()
-}
-'
-	fr := extract_v_text_result(src, 'demo.v')
-	assert fr.parse_error == ''
-	assert import_edges_to(fr, 'builtin.closure') == 1
-	assert_import_edges_match_symbols(fr)
 }
 
 fn maps_by_id(syms []Symbol) map[string]Symbol {
@@ -1135,15 +944,6 @@ fn own_closer(src string, name string) string {
 // assert_body_ends_at_own_brace checks every fn in `names` that the extractor
 // kept: get_body must stop at that fn's own closing brace, never at an
 // enclosing block's. Returns how many were checked.
-// branches_kept is how many of `n` alternative `$if` branches extraction keeps:
-// the V 0.5.2 extractor keeps the one this host takes, the V3 one keeps all.
-fn branches_kept(n int) int {
-	$if graphify_v3 ? {
-		return n
-	}
-	return 1
-}
-
 fn assert_body_ends_at_own_brace(g Graph, src string, names []string) int {
 	mut checked := 0
 	for name in names {
@@ -1184,7 +984,7 @@ fn after() {
 		os.rmdir_all(root) or {}
 	}
 	// the parser keeps exactly the host's branch
-	assert assert_body_ends_at_own_brace(g, src, ['win_last', 'other_last']) == branches_kept(2)
+	assert assert_body_ends_at_own_brace(g, src, ['win_last', 'other_last']) == 2
 	body := g.get_body(if g.symbols.any(it.name == 'win_last') { 'win_last' } else { 'other_last' })
 	assert body.contains('println(1)')
 	assert !body.contains('after')
@@ -1229,8 +1029,8 @@ $if windows {
 	defer {
 		os.rmdir_all(root) or {}
 	}
-	assert assert_body_ends_at_own_brace(g, src, ['deep_a', 'deep_b', 'deep_c', 'deep_d']) == branches_kept(4)
-	assert assert_body_ends_at_own_brace(g, src, ['mid_a', 'mid_b']) == branches_kept(2)
+	assert assert_body_ends_at_own_brace(g, src, ['deep_a', 'deep_b', 'deep_c', 'deep_d']) == 4
+	assert assert_body_ends_at_own_brace(g, src, ['mid_a', 'mid_b']) == 2
 }
 
 fn test_get_body_of_a_plain_fn_skips_the_next_declarations_doc_comment() {
@@ -2473,10 +2273,8 @@ fn test_git_commit_of_matches_git_rev_parse_in_a_real_repository() {
 	assert got == expected.output.trim_space()
 }
 
-// The V 0.5.2 parser does not know the array-literal spread on line 8. With
-// its default settings it would stop there and drop everything after it;
-// extraction runs it in recovery mode instead (extract_prefs), so it reports
-// the error and still reads the rest of the file.
+// A file with a syntax error in the middle: the unclosed array literal on
+// line 8.
 const partial_parse_src = 'module demo
 
 fn before() int {
@@ -2484,7 +2282,7 @@ fn before() int {
 }
 
 fn broken() []int {
-	x := [1, ...(parts()), 4]
+	x := [1, 2
 	return x
 }
 
@@ -2492,46 +2290,6 @@ fn after() int {
 	return 2
 }
 '
-
-fn test_extract_reports_a_parse_error_and_recovers_past_it() {
-	$if graphify_v3 ? {
-		// V 0.5.2's parser: its syntax errors and pseudo-imports
-		return
-	}
-	fr := extract_v_text_result(partial_parse_src, 'demo.v')
-	assert fr.parse_error.starts_with('8:'), fr.parse_error
-	names := fr.symbols.map(it.name)
-	assert 'before' in names
-	assert 'after' in names
-}
-
-// Top-level statements with an anonymous fn inside a top-level call, in a
-// module other than `main` (a `main` file like this is a script and parses
-// cleanly in script mode): recovering past the first "bad top level
-// statement", the parser reaches that `fn` and records it as a top-level
-// declaration with no name. Such a node is not a real declaration and must
-// not become a symbol -- its id would just be `<module>.`.
-fn test_extract_drops_nameless_fn_declarations_from_error_recovery() {
-	$if graphify_v3 ? {
-		// V 0.5.2's parser: its syntax errors and pseudo-imports
-		return
-	}
-	src := 'module demo
-
-import gg
-
-gg.start(
-	frame_fn: fn (ctx &gg.Context) {
-		ctx.begin()
-	}
-)
-'
-	fr := extract_v_text_result(src, 'demo.v')
-	assert fr.parse_error != ''
-	for s in fr.symbols {
-		assert s.name != '', 'nameless symbol: ${s.id}'
-	}
-}
 
 fn test_extract_clean_file_has_no_parse_error() {
 	fr := extract_v_text_result('module demo\n\nfn ok() int {\n\treturn 1\n}\n', 'demo.v')
@@ -2541,6 +2299,7 @@ fn test_extract_clean_file_has_no_parse_error() {
 
 fn test_file_result_parse_error_round_trips_through_the_batch_protocol() {
 	fr := extract_v_text_result(partial_parse_src, 'demo.v')
+	assert fr.parse_error != ''
 	back := decode_file_result(encode_file_result(fr))
 	assert back.parse_error == fr.parse_error
 	assert back.symbols.len == fr.symbols.len
@@ -2868,21 +2627,15 @@ fn @select() {}
 	calls := g.edges.filter(it.kind == .calls && it.from == 'cmd.app.run')
 	assert calls.len == 3
 	assert calls.any(it.to == 'rand.int')
-	$if graphify_v3 ? {
-		// V3 names a selectively imported function by its module
-		assert calls.any(it.to == 'lib.util.shared')
-	} $else {
-		assert calls.any(it.to == 'app.shared')
-	}
+	// a selectively imported function is named by its module
+	assert calls.any(it.to == 'lib.util.shared')
 	assert calls.any(it.to == 'cmd.app.select')
 }
 
 fn test_struct_and_interface_embeds_become_embeds_edges() {
-	// V 0.5.2's parser lists an embedded struct in StructDecl.embeds, not in
-	// `fields`, and an embedded interface in InterfaceDecl.embeds; the
-	// extractor only looked for is_embed on fields, so no embeds edge was ever
-	// emitted. The decoy `Base` in another module checks that each edge
-	// resolves to the declaration in the embedding type's own module.
+	// An embedded struct or interface becomes an `embeds` edge. The decoy
+	// `Base` in another module checks that each edge resolves to the
+	// declaration in the embedding type's own module.
 	root := write_tree('embeds', {
 		'demo/demo.v':   'module demo
 
@@ -3236,11 +2989,7 @@ fn traced() {
 fn test_comptime_match_on_the_os_keeps_every_branch() {
 	// V3's parser kept only this host's branch of `$match @OS`, so the const
 	// below was declared on a different line on Mac and Windows, and the
-	// body's call to `on_windows` existed only on Windows. (V 0.5.2's
-	// extractor records nothing from a file-scope `$match`; FUTURE_WORK §6.)
-	$if !graphify_v3 ? {
-		return
-	}
+	// body's call to `on_windows` existed only on Windows.
 	src := r"module m
 
 $match @OS {
@@ -3281,9 +3030,6 @@ fn test_imports_resolve_to_the_module_they_mean_in_the_tree() {
 	// module the way V 0.5.2 did, below `vlib`, but in V3's lookup order and
 	// only inside the extracted tree: `rand` in vlib/crypto/x is vlib/rand,
 	// though vlib/crypto/rand is nearer (V 0.5.2 said `crypto.rand`).
-	$if !graphify_v3 ? {
-		return
-	}
 	root := write_tree('import_resolution', {
 		'vlib/rand/rand.v':                   'module rand\n\npub fn intn(n int) int {\n\treturn n\n}\n'
 		'vlib/crypto/rand/rand.v':            'module rand\n\npub fn read(n int) int {\n\treturn n\n}\n'
@@ -3351,9 +3097,6 @@ fn test_get_body_of_a_crlf_file_has_no_carriage_returns() {
 fn test_signatures_qualify_types_with_the_module_path_and_space_fn_types() {
 	// V 0.5.2 wrote a type's module as its full path wherever it appears, and
 	// a function type as `fn (...)`; V3 keeps the type as written.
-	$if !graphify_v3 ? {
-		return
-	}
 	src := 'module m
 
 import v.flat
@@ -3386,9 +3129,6 @@ fn test_function_end_line_is_the_last_line_of_its_header() {
 	// opens its body, so a multi-line header is covered; V3's extractor gave
 	// the start line. A generic header or a body-less declaration ends on its
 	// own line, where V 0.5.2's ran on.
-	$if !graphify_v3 ? {
-		return
-	}
 	src := 'module m
 
 fn long_header(a int,

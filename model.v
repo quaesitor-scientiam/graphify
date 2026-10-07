@@ -92,10 +92,10 @@ pub mut:
 	symbols []Symbol
 	edges   []Edge
 	// parse_error is the parser's first error for this file, as
-	// `line:col: message`, or '' when the file parsed cleanly. Extraction
-	// recovers past syntax errors (see extract_prefs), so a non-empty
-	// parse_error does not mean the file was cut short, but declarations
-	// around an error may be missing or incomplete.
+	// `line:col: message`, or '' when the file parsed cleanly. The parser
+	// recovers past most syntax errors, so a non-empty parse_error does not
+	// mean the file was cut short, but declarations around an error may be
+	// missing or incomplete.
 	parse_error string
 }
 

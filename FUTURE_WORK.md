@@ -75,7 +75,15 @@ Future visualization work could add user-selected filters, community-focused
 exports, or a generated index for navigating very large graphs. It should not
 silently render a partial graph: truncation must remain visible to the user.
 
-## 6. The extractor depends on V's removed V1 frontend
+## 6. Porting the extractor to V3 (done, October 2026)
+
+Done on 7 October 2026: the extractor (`backend_v.v`) reads V3's flat AST,
+graphify builds and tests with plain `v`, and the V 0.5.2 extractor and
+`-old-compiler` are gone. CI tests on Linux, macOS and Windows and checks
+that all three extract the same graph of one vlang commit
+(`extract-on-every-os`, `same-graph`). The rest of this section is the
+history: why the port was needed, the spike, and how V3's output was matched
+to the old extractor's, including where it deliberately differs.
 
 The extractor (`backend_v.v`, since split into
 `backend_v_notd_graphify_v3.v` and `backend_common.v`) imports `v.ast`,
@@ -307,11 +315,11 @@ On macOS 27, build V with `-cc cc` for this: a V compiler linked by the
 bundled TCC can start with garbage in its zero-initialized globals and panic
 or hang on any program (vlang/v#29744; TCC's Mach-O writer).
 
-### The V3 extractor (in progress, October 2026)
+### The V3 extractor (October 2026)
 
-`backend_v3_d_graphify_v3.v` reads V3's flat AST and is built in place of the
-V 0.5.2 extractor with plain V and `-d graphify_v3` (`v -cc cc -d graphify_v3
--o bin/graphify cmd/cli`); the default `-old-compiler` build is unchanged.
+Until the switch, the V3 extractor lived in `backend_v3_d_graphify_v3.v`,
+built in place of the V 0.5.2 one with plain V and `-d graphify_v3`, while
+the default build still used `-old-compiler`.
 The test suite passes against both, with the tests of V 0.5.2's own syntax
 errors and pseudo-imports returning early under `-d graphify_v3` and the
 tests of a file-level `$if` expecting every branch there.
@@ -407,13 +415,9 @@ by its type as written; V3 records no visibility, so `pub` is read from the
 source line and a field's from the nearest access label; an error diagnostic
 has an empty severity.
 
-Known gaps before it can become the default:
-
-- The release build, the hook and the update script still use
-  `-old-compiler`. CI covers V3 (October 2026): the `v3-extractor` job runs
-  the tests under `-d graphify_v3` on Linux, macOS and Windows and extracts
-  one pinned vlang commit on each, and `v3-same-graph` fails unless the three
-  graphs have the same symbols and edges.
+It became the default on 7 October 2026, once its tests passed on all three
+OSes in CI and the remaining differences from the V 0.5.2 extractor were
+either fixed or recorded above as that extractor's errors.
 
 Mac and Windows graphs of vlang `abcebfc16d` were compared in October 2026:
 same 136,165 symbols, 3 edges apart. Each difference depended on the host and
@@ -483,6 +487,10 @@ directly instead; the wiring is covered by review, the full test suite, and
 a real full-corpus run, not a targeted crash-injection test.
 
 ## 8. Extraction depends on the build host's OS and architecture
+
+Resolved in October 2026 by the V3 extractor, which keeps every branch of a
+platform conditional (see the end of this section); CI checks it. What
+follows describes the V 0.5.2 extractor, since removed.
 
 The same vlang commit can extract to different graphs on different hosts.
 Compared on vlang `1b4ecb9c05` (October 2026), an arm64 Mac against an x86_64
@@ -613,15 +621,17 @@ Workaround, from a worktree:
 
 ```
 mkdir -p /tmp/gfshim && ln -s "$PWD" /tmp/gfshim/graphify
-v -old-compiler -path "/tmp/gfshim|@vlib|@vmodules" -prod -gc none -o bin/graphify cmd/cli
+v -path "/tmp/gfshim|@vlib|@vmodules" -prod -gc none -o bin/graphify cmd/cli
 ```
 
 Related: `v test .` from the main checkout also descends into
 `.claude/worktrees/` and runs every worktree's copy of the tests, each against
 whatever commit that worktree has checked out. Since `77742d7` and `e48a80c`
 those copies no longer race on shared temp directories, but their results
-describe stale code. Test the main checkout with an explicit path
-(`v -old-compiler test graphify_test.v`) when that matters.
+describe stale code; the main checkout's own result is the line for
+`graphify_test.v` at the root. (With V 0.5.2, `v test graphify_test.v`
+tested just that file; V3 compiles a file given that way on its own, without
+the rest of the module, so it fails.)
 
 A durable fix could be a build script that detects a worktree and adds the
 module path itself, or at least a README note in the build section.

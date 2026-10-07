@@ -2,9 +2,9 @@ module graphify
 
 import os
 
-// Frontend-independent helpers shared by both extractors: the V 0.5.2 one in
-// backend_v_notd_graphify_v3.v (the default build) and the V3 one in
-// backend_v3_d_graphify_v3.v (`-d graphify_v3`).
+// Helpers of the extractor (backend_v.v) that don't need V's parser: ids,
+// doc comments, type references, the source rewrites done before parsing and
+// import resolution.
 
 // module_id builds a module id from `rel`, the graph-root-relative path of the
 // file, instead of from V's `file.mod.name`. V qualifies that name by the

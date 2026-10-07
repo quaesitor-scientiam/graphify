@@ -455,19 +455,23 @@ path, 616s -> 32s on the full vlang repo). Do NOT add `-gc none` to
 memory. The binary name gets an `.exe` suffix on Windows only; the rest of
 this doc omits it.
 
-All three need `-old-compiler`, and so does `v -old-compiler test .`: they
-import graphify's extractor, which uses V's V1 frontend (`v.ast`). Current V
-provides that frontend only through its V 0.5.2 compatibility compiler, and
-only when asked for explicitly. See
-[FUTURE_WORK.md §6](FUTURE_WORK.md#6-the-extractor-depends-on-vs-removed-v1-frontend)
-for setup (`make v1`) and the port plan.
+Build with current V (the V3 compiler); run the tests with `v test .`.
+Extracting the V compiler repo peaks at about 3.8 GB with `-gc none`. On
+macOS 27, V itself has to be built with `-cc cc` until vlang/v#29744 is
+fixed (a V binary linked by its bundled TCC can start with garbage in its
+globals); graphify's own builds need nothing extra.
 
 ```
-v -old-compiler -prod -gc none -o bin/graphify         cmd/cli     # extract, query, etc.
-v -old-compiler -prod -gc none -o bin/graphify-hook    build cmd/hooks/graphify_hook.vsh   # Claude Code hook, see below
-v -old-compiler -prod            -o bin/graphify-mcp   cmd/mcp
+v -prod -gc none -o bin/graphify         cmd/cli     # extract, query, etc.
+v -prod -gc none -o bin/graphify-hook    build cmd/hooks/graphify_hook.vsh   # Claude Code hook, see below
+v -prod          -o bin/graphify-mcp     cmd/mcp
 bin/graphify extract .                 # produce graphify-out/graph.json first
 ```
+
+Build from the main checkout: in a Claude Code worktree under
+`.claude/worktrees/`, `import graphify` resolves to the main checkout's
+sources, and from the main checkout `v test .` also runs every worktree's
+copy of the tests ([FUTURE_WORK.md §9](FUTURE_WORK.md#9-building-inside-a-git-worktree-compiles-the-main-checkout)).
 
 The hook needs the `build` subcommand because its source is a `.vsh` script.
 Without it, V treats the file as a script to compile *and run*. Each build
@@ -714,7 +718,10 @@ OS) and `.mcp.json.example` (as `.mcp.json`, no edits needed) into it.
 ## Sharing a graph across machines / OSes
 
 `graph.json` stores paths with forward slashes, so a graph extracted on one OS
-resolves on another (Windows / WSL-Linux / macOS). All structural queries
+resolves on another (Windows / WSL-Linux / macOS). The graph itself doesn't
+depend on the OS that extracts it: every branch of a platform `$if` is kept,
+and CI checks that Linux, macOS and Windows extract identical graphs of the
+same V commit. All structural queries
 (`query_graph`, `get_node`, `shortest_path`, `overview`, `skeleton`) need *only*
 the graph file — no source. `get_body` reads the actual source, so on a different
 machine point it at the local checkout:
@@ -770,6 +777,7 @@ Known gaps and evidence-gated future work are recorded in
 - [x] **A syntax error costs only its own declaration (2026-10-06).** After some errors the V 0.5.2 parser loses track of scopes and braces and drops much of the rest of the file even in recovery mode; one file in the V compiler lost 320 of its 501 functions to a single shadowed loop variable. A file whose parse reports an error is now re-parsed one top-level declaration at a time, keeping its line numbers: 394 more symbols on the V compiler's own tree. Details in [FUTURE_WORK.md §6](FUTURE_WORK.md#6-the-extractor-depends-on-vs-removed-v1-frontend).
 - [x] **Declarations inside file-level `$if` blocks (2026-10-06).** The extractor only looked at a file's direct top-level statements, so anything declared inside a file-scope `$if` (platform-specific structs, constants, functions) was missing from the graph on every machine. It now includes the branch the parser keeps for the host: 180 more symbols on the V compiler's own tree. Details in [FUTURE_WORK.md §8](FUTURE_WORK.md#8-extraction-depends-on-the-build-hosts-os-and-architecture).
 - [x] **Recovering past syntax errors, and flagging the files that have them (2026-10-06).** V 0.5.2's parser, which graphify's V1 extractor uses, does not know syntax V has added since, such as the array-literal spread `[a, ...(b)]`. Run in its default output mode it aborts at the first such error, so every declaration after it was silently missing from the graph: about 3,500 functions on the V compiler's own tree, while the extract reported only 3 unparseable files. Extraction now runs the parser in `.silent` mode, which records the error and keeps going (the missing functions relative to V3 dropped from 3,548 to 561), drops the nameless function declarations recovery can produce, and lists every file that parsed with an error in `manifest.json`'s `partial` list and in `graphify extract`'s output. Details in [FUTURE_WORK.md §6](FUTURE_WORK.md#6-the-extractor-depends-on-vs-removed-v1-frontend).
+- [x] **The extractor runs on V3 (2026-10-07).** The extractor used V's V1 frontend (`v.ast`), which upstream V removed; graphify built only through the V 0.5.2 compatibility compiler (`-old-compiler`), which couldn't parse newer syntax (220 files of the V compiler repo flagged) and saw only the host's `$if` branches. It now reads V3's flat AST (`backend_v.v`) and builds with plain `v`; the V 0.5.2 extractor is gone. On the V compiler repo: 214,790 resolved calls to 209,991, 5 files flagged to 220, extraction 2.6 s to 2.9 s, and the same graph on every OS. Ids, signatures and lines keep the old conventions, so existing graphs and queries carry over; a re-extract re-parses every file once, since the cache is tied to the binary. What changed is in [FUTURE_WORK.md §6](FUTURE_WORK.md#6-porting-the-extractor-to-v3-done-october-2026): imports are resolved to the module they mean, imports the parser implies are recorded as `import m (implied)`, and 232 ids went away (187 imports renamed by resolution, the rest V 0.5.2 artifacts such as `vlib.builtin.int literal.str`) while 2,250 came in, mostly other platforms' code.
 - [x] Phase 5, **GraphML/Cypher export** — both formats emit one node per unique id (via `Index.by_id`, not the raw `Symbol` list) and only resolved edges, for the reasons the Usage section explains. A real bug was caught in the process, not just anticipated: a naive one-node-per-raw-`Symbol` version violated the Cypher export's own uniqueness constraint against this project's own files (they all declare `module graphify`), confirmed by actually running the export, not by inspection.
 - [x] Phase 5, **SVG export and `graph.html`** — both share one layout: communities (see above) arranged around an outer circle, each community's own members around a smaller circle centered on its spot, sized by degree and colored by community. Deterministic trigonometry, not a force-directed simulation — see Usage for why. `graph.html` adds a legend, hover-to-highlight-neighbors, and scroll-to-zoom/drag-to-pan — plain DOM/SVG, no framework. Capped at 300 symbols (proportional per-community, highest-degree first) with the cap always disclosed, never silent.
   Shipped once already believing it was verified, then genuinely wasn't: the first pass checked hover by dispatching a synthetic `mouseenter` in JS, which passed because it targets the element directly — it can't catch "the real click target is too small to hit," which is exactly what user feedback then reported. Re-verified with a real WebDriver session (`vebidor`, driving actual Edge) instead: a synthesized *pointer move*, not a dispatched event, landed dead-center on a node and measured its rendered size at ~4×4 CSS pixels. Fixed by decoupling the hover hit-target from the node's degree-sized visible dot (now independently sized, ~3× larger) and adding real zoom/pan, then re-confirmed the same honest way — synthesized pointer move on the new target, a dispatched wheel event, and a real drag — plus visual screenshots at each step.
