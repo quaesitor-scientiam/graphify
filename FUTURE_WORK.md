@@ -360,8 +360,10 @@ Known gaps before it can become the default:
   `json2`).
 - A few line numbers differ: a script's `main` starts at its first statement
   (V 0.5.2 said line 1), and a `const` ends a line earlier.
-- Not yet checked on Windows or Linux, not in CI, and the release build and
-  the hook still use `-old-compiler`.
+- The test suite passes under `-d graphify_v3` on macOS and Windows (October
+  2026); not yet checked on Linux, not in CI, and the release build and the
+  hook still use `-old-compiler`. Mac and Windows graphs of the same vlang
+  commit have not yet been compared.
 
 The spike's probe programs were not kept; the method above is enough to repeat
 it.
