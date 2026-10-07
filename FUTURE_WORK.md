@@ -358,6 +358,21 @@ for `crypto.rand` and `import json2` for `x.json2`. On vlang: 23 fewer
 unresolved calls and 7 fewer unresolved type references; extraction 0.4 s
 slower (2.8 s). The Mac and Windows graphs were still identical after it.
 
+Signatures are written as V 0.5.2 wrote them (October 2026): each module
+qualifier in a type, wherever it sits, becomes the module's resolved path
+(`[]flat.NodeId` -> `[]v.flat.NodeId`), a type from a selective import is
+qualified the same way, and a function type is `fn (...)`. On vlang the
+signatures that differ fell from 10,312 to 1,036, and those are almost all
+V 0.5.2's errors, which V3 doesn't copy: 362 function-type aliases it wrote
+as `type X = X`, 225 variadics without their `...`, 41 generics in the old
+`<T>` spelling, signatures missing their return type or parameters, `mut x
+&T` written as `&&T`, and module qualifiers it left as written (`color.RGBA64`
+for `image.color.RGBA64`) or named by its own import resolution. Fixed-array
+sizes differ in 27, because each parser substitutes some constants
+(`[node_payload_max_chunks]` is `[4096]` in V3) and neither matches the
+source exactly; and 7 module symbols show the declared module name where
+V 0.5.2 showed the directory's.
+
 Mapping notes, for whoever moves this forward: methods are `fn_decl`s whose
 value is `Recv.name` with the receiver as the first `param`; a static method
 is `T@static@f` (graphify's `T__static__f`); a body-less V declaration in a
@@ -369,9 +384,6 @@ has an empty severity.
 
 Known gaps before it can become the default:
 
-- Signatures show types as written (`fn(string) string`,
-  `protobuf.ProtoScalar`) rather than V 0.5.2's resolved form (`fn (string)
-  string`, `encoding.protobuf.ProtoScalar`): 10,427 signatures differ.
 - V 0.5.2's parser adds pseudo-imports the source doesn't write
   (`builtin.closure` for a closure, `sync.threads` for `spawn`, `sync`,
   `v.preludes.embed_file`): 1,840 on vlang, which V3 doesn't record.
