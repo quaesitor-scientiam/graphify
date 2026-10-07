@@ -717,20 +717,62 @@ fn resolve_edges(mut g Graph) {
 			site_of.delete(id)
 		}
 	}
+	mut sig_of := map[string]string{}
+	mut fn_names := map[string]string{}
+	mut field_type := map[string]string{}
+	mut alias_of := map[string]string{}
+	for s in g.symbols {
+		match s.kind {
+			.function, .method {
+				sig_of[s.id] = s.signature
+				fn_names[s.id] = s.name
+			}
+			.field {
+				field_type['${s.parent}\x00${s.name}'] = s.signature.all_after(' ')
+			}
+			.type_alias {
+				rhs := s.signature.all_after(' = ')
+				if !rhs.contains(' | ') {
+					alias_of[s.id] = rhs
+				}
+			}
+			else {}
+		}
+	}
+	mut inf := Infer{
+		by_name:      by_name
+		by_type_name: by_type_name
+		site_of:      site_of
+		imports_of:   imports_of
+		scope_of:     scope_of
+		sig_of:       sig_of
+		name_of:      fn_names
+		field_type:   field_type
+		alias_of:     alias_of
+	}
 	mut resolved := []Edge{cap: g.edges.len}
+	// record_call keeps one edge per callee and receiver, so two raw edges
+	// can resolve to the same declaration; keep one, `extracted` if either is
+	mut seen_call := map[string]int{}
 	for e in g.edges {
 		if e.kind == .calls {
 			// Refuse an id that cannot address one function (see above): an
 			// edge to it would send every consumer to whichever declaration
 			// happened to be indexed first. The raw name is honestly
 			// ambiguous rather than falsely precise.
-			found := if e.to.contains('.') {
-				resolve_qualified_callee(e, by_name, site_of, scope_of)
-			} else {
-				resolve_callee(e, by_name, site_of, imports_of)
-			}
-			if res := found {
+			if res := inf.infer_call(e) {
 				if !unaddressable[res.id] {
+					key := '${e.from}\x00${res.id}'
+					if at := seen_call[key] {
+						if !res.inferred && resolved[at].provenance == .inferred {
+							resolved[at] = Edge{
+								...resolved[at]
+								provenance: .extracted
+							}
+						}
+						continue
+					}
+					seen_call[key] = resolved.len
 					resolved << Edge{
 						from:       e.from
 						to:         res.id
@@ -758,6 +800,13 @@ fn resolve_edges(mut g Graph) {
 				}
 			}
 		}
+		if e.kind == .calls {
+			key := '${e.from}\x00${e.to}'
+			if key in seen_call {
+				continue
+			}
+			seen_call[key] = resolved.len
+		}
 		resolved << e
 	}
 	g.edges = resolved
@@ -775,10 +824,10 @@ fn resolve_edges(mut g Graph) {
 // declaration sends a reader somewhere false, which is worse than leaving the
 // raw name for them to search on.
 //
-// Note what this deliberately does not attempt: picking between same-named
-// methods on different receivers (`str` has ~300 declarations in the V repo).
-// That needs the receiver's resolved type, which only the checker computes —
-// see the call-edge disambiguation note in README's Status section.
+// Picking between same-named methods on different receivers (`str` has ~300
+// declarations in the V repo) needs the receiver's type. Where the code
+// writes it, recv_type carries it here; where it has to be worked out,
+// Infer.infer_call (infer.v) does that before falling back to this.
 //
 // The returned `inferred` flag records which kind of step won: a globally
 // unique name or a parser-typed receiver leaves no real candidate to choose

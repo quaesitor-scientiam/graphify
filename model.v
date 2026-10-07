@@ -32,7 +32,8 @@ pub enum EdgeKind {
 // edge is `extracted` when the callee name was globally unique or its
 // receiver's type came straight from the parser (see resolve_callee's
 // self-receiver shortcut); it is `inferred` when several real declarations
-// shared the name and one was picked by a locality/visibility heuristic.
+// shared the name and one was picked by a locality/visibility heuristic, or
+// by the receiver's type as worked out through the graph (see infer.v).
 pub enum EdgeProvenance {
 	extracted
 	inferred
@@ -74,6 +75,13 @@ pub:
 	// Empty whenever the receiver would need the checker to type. Like
 	// is_method, it is extraction-only and not persisted.
 	recv_type string
+	// recv_recipe says how to work out the receiver's type when recv_type
+	// can't: a chain of steps from something the file states, to be followed
+	// through the whole graph's signatures and field types by resolve_edges
+	// (see infer.v), e.g. "the return type of os.read_file, then its method
+	// trim_space's return type". Empty when the receiver's origin is unknown.
+	// Like is_method, it is extraction-only and not persisted.
+	recv_recipe string
 	// file is the path of the file that emitted this edge — populated for
 	// `calls`/`embeds`/`references` edges, whose `from` is the id of a
 	// declaration that may need disambiguating (see disambiguate_ids in

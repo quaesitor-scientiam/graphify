@@ -3296,3 +3296,169 @@ fn real() int {
 	assert g.get_body('wrapped') == '// demo.v:9-10\nfn wrapped(a int,\n\tb int) int'
 	assert g.get_body('real').ends_with('\treturn 1\n}')
 }
+
+fn test_receiver_types_are_inferred_through_the_graph() {
+	// `contains`, `size` and `label` are each declared on two types, so the
+	// name alone can't pick one; the receiver's type, followed through
+	// return types, field types, elements, map values, a multi-value return,
+	// an option and `it`, does
+	files := {
+		'vlib/builtin/string.v': 'module builtin
+
+pub fn (s string) contains(x string) bool {
+	return true
+}
+'
+		'text/text.v':           'module text
+
+pub struct Doc {
+pub:
+	title string
+	parts []Part
+	index map[string]Part
+}
+
+pub struct Part {
+pub:
+	name string
+}
+
+pub fn load(path string) !Doc {
+	return Doc{}
+}
+
+pub fn (d Doc) first() ?Part {
+	return none
+}
+
+pub fn (p Part) size() int {
+	return 0
+}
+
+pub fn (p Part) label() string {
+	return p.name
+}
+'
+		'other/other.v':         'module other
+
+pub struct Part {}
+
+pub fn (p Part) size() int {
+	return 1
+}
+
+pub fn (p Part) label() string {
+	return ""
+}
+
+pub fn (p Part) contains(x string) bool {
+	return false
+}
+'
+		'app/main.v':            'module main
+
+import text
+import other
+
+fn pair() (int, string) {
+	return 1, "a"
+}
+
+fn run() {
+	d := text.load("x") or { return }
+	d.title.contains("a")
+	for p in d.parts {
+		p.size()
+	}
+	first := d.first() or { return }
+	first.label()
+	_, s := pair()
+	s.contains("b")
+	d.index["k"].size()
+	d.parts.filter(it.size() > 0)
+	o := other.Part{}
+	o.label()
+}
+'
+	}
+	mut g := Graph{}
+	for rel, src in files {
+		syms, edges := extract_v_text(src, rel)
+		g.symbols << syms
+		g.edges << edges
+	}
+	resolve_edges(mut g)
+	calls := g.edges.filter(it.kind == .calls && it.from == 'app.run').map(it.to)
+	assert 'vlib.builtin.string.contains' in calls
+	assert 'other.Part.contains' !in calls
+	assert 'text.Part.size' in calls
+	assert 'other.Part.size' !in calls
+	// `first.label()` is text's, `o.label()` other's: one edge each
+	assert 'text.Part.label' in calls
+	assert 'other.Part.label' in calls
+	mut seen := map[string]bool{}
+	for c in calls {
+		assert c !in seen
+		seen[c] = true
+	}
+}
+
+fn test_inferred_receiver_respects_shadowing() {
+	// the inner `d` is a string, whatever the outer one was
+	files := {
+		'vlib/builtin/string.v': 'module builtin
+
+pub fn (s string) contains(x string) bool {
+	return true
+}
+'
+		'lib/lib.v':             'module lib
+
+pub struct Box {}
+
+pub fn (b Box) contains(x string) bool {
+	return false
+}
+
+pub fn make() Box {
+	return Box{}
+}
+'
+		'app/main.v':            'module main
+
+import lib
+
+fn run() {
+	d := lib.make()
+	if true {
+		d := "text"
+		d.contains("a")
+	}
+}
+'
+	}
+	mut g := Graph{}
+	for rel, src in files {
+		syms, edges := extract_v_text(src, rel)
+		g.symbols << syms
+		g.edges << edges
+	}
+	resolve_edges(mut g)
+	calls := g.edges.filter(it.kind == .calls && it.from == 'app.run').map(it.to)
+	assert 'vlib.builtin.string.contains' in calls
+	assert 'lib.Box.contains' !in calls
+}
+
+fn test_type_text_helpers() {
+	assert return_type('pub fn (b &Builder) str() string', 'str') == 'string'
+	assert return_type('fn read_file(path string) !string', 'read_file') == '!string'
+	assert return_type('fn run()', 'run') == ''
+	assert return_type('fn map_of[T](xs []T) map[string]T', 'map_of') == 'map[string]T'
+	assert bare_type('?&mut Foo') == 'Foo'
+	assert bare_type('...string') == '[]string'
+	k, v := map_parts('map[string][]int') or { '', '' }
+	assert k == 'string' && v == '[]int'
+	assert elem_type('[4]u8') or { '' } == 'u8'
+	assert elem_type('string') or { '' } == 'u8'
+	assert tuple_part('(int, map[string]int)', 1) or { '' } == 'map[string]int'
+}

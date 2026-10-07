@@ -9,13 +9,37 @@ in `README.md`.
 
 The extractor uses V's parser and a per-file AST table. It resolves calls by
 callee name, method/function shape, file/module locality, and import
-visibility, but it does not run V's whole-program checker. Calls whose
-receiver type comes from a function result, interface, generic, alias,
-function variable, closure, or chained expression can remain unattributed.
+visibility, but it does not run V's whole-program checker.
+
+**Receiver type inference (October 2026).** A method call whose receiver's
+type the code doesn't write now records a recipe for it at extraction
+(`recipe` in backend_v.v): where the receiver comes from, such as a call's
+result, a field, an element or a loop variable. `resolve_edges` follows the
+recipe through the return and field types the whole graph records (infer.v)
+and picks the method on the type it reaches. Extraction stays per file, so
+caching, crash isolation and partially broken projects are unaffected. On the
+V compiler's tree (b69f626f14) it cut unresolved calls from 28,642 to 7,733
+(11.5% to 3.1% of calls), and it replaced 1,974 earlier locality guesses,
+which a sample showed were mostly wrong (`name.contains('.')` on a string had
+resolved to `v.types.Scope.contains`).
+
+What remains, by receiver:
+
+- `err.msg()`, `err.code()` and other interface methods (about 2,300): an
+  interface's methods are not symbols in the graph, so there is nothing to
+  resolve to. Extracting them would let these resolve to the interface's
+  declaration.
+- calls of function values and closures (about 1,350), and `thread.wait()`
+  (about 400): no declaration exists; these could be counted apart from the
+  unresolved ones.
+- the rest (about 3,700): a module's const or global (the graph records no
+  type for one), a field reached through an embedded struct, generics, and
+  receivers whose type V itself infers.
 
 The raw edge is retained and `explain` reports ambiguous callers rather than
 inventing links. A future opt-in deep mode could run the checker over a whole
-project, but it would need to address these constraints first:
+project, but given the small remainder, it would need to address these
+constraints first:
 
 - checker state would make extraction results depend on the whole project;
 - per-file cache entries could become stale when another file changes;

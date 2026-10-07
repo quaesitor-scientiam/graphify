@@ -97,7 +97,7 @@ pub fn (g Graph) report() string {
 	}
 	b << ''
 	b << '## Edges by provenance'
-	b << '`extracted` = unique name or (calls only) a parser-typed receiver; `inferred` = picked among several real candidates by locality/visibility; `built-in` = a primitive type such as `int`, which has no declaration to resolve to; `external` = a call to a `C.` or `JS.` function; `unresolved` = name stayed ambiguous or unknown.'
+	b << '`extracted` = unique name or (calls only) a parser-typed receiver; `inferred` = picked among several real candidates by the inferred receiver type or by locality/visibility; `built-in` = a primitive type such as `int`, which has no declaration to resolve to; `external` = a call to a `C.` or `JS.` function; `unresolved` = name stayed ambiguous or unknown.'
 	b << '- calls: ${calls_prov.str()}'
 	b << '- references: ${refs_prov.str()}'
 	b << '- embeds: ${embeds_prov.str()}'
