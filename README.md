@@ -354,7 +354,12 @@ module id by its trailing segments (`import v.ast` reaches `vlib.v.ast`; where
 that fits several modules, nothing is resolved). On vlang `1b4ecb9c05`:
 resolved calls 130,513 → 163,984 and resolved type references 41,296 →
 65,702, every remaining multi-declaration id a platform variant inside an
-ordinary module.
+ordinary module. Two older bugs then surfaced: the worker protocol never
+carried `Edge.file`, and the call walker dropped it after any typed local
+(`x := Foo{}`), so a renamed declaration's calls came out from `id@`, an id
+that does not exist. With both fixed, the 3,095 renamed functions keep their
+calls (2,841 have outgoing edges; the rest call nothing) and no edge starts at
+a missing id (11,409 before).
 
 **Fields and consts beside a same-named method or function.** V lets a method
 share its name with a field of its receiver type (`Server.username` in

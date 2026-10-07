@@ -96,7 +96,9 @@ pub fn decode_file_result(line string) FileResult {
 				// by a previous build decodes instead of panicking on f[3]
 				is_method: f.len > 3 && f[3] == '1'
 				recv_type: if f.len > 4 { f[4] } else { '' }
-				file:      if f.len > 5 { f[5] } else { '' }
+				// disambiguate_ids renames an edge's `from` by this file; without
+				// it every call from a renamed declaration pointed at `id@`
+				file: if f.len > 5 { f[5] } else { '' }
 			}
 		}
 	}

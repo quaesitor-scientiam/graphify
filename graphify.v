@@ -595,9 +595,24 @@ fn resolve_edges(mut g Graph) {
 	mut id_main := map[string]bool{}
 	mut id_files := map[string][]string{}
 	mut imports_of := map[string][]string{} // file -> modules it imports
+	mut scope_of := map[string]FileScope{} // file -> what a callee prefix can name
 	for s in g.symbols {
 		if s.kind == .import_ {
 			imports_of[s.file] << s.name
+			mut sc := scope_of[s.file] or { FileScope{} }
+			sc.prefixes[s.name] = s.name
+			// the alias is only on the signature: `import x.json2 as json`
+			if s.signature.contains(' as ') {
+				sc.prefixes[s.signature.all_after_last(' as ')] = s.name
+			}
+			scope_of[s.file] = sc
+		}
+		if s.kind == .mod_ {
+			mut sc := scope_of[s.file] or { FileScope{} }
+			sc.mod = s.id
+			sc.declared = s.signature.all_after('module ')
+			sc.is_main = in_main_unit(s, mains)
+			scope_of[s.file] = sc
 		}
 		if s.kind == .function || s.kind == .method {
 			by_name[s.name] << CallCand{
@@ -687,7 +702,12 @@ fn resolve_edges(mut g Graph) {
 			// edge to it would send every consumer to whichever declaration
 			// happened to be indexed first. The raw name is honestly
 			// ambiguous rather than falsely precise.
-			if res := resolve_callee(e, by_name, site_of, imports_of) {
+			found := if e.to.contains('.') {
+				resolve_qualified_callee(e, by_name, site_of, scope_of)
+			} else {
+				resolve_callee(e, by_name, site_of, imports_of)
+			}
+			if res := found {
 				if !unaddressable[res.id] {
 					resolved << Edge{
 						from:       e.from
@@ -830,6 +850,64 @@ fn resolve_callee(e Edge, by_name map[string][]CallCand, site_of map[string]Decl
 		return CallResolution{ id: id, inferred: true }
 	}
 	return none
+}
+
+// FileScope is what a module prefix on a callee can name from one file: the
+// file's own module and the modules it imports.
+struct FileScope {
+mut:
+	mod      string            // module id
+	declared string            // the name on the file's `module` line
+	is_main  bool              // in a standalone program, see main_unit_files
+	prefixes map[string]string // import path or alias -> import path
+}
+
+// resolve_qualified_callee resolves a raw callee that the parser reported with
+// a module prefix, `os.join_path` for `os.join_path(...)`. resolve_callee
+// looks names up bare, so these were never resolved, though the prefix pins
+// the module down better than any locality signal can.
+//
+// The parser has already replaced an import alias with the imported path
+// (`json.decode()` after `import x.json2 as json` comes out as
+// `x.json2.decode`), but the alias is mapped as well rather than relied on
+// never to appear. A prefix counts only when it is one of the file's own
+// imports, matched to module ids by trailing segments (import_reaches), or the
+// file's own declared module. The parser also prefixes some unqualified calls
+// with the *current* module -- a keyword-named function (`select(...)` in
+// vlib/net is `net.select`), and a selectively imported one (`shared()` after
+// `import util { shared }` is `app.shared`) -- so that prefix is taken to mean
+// exactly the caller's module id: matching it by trailing segments would pin
+// `app.shared` on some unrelated module that happens to end in `app`, while
+// the real `util.shared` is beyond what the name records. Only plain
+// functions qualify: a prefixed callee is never a method call, and a static
+// method (`Type.new()`) is a function whose name carries `__static__`.
+//
+// More than one fitting id resolves nothing (only_id), as everywhere else in
+// this pass. A single fit is `extracted`, since the source itself named the
+// module and there was nothing left to choose between.
+fn resolve_qualified_callee(e Edge, by_name map[string][]CallCand, site_of map[string]DeclSite, scope_of map[string]FileScope) ?CallResolution {
+	prefix := e.to.all_before_last('.')
+	cands := by_name[e.to.all_after_last('.')] or { return none }
+	file := if e.file != '' { e.file } else { (site_of[e.from] or { return none }).file }
+	scope := scope_of[file] or { return none }
+	imported := scope.prefixes[prefix] or { '' }
+	mut fits := []CallCand{}
+	for c in cands {
+		if c.is_method {
+			continue
+		}
+		// `main` is shared by every standalone program, so the own-module
+		// match there is held to the caller's own file
+		own := prefix == scope.declared && c.mod == scope.mod && (!scope.is_main || c.file == file)
+		if own || (imported != '' && import_reaches(c.mod, imported)) {
+			fits << c
+		}
+	}
+	id := only_id(fits)?
+	return CallResolution{
+		id:       id
+		inferred: false
+	}
 }
 
 // resolve_type_ref picks the one declaration a raw type name (on an `embeds`
