@@ -385,6 +385,19 @@ repeated in several `$if` branches is listed at the first, since V3 keeps
 them all; and a struct field's end line covers a default value spanning
 several lines.
 
+Imports V's parser implies (October 2026) are recorded by both extractors as
+import symbols signed `import m (implied)`: `builtin.closure` for an
+anonymous function, `sync.threads` for `spawn` or a `thread` type, `sync` for
+channels, `<-`, `shared`, `lock` and `select`, `math` for `**`, and the
+`embed_file` and `debug` preludes. V 0.5.2's come from its parser's
+`auto_imports`; V3's from the same syntax in the flat AST
+(`extract_implied_imports`). On vlang V3 finds 1,235 to V 0.5.2's 1,829: it
+doesn't count an `it` expression such as `a.map(it * 2)` as a closure (602),
+which compiles inline, nor a variable named `shared` (5), and it adds 13 in
+code V 0.5.2 didn't see. The resolver ignores implied imports for
+visibility, since a file can't name anything through one; counting them had
+left 160 calls such as `ch.close()` unresolved in V 0.5.2's graph.
+
 Mapping notes, for whoever moves this forward: methods are `fn_decl`s whose
 value is `Recv.name` with the receiver as the first `param`; a static method
 is `T@static@f` (graphify's `T__static__f`); a body-less V declaration in a
@@ -396,9 +409,6 @@ has an empty severity.
 
 Known gaps before it can become the default:
 
-- V 0.5.2's parser adds pseudo-imports the source doesn't write
-  (`builtin.closure` for a closure, `sync.threads` for `spawn`, `sync`,
-  `v.preludes.embed_file`): 1,840 on vlang, which V3 doesn't record.
 - The release build, the hook and the update script still use
   `-old-compiler`. CI covers V3 (October 2026): the `v3-extractor` job runs
   the tests under `-d graphify_v3` on Linux, macOS and Windows and extracts
