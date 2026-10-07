@@ -97,10 +97,10 @@ pub fn (g Graph) report() string {
 	}
 	b << ''
 	b << '## Edges by provenance'
-	b << '`extracted` = unique name or (calls only) a parser-typed receiver; `inferred` = picked among several real candidates by locality/visibility; `unresolved` = name stayed ambiguous or unknown.'
-	b << '- calls: extracted ${calls_prov.extracted}, inferred ${calls_prov.inferred}, unresolved ${calls_prov.unresolved}'
-	b << '- references: extracted ${refs_prov.extracted}, inferred ${refs_prov.inferred}, unresolved ${refs_prov.unresolved}'
-	b << '- embeds: extracted ${embeds_prov.extracted}, inferred ${embeds_prov.inferred}, unresolved ${embeds_prov.unresolved}'
+	b << '`extracted` = unique name or (calls only) a parser-typed receiver; `inferred` = picked among several real candidates by locality/visibility; `built-in` = a primitive type such as `int`, which has no declaration to resolve to; `unresolved` = name stayed ambiguous or unknown.'
+	b << '- calls: ${calls_prov.str()}'
+	b << '- references: ${refs_prov.str()}'
+	b << '- embeds: ${embeds_prov.str()}'
 	b << ''
 	b << '## Most connected symbols'
 	for entry in top_by_degree(idx, 10) {
@@ -173,8 +173,22 @@ struct ProvCounts {
 mut:
 	extracted  int
 	inferred   int
+	builtin    int // a primitive type name, see builtin_type_names
 	unresolved int
 }
+
+fn (c ProvCounts) str() string {
+	builtin := if c.builtin > 0 { ', built-in ${c.builtin}' } else { '' }
+	return 'extracted ${c.extracted}, inferred ${c.inferred}${builtin}, unresolved ${c.unresolved}'
+}
+
+// builtin_type_names are V's primitive types. Unlike `string`, `array` and
+// `map`, which vlib/builtin declares as structs, they have no declaration,
+// so a reference to one can never resolve; on the V compiler's own tree they
+// were 35,072 of 36,625 unresolved references, hiding the ones worth a look.
+const builtin_type_names = ['bool', 'i8', 'i16', 'int', 'i32', 'i64', 'u8', 'byte', 'u16', 'u32',
+	'u64', 'usize', 'isize', 'f32', 'f64', 'rune', 'char', 'voidptr', 'byteptr', 'charptr',
+	'void', 'any', 'none', 'nil', 'thread', 'chan', 'int_literal', 'float_literal']
 
 // count_provenance buckets every edge of `kind` by how (and whether) its `to`
 // was resolved. provenance only means something once `to` is a real symbol
@@ -188,7 +202,11 @@ fn count_provenance(idx Index, edges []Edge, kind EdgeKind) ProvCounts {
 			continue
 		}
 		if e.to !in idx.by_id {
-			c.unresolved++
+			if e.kind != .calls && e.to in builtin_type_names {
+				c.builtin++
+			} else {
+				c.unresolved++
+			}
 		} else if e.provenance == .inferred {
 			c.inferred++
 		} else {

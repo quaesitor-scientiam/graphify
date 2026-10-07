@@ -2974,3 +2974,29 @@ fn test_explain_caps_each_relation_list() {
 	assert line.ends_with('… (+25 more)')
 	assert capped(['a', 'b', 'a']) == 'a, b'
 }
+
+fn test_report_counts_builtin_type_references_apart_from_unresolved() {
+	mut g := Graph{}
+	g.symbols << Symbol{
+		id:   'demo.f'
+		name: 'f'
+		kind: .function
+		file: 'demo.v'
+	}
+	for to in ['int', 'bool', 'Mystery'] {
+		g.edges << Edge{
+			from: 'demo.f'
+			to:   to
+			kind: .references
+		}
+	}
+	// a call to an unknown `int` is not a type reference
+	g.edges << Edge{
+		from: 'demo.f'
+		to:   'int'
+		kind: .calls
+	}
+	r := g.report()
+	assert r.contains('- references: extracted 0, inferred 0, built-in 2, unresolved 1')
+	assert r.contains('- calls: extracted 0, inferred 0, unresolved 1')
+}
