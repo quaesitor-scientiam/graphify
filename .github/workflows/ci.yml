@@ -72,3 +72,79 @@ jobs:
           }
           grep_on /tmp/graphify-hook-proj/main.v | grep -q additionalContext
           test "$(grep_on /tmp/graphify-hook-proj/README.md)" = '{}'
+
+  # The V3 extractor (`-d graphify_v3`, built by current V without
+  # -old-compiler; FUTURE_WORK.md section 6). Besides its tests, this checks
+  # that it extracts the same graph on every OS (section 8): each runner
+  # extracts the same vlang commit, the one V itself is built from, and
+  # v3-same-graph compares the results.
+  v3-pin-vlang:
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.sha.outputs.sha }}
+    steps:
+      - id: sha
+        run: echo "sha=$(git ls-remote https://github.com/vlang/v HEAD | cut -f1)" >> "$GITHUB_OUTPUT"
+
+  v3-extractor:
+    needs: v3-pin-vlang
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Outside the workspace, as in build-and-smoke-test, and at the pinned
+      # commit, so every runner extracts the same tree.
+      - name: Fetch V at the pinned commit
+        shell: bash
+        run: |
+          git init -q "$RUNNER_TEMP/v"
+          cd "$RUNNER_TEMP/v"
+          git fetch -q --depth 1 https://github.com/vlang/v ${{ needs.v3-pin-vlang.outputs.sha }}
+          git checkout -q FETCH_HEAD
+
+      - name: Build V
+        if: runner.os != 'Windows'
+        working-directory: ${{ runner.temp }}/v
+        run: make && sudo ./v symlink
+
+      - name: Build V (Windows)
+        if: runner.os == 'Windows'
+        working-directory: ${{ runner.temp }}/v
+        run: ./makev.bat && ./v symlink
+
+      - name: Run tests
+        run: v -d graphify_v3 test .
+
+      - name: Build CLI
+        run: v -d graphify_v3 -o bin/graphify-v3 cmd/cli
+
+      # From a clean checkout of the same commit: building V leaves generated
+      # files beside its sources, and they may differ between platforms.
+      - name: Extract the pinned vlang tree
+        shell: bash
+        run: |
+          git -C "$RUNNER_TEMP/v" worktree add -q "$RUNNER_TEMP/vlang" HEAD
+          ./bin/graphify-v3 extract "$RUNNER_TEMP/vlang" --out "$RUNNER_TEMP/v3-out"
+          cat "$RUNNER_TEMP/v3-out/GRAPH_REPORT.md"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v3-graph-${{ matrix.os }}
+          path: ${{ runner.temp }}/v3-out/graph.json
+          retention-days: 5
+
+  v3-same-graph:
+    needs: v3-extractor
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: v3-graph-*
+          path: graphs
+      - name: Compare the graphs
+        run: python3 .github/scripts/same_graph.py graphs/*/graph.json
