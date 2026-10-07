@@ -239,6 +239,7 @@ pub fn build_graph_resilient(root string, worker_exe string, out_dir string) (Gr
 
 	save_cache(out_dir, bin_hash, new_cache)
 	disambiguate_ids(mut g)
+	separate_member_ids(mut g)
 	resolve_edges(mut g)
 	return g, ExtractReport{
 		binary_hash: bin_hash
@@ -286,6 +287,7 @@ pub fn build_graph(opts Options) Graph {
 	}
 
 	disambiguate_ids(mut g)
+	separate_member_ids(mut g)
 	resolve_edges(mut g)
 	return g
 }
@@ -322,15 +324,116 @@ pub fn build_graph(opts Options) Graph {
 // silently unexplained; a real fix belongs in fn_id (extraction), not
 // here, since this function only disambiguates by build unit, and these
 // two declarations are already in the same one.
+// regenerate_defines replaces every `defines` edge with one built from the
+// symbols' current parent and id.
+fn regenerate_defines(mut g Graph) {
+	mut rest := []Edge{cap: g.edges.len}
+	for e in g.edges {
+		if e.kind != .defines {
+			rest << e
+		}
+	}
+	for s in g.symbols {
+		if s.parent != '' && s.kind != .import_ {
+			rest << Edge{
+				from: s.parent
+				to:   s.id
+				kind: .defines
+			}
+		}
+	}
+	g.edges = rest
+}
+
+// main_unit_files returns the files that declare `module main` (or no module),
+// read from their module symbol's signature. Module ids are built from the
+// directory (see module_id in backend_v.v), so `cmd/tools/vself.v` has the
+// parent `cmd.tools` although it is a standalone program like every other
+// file there; only the declaration says so.
+fn main_unit_files(g Graph) map[string]bool {
+	mut m := map[string]bool{}
+	for s in g.symbols {
+		if s.kind == .mod_ && s.signature == 'module main' {
+			m[s.file] = true
+		}
+	}
+	return m
+}
+
+// in_main_unit reports whether `s` belongs to a standalone program. A parent
+// of `main` covers a file with no directory, whose module id falls back to the
+// declared name.
+fn in_main_unit(s Symbol, mains map[string]bool) bool {
+	return s.parent == 'main' || mains[s.file]
+}
+
+// separate_member_ids gives a field or const whose id is also another kind of
+// symbol's id an id of its own, `<parent>::field::<name>` or
+// `<parent>::const::<name>`, in the form import ids already use. V lets a
+// method share its name with a field of its receiver type (`Server.username`
+// in vlib/crypto/scram is both) and a const share its name with a function, and
+// both used to come out as one id, so a `calls` edge to the method pointed as
+// much at the field. The function, method or type keeps the plain id because
+// edges point at it; fields and consts are only ever reached by their
+// `defines` edge, which is rebuilt here.
+fn separate_member_ids(mut g Graph) {
+	mut other := map[string]bool{}
+	for s in g.symbols {
+		if s.kind != .field && s.kind != .constant {
+			other[s.id] = true
+		}
+	}
+	mut renamed := false
+	for i in 0 .. g.symbols.len {
+		s := g.symbols[i]
+		if (s.kind == .field || s.kind == .constant) && other[s.id] {
+			g.symbols[i].id = '${s.parent}::${s.kind}::${s.name}'
+			renamed = true
+		}
+	}
+	if renamed {
+		regenerate_defines(mut g)
+	}
+}
+
+// import_reaches reports whether an import of `imported` (the path as written,
+// e.g. `v.ast`) can name the module with directory id `mod_id` (e.g.
+// `vlib.v.ast`). Ids carry the path from the graph root, while an import is
+// relative to a module root that differs between projects, so this matches the
+// trailing segments. Where that leaves more than one module visible (`import
+// rand` matches `vlib.rand` and `vlib.crypto.rand`), the callers' only_id finds
+// several ids and resolves nothing rather than guessing.
+fn import_reaches(mod_id string, imported string) bool {
+	return mod_id == imported || mod_id.ends_with('.' + imported)
+}
+
+// visible_from reports whether a declaration in module `mod` can be reached
+// from a file in `caller`'s module that imports `imports`: V's visibility rule
+// of own module, imports, and the auto-imported builtin.
+fn visible_from(mod string, caller DeclSite, imports []string) bool {
+	if import_reaches(mod, 'builtin') {
+		return true
+	}
+	for imp in imports {
+		if import_reaches(mod, imp) {
+			return true
+		}
+	}
+	return mod == caller.mod && !caller.is_main
+}
+
 fn disambiguate_ids(mut g Graph) {
 	kinds := [SymbolKind.function, .method, .struct_, .enum_, .interface_, .type_alias]
+	mains := main_unit_files(g)
 	mut id_count := map[string]int{}
-	mut id_mod := map[string]string{}
+	mut id_main := map[string]bool{}
 	mut id_files := map[string][]string{}
 	for s in g.symbols {
 		if s.kind in kinds {
 			id_count[s.id]++
-			id_mod[s.id] = s.parent
+			if in_main_unit(s, mains) {
+				id_main[s.id] = true
+			}
 			id_files[s.id] << s.file
 		}
 	}
@@ -339,7 +442,7 @@ fn disambiguate_ids(mut g Graph) {
 		if n < 2 {
 			continue
 		}
-		if id_mod[id] or { '' } == 'main' {
+		if id_main[id] {
 			collides[id] = true
 			continue
 		}
@@ -390,22 +493,7 @@ fn disambiguate_ids(mut g Graph) {
 	// belong-to ambiguity as calls/embeds/references, just without an
 	// Edge.file to resolve it, since regenerating is exact and just as
 	// cheap here.
-	mut rest := []Edge{cap: g.edges.len}
-	for e in g.edges {
-		if e.kind != .defines {
-			rest << e
-		}
-	}
-	for s in g.symbols {
-		if s.parent != '' && s.kind != .import_ {
-			rest << Edge{
-				from: s.parent
-				to:   s.id
-				kind: .defines
-			}
-		}
-	}
-	g.edges = rest
+	regenerate_defines(mut g)
 
 	// calls/embeds/references edges' `from` is the id of the declaration
 	// that emitted them -- rename it the same way, using Edge.file (which
@@ -456,8 +544,9 @@ struct CallCand {
 
 // DeclSite is where a declaration lives, used to score candidates by locality.
 struct DeclSite {
-	mod  string
-	file string
+	mod     string
+	file    string
+	is_main bool // in a standalone program, see main_unit_files
 }
 
 // TypeCand is one declaration that a raw type name (on an `embeds` or
@@ -502,7 +591,8 @@ fn resolve_edges(mut g Graph) {
 	mut by_type_name := map[string][]TypeCand{}
 	mut site_of := map[string]DeclSite{}
 	mut id_count := map[string]int{}
-	mut id_mod := map[string]string{}
+	mains := main_unit_files(g)
+	mut id_main := map[string]bool{}
 	mut id_files := map[string][]string{}
 	mut imports_of := map[string][]string{} // file -> modules it imports
 	for s in g.symbols {
@@ -531,11 +621,12 @@ fn resolve_edges(mut g Graph) {
 		// interfaces, and type_aliases are only ever a `to`, never a `from`.
 		if s.kind in [SymbolKind.function, .method, .struct_] {
 			site_of[s.id] = DeclSite{
-				mod:  s.parent
-				file: s.file
+				mod:     s.parent
+				file:    s.file
+				is_main: in_main_unit(s, mains)
 			}
 		}
-		// id_count/id_mod/id_files feed the build-unit-aware duplicate check
+		// id_count/id_main/id_files feed the build-unit-aware duplicate check
 		// below. It is shared, unqualified by kind, across every kind that
 		// can be a resolution target (calls' fn/method ids and type refs'
 		// struct/enum/interface/type_alias ids alike) rather than kept as
@@ -547,7 +638,9 @@ fn resolve_edges(mut g Graph) {
 		// precision-over-recall direction this whole pass already takes.
 		if s.kind in [SymbolKind.function, .method, .struct_, .enum_, .interface_, .type_alias] {
 			id_count[s.id]++
-			id_mod[s.id] = s.parent
+			if in_main_unit(s, mains) {
+				id_main[s.id] = true
+			}
 			id_files[s.id] << s.file
 		}
 	}
@@ -563,7 +656,7 @@ fn resolve_edges(mut g Graph) {
 		if n < 2 {
 			continue
 		}
-		if id_mod[id] or { '' } == 'main' {
+		if id_main[id] {
 			unaddressable[id] = true
 			continue
 		}
@@ -709,7 +802,7 @@ fn resolve_callee(e Edge, by_name map[string][]CallCand, site_of map[string]Decl
 	// module of every standalone program, so a repo can contain thousands of
 	// mutually unrelated `main` files; matching on it links programs that have
 	// nothing to do with each other.
-	if caller.mod != '' && caller.mod != 'main' {
+	if caller.mod != '' && !caller.is_main {
 		mut same_mod := []CallCand{}
 		for c in narrowed {
 			if c.mod == caller.mod {
@@ -729,8 +822,7 @@ fn resolve_callee(e Edge, by_name map[string][]CallCand, site_of map[string]Decl
 	imports := imports_of[caller.file] or { []string{} }
 	mut visible := []CallCand{}
 	for c in narrowed {
-		if c.mod == 'builtin' || c.mod in imports
-			|| (c.mod == caller.mod && caller.mod != 'main') {
+		if visible_from(c.mod, caller, imports) {
 			visible << c
 		}
 	}
@@ -767,7 +859,7 @@ fn resolve_type_ref(e Edge, by_type_name map[string][]TypeCand, site_of map[stri
 	if id := only_type_id(same_file) {
 		return CallResolution{ id: id, inferred: true }
 	}
-	if caller.mod != '' && caller.mod != 'main' {
+	if caller.mod != '' && !caller.is_main {
 		mut same_mod := []TypeCand{}
 		for c in cands {
 			if c.mod == caller.mod {
@@ -781,8 +873,7 @@ fn resolve_type_ref(e Edge, by_type_name map[string][]TypeCand, site_of map[stri
 	imports := imports_of[caller.file] or { []string{} }
 	mut visible := []TypeCand{}
 	for c in cands {
-		if c.mod == 'builtin' || c.mod in imports
-			|| (c.mod == caller.mod && caller.mod != 'main') {
+		if visible_from(c.mod, caller, imports) {
 			visible << c
 		}
 	}

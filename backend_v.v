@@ -255,12 +255,16 @@ fn extract_from_ast(file &ast.File, mut table ast.Table, rel string, src []strin
 	mod_id := module_id(rel, file.mod.name)
 	v_mod := file.mod.name
 
-	// module node
+	// module node. Its signature is what the file itself declares, not the id:
+	// `module main` there is how disambiguate_ids and resolve_edges tell a
+	// standalone program from an ordinary module (see main_unit_files), which
+	// the directory-based id can no longer show.
+	declared := v_mod.all_after_last('.')
 	syms << Symbol{
 		id:        mod_id
 		name:      mod_id
 		kind:      .mod_
-		signature: 'module ${mod_id}'
+		signature: 'module ${if declared == '' { 'main' } else { declared }}'
 		file:      rel
 		line:      file.mod.pos.line_nr + 1
 	}

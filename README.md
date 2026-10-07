@@ -340,6 +340,36 @@ spanning every unrelated standalone program in a large corpus; excluding
 (containment isn't interaction) even now that the underlying collision
 itself is fixed.
 
+**Regressed and fixed again (October 2026).** When module ids became
+directory paths (`5170207`, so that two machines produce the same ids), the
+checks for a standalone program kept comparing a symbol's parent with `main`.
+A program in a subdirectory now has a parent like `cmd.tools`, so from then on
+the 62 programs in vlang's `cmd/tools` shared one `cmd.tools.main` and calls
+between them crossed programs; 3,081 declarations fell into 1,169 ids. The
+same change broke the visibility rule in call and type resolution, which
+compared directory ids such as `vlib.os` with import paths such as `os` and
+with `builtin`. The module symbol's signature now records what the file
+declares (`module main`), which `main_unit_files` reads, and imports match a
+module id by its trailing segments (`import v.ast` reaches `vlib.v.ast`; where
+that fits several modules, nothing is resolved). On vlang `1b4ecb9c05`:
+resolved calls 130,513 → 163,984 and resolved type references 41,296 →
+65,702, every remaining multi-declaration id a platform variant inside an
+ordinary module.
+
+**Fields and consts beside a same-named method or function.** V lets a method
+share its name with a field of its receiver type (`Server.username` in
+`vlib/crypto/scram` is both) and a const share its name with a function; each
+pair came out as one id, so 429 `calls` edges on vlang pointed as much at a
+field as at the method. `separate_member_ids` gives such a field or const the
+id `<parent>::field::<name>` or `<parent>::const::<name>`, the form import ids
+already use, and leaves the plain id to the method or function that edges
+point at. Left as they are: a module id that equals a member of the parent
+module (`vlib.term.termios`, both a submodule and the C struct `termios`; 5
+ids), a `C.`/`JS.` type sharing an id with a V type of the same name (3), and
+duplicates written twice in the source itself (the same `C.` structs declared
+twice in `vlib/sokol/sapp/sapp_linux.c.v`; `import samename` next to `import
+samename as sn`).
+
 **Merging graphs.** Every id is namespaced by its source graph's label (its
 root directory name by default, or `--labels a,b,...`), unconditionally and
 regardless of merge order, because two unrelated projects sharing a module
@@ -733,6 +763,7 @@ Known gaps and evidence-gated future work are recorded in
 - [x] **`Index.by_id` id-collision fixed (2026-08-16).** `disambiguate_ids` (graphify.v) runs before edge resolution and gives colliding declarations their own distinct node identity — see the Usage section's Index.by_id note for the full mechanism and real before/after numbers (21.03% of all symbols silently discarded → 13.54%, with the fixable portion — genuine cross-build-unit collisions — going from 7,646 rows to 8).
 - [x] **`fn C.foo`/`fn JS.foo` extern-decl same-file collision fixed (2026-08-16).** The last 8 rows left over from the `Index.by_id` fix above were a distinct bug: `fn_id` (backend_v.v) doesn't preserve a declaration's `C.`/`JS.` language prefix in `short_name`, so a body-less extern binding and a same-named real V wrapper *in the same file* got an identical id — which a file-qualified suffix can't separate, since they already share a file. Fixed by skipping body-less non-V `FnDecl`s as symbols entirely; call resolution to an extern callee was already non-functional either way (the raw call name carries the `C.`/`JS.` prefix via a different parser field than `short_name` ever sees), so nothing that worked is lost. A fresh full-repo extraction shows 0 duplicate ids across all six kinds this pass targets, down from 4 ids / 8 symbols.
 - [x] **Incremental cache tied to the running binary, not just file hashes (2026-08-17).** `.gf_cache.ndjson` only ever checked each source file's own content hash — with no way to detect that graphify's *own extraction logic* had changed. The fix above changed which symbols get extracted from a file without changing `FileResult`'s on-disk shape, so a rebuilt binary kept serving pre-fix cached results indefinitely on an unchanged corpus: a daily-scheduled Windows extraction served stale, pre-fix symbol counts for weeks, caught only by comparing against a fresh macOS extraction of the identical commit. Fixed by hashing the running binary itself once per extract and stamping it into the cache header — a cache written by a *different* binary is discarded wholesale, even when every individual file's hash still matches, since the binary is what actually decides what a file's content extracts to. This subsumes the old hand-maintained `cache_format` version bump (any wire-format change necessarily changes the compiled binary anyway); `cache_format` itself is kept, now scoped to just the header's own envelope shape, so a pre-existing cache from before this fix is safely discarded rather than misparsed.
+- [x] **Standalone programs, imports and `builtin` recognized again; fields and consts with their own ids (2026-10-06).** Directory-based module ids had quietly broken the `main`-program checks and the import/`builtin` visibility rule; restoring them resolves about 33,000 more calls and 24,000 more type references on the V compiler's tree, and 62 `cmd/tools` programs no longer share one `main`. A field or const that shares its id with a method or function now gets `<parent>::field::<name>` / `<parent>::const::<name>`. Details under the Index.by_id note in Usage.
 - [x] **A syntax error costs only its own declaration (2026-10-06).** After some errors the V 0.5.2 parser loses track of scopes and braces and drops much of the rest of the file even in recovery mode; one file in the V compiler lost 320 of its 501 functions to a single shadowed loop variable. A file whose parse reports an error is now re-parsed one top-level declaration at a time, keeping its line numbers: 394 more symbols on the V compiler's own tree. Details in [FUTURE_WORK.md §6](FUTURE_WORK.md#6-the-extractor-depends-on-vs-removed-v1-frontend).
 - [x] **Declarations inside file-level `$if` blocks (2026-10-06).** The extractor only looked at a file's direct top-level statements, so anything declared inside a file-scope `$if` (platform-specific structs, constants, functions) was missing from the graph on every machine. It now includes the branch the parser keeps for the host: 180 more symbols on the V compiler's own tree. Details in [FUTURE_WORK.md §8](FUTURE_WORK.md#8-extraction-depends-on-the-build-hosts-os-and-architecture).
 - [x] **Recovering past syntax errors, and flagging the files that have them (2026-10-06).** V 0.5.2's parser, which graphify's V1 extractor uses, does not know syntax V has added since, such as the array-literal spread `[a, ...(b)]`. Run in its default output mode it aborts at the first such error, so every declaration after it was silently missing from the graph: about 3,500 functions on the V compiler's own tree, while the extract reported only 3 unparseable files. Extraction now runs the parser in `.silent` mode, which records the error and keeps going (the missing functions relative to V3 dropped from 3,548 to 561), drops the nameless function declarations recovery can produce, and lists every file that parsed with an error in `manifest.json`'s `partial` list and in `graphify extract`'s output. Details in [FUTURE_WORK.md §6](FUTURE_WORK.md#6-the-extractor-depends-on-vs-removed-v1-frontend).

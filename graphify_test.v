@@ -2503,3 +2503,131 @@ fn test_cache_round_trips_a_partial_results_parse_error() {
 	assert loaded['part.v'].fr.symbols.len == 1
 	assert loaded['whole.v'].fr.parse_error == ''
 }
+
+// write_tree lays `files` (relative path -> source) out under a fresh temp dir
+// and returns its root.
+fn write_tree(name string, files map[string]string) string {
+	root := os.join_path(os.temp_dir(), 'graphify_test_${name}_${os.getpid()}')
+	os.rmdir_all(root) or {}
+	for rel, src in files {
+		path := os.join_path(root, rel)
+		os.mkdir_all(os.dir(path)) or { panic(err) }
+		os.write_file(path, src) or { panic(err) }
+	}
+	return root
+}
+
+fn test_programs_in_a_subdirectory_are_separate_build_units() {
+	// Module ids come from the directory, so two programs in tools/ both have
+	// the parent `tools`; only their `module main` says they are separate.
+	// Before main_unit_files, their `main` and `helper` shared one id each and
+	// a call from one program resolved into the other.
+	prog := 'module main
+
+fn helper() {}
+
+fn main() {
+	helper()
+}
+'
+	root := write_tree('main_units', {
+		'tools/a.v': prog
+		'tools/b.v': prog
+	})
+	defer {
+		os.rmdir_all(root) or {}
+	}
+	g := build_graph(Options{ root: root })
+	ids := g.symbols.map(it.id)
+	assert 'tools.main@tools/a.v' in ids
+	assert 'tools.main@tools/b.v' in ids
+	assert 'tools.helper@tools/a.v' in ids
+	assert g.edges.any(it.kind == .calls && it.from == 'tools.main@tools/a.v'
+		&& it.to == 'tools.helper@tools/a.v')
+	assert g.edges.any(it.kind == .calls && it.from == 'tools.main@tools/b.v'
+		&& it.to == 'tools.helper@tools/b.v')
+	assert g.symbols.filter(it.kind == .mod_).all(it.signature == 'module main')
+}
+
+fn test_imports_and_builtin_reach_directory_module_ids() {
+	// `import util` names the module whose id is `lib.util`, and builtin is
+	// visible everywhere; a same-named declaration elsewhere is not visible.
+	// Before visible_from, both rules compared directory ids such as
+	// `lib.util` with import paths such as `util` and never matched.
+	root := write_tree('import_reach', {
+		'lib/util/util.v':       'module util
+
+pub struct Conf {}
+'
+		'lib/other/other.v':     'module other
+
+pub struct Conf {}
+
+pub fn everywhere() {}
+'
+		'lib/builtin/builtin.v': 'module builtin
+
+pub fn everywhere() {}
+'
+		'app/app.v':             'module app
+
+import util
+
+fn run(c util.Conf) {
+	everywhere()
+}
+'
+	})
+	defer {
+		os.rmdir_all(root) or {}
+	}
+	g := build_graph(Options{ root: root })
+	assert g.edges.any(it.kind == .references && it.from == 'app.run' && it.to == 'lib.util.Conf')
+	assert g.edges.any(it.kind == .calls && it.from == 'app.run'
+		&& it.to == 'lib.builtin.everywhere')
+}
+
+fn test_field_and_const_get_their_own_id_beside_a_same_named_method_or_fn() {
+	src := 'module demo
+
+const answer = 42
+
+fn answer() int {
+	return answer
+}
+
+struct Server {
+	username string
+}
+
+fn (s Server) username() string {
+	return s.username
+}
+
+fn use(s Server) string {
+	_ = answer()
+	return s.username()
+}
+'
+	root := write_tree('member_ids', {
+		'demo/demo.v': src
+	})
+	defer {
+		os.rmdir_all(root) or {}
+	}
+	g := build_graph(Options{ root: root })
+	mut count := map[string]int{}
+	for s in g.symbols {
+		count[s.id]++
+	}
+	assert count.keys().all(count[it] == 1)
+	by_id := maps_by_id(g.symbols)
+	assert by_id['demo.Server.username'].kind == .method
+	assert by_id['demo.Server::field::username'].kind == .field
+	assert by_id['demo.answer'].kind == .function
+	assert by_id['demo::const::answer'].kind == .constant
+	assert g.edges.any(it.kind == .defines && it.from == 'demo.Server'
+		&& it.to == 'demo.Server::field::username')
+	assert g.edges.any(it.kind == .defines && it.from == 'demo' && it.to == 'demo::const::answer')
+	assert g.edges.any(it.kind == .calls && it.from == 'demo.use' && it.to == 'demo.Server.username')
+}
