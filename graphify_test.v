@@ -3380,3 +3380,47 @@ type Visit = fn(&flat.Node, voidptr)
 	assert syms['m.S.all'].signature == 'all [][]v.flat.Op'
 	assert syms['m.Visit'].signature == 'type Visit = fn (&v.flat.Node, voidptr)'
 }
+
+fn test_function_end_line_is_the_last_line_of_its_header() {
+	// V 0.5.2 recorded a function's end_line as the line of the `{` that
+	// opens its body, so a multi-line header is covered; V3's extractor gave
+	// the start line. A generic header or a body-less declaration ends on its
+	// own line, where V 0.5.2's ran on.
+	$if !graphify_v3 ? {
+		return
+	}
+	src := 'module m
+
+fn long_header(a int,
+	b map[string]int) ?struct {
+	x int
+} {
+	return none
+}
+
+fn grouped[T](x T) string {
+	return ""
+}
+
+fn C.puts(&char) int
+
+fn bodyless(x int) int
+
+fn brace_below() int
+{
+	return 1
+}
+'
+	fr := extract_v_text_result(src, 'm/m.c.v')
+	syms := maps_by_id(fr.symbols)
+	assert syms['m.long_header'].line == 3
+	assert syms['m.long_header'].end_line == 6
+	assert syms['m.grouped'].end_line == 10
+	assert syms['m.bodyless'].end_line == 16
+	assert syms['m.brace_below'].end_line == 19
+	script := extract_v_text_result('import os\n\nprintln(os.args)\nx := 1\nprintln(x)\n',
+		'examples/s.v')
+	main := maps_by_id(script.symbols)['examples.main']
+	assert main.line == 3
+	assert main.end_line == 5
+}

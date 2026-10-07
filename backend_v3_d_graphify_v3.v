@@ -137,6 +137,63 @@ fn extract_v3(path string, src string, rel string, real_path string) FileResult 
 	}
 }
 
+// header_end_line is the line of the `{` that opens the body of the function
+// declared at `offset`, as V 0.5.2 recorded a function's end_line: the last
+// line of its header. It skips brackets and anonymous struct types, so a `{`
+// in a parameter's or the return type doesn't count, and a declaration
+// without a body ends on its own line.
+fn (f &V3File) header_end_line(offset i32) int {
+	mut depth := 0
+	for i := int(offset); i < f.src.len; i++ {
+		match f.src[i] {
+			`(`, `[` {
+				depth++
+			}
+			`)`, `]`, `}` {
+				depth--
+			}
+			`{` {
+				// an anonymous `struct {` in a parameter or return type
+				// opens a type, not the body
+				before := f.src[int(offset)..i].trim_right(' \t')
+				if depth <= 0 && !before.ends_with('struct') && !before.ends_with('union') {
+					return f.line_of(i32(i))
+				}
+				depth++
+			}
+			`\n` {
+				// a header continues past a line break inside brackets, or
+				// when the body's `{` starts the next line
+				if depth <= 0 && !f.src[i + 1..].trim_left(' \t\r\n').starts_with('{') {
+					break
+				}
+			}
+			else {}
+		}
+	}
+	return f.line_of(offset)
+}
+
+// subtree_span is the first byte a node and its descendants cover, and the
+// byte after their last.
+// A statement's own position can't be trusted for this: V3 places an
+// expression statement after its expression.
+fn (f &V3File) subtree_span(id flat.NodeId) (i32, i32) {
+	n := f.node(id)
+	mut lo := n.pos.offset
+	mut hi := n.pos.end
+	for k in f.kids(id) {
+		klo, khi := f.subtree_span(k)
+		if klo < lo {
+			lo = klo
+		}
+		if khi > hi {
+			hi = khi
+		}
+	}
+	return lo, hi
+}
+
 // line_of returns the 1-based line of a byte offset.
 fn (f &V3File) line_of(offset i32) int {
 	mut lo := 0
@@ -391,7 +448,9 @@ fn (mut f V3File) extract_script_main(top []flat.NodeId, mut syms []Symbol, mut 
 		return
 	}
 	fid := '${f.mod_id}.main'
-	line := f.line_of(f.node(stmts[0]).pos.offset)
+	first, _ := f.subtree_span(stmts[0])
+	_, last := f.subtree_span(stmts.last())
+	line := f.line_of(first)
 	f.add_symbol(mut syms, mut edges, Symbol{
 		id:        fid
 		name:      'main'
@@ -399,7 +458,9 @@ fn (mut f V3File) extract_script_main(top []flat.NodeId, mut syms []Symbol, mut 
 		signature: 'fn main()'
 		file:      f.rel
 		line:      line
-		end_line:  line
+		// from the first statement to the end of the last, which V 0.5.2
+		// recorded as line 1 to line 1
+		end_line: f.line_of(if last > first { last - 1 } else { last })
 		parent:    f.mod_id
 	})
 	mut seen := map[string]bool{}
@@ -495,7 +556,7 @@ fn (mut f V3File) extract_fn(id flat.NodeId, mut syms []Symbol, mut edges []Edge
 		signature: sig
 		file:      f.rel
 		line:      line
-		end_line:  line
+		end_line:  f.header_end_line(n.pos.offset)
 		is_pub:    f.line_is_pub(line)
 		parent:    f.mod_id
 		doc:       doc_from(f.lines, line)
