@@ -3268,3 +3268,31 @@ fn test_missing_tool_arg_names_the_absent_or_blank_argument() {
 	}) == ''
 	assert missing_tool_arg('overview', map[string]string{}) == ''
 }
+
+fn test_get_body_of_a_bodyless_declaration_is_just_its_header() {
+	// A function declared without a body ends on its header. get_body used to
+	// read on to the next declaration and found no closing brace to trim back
+	// to, so it served the blank line and the next declaration's doc comment.
+	src := 'module demo
+
+// contains reports whether a holds value.
+pub fn contains(a []int, value int) bool
+
+// index finds value.
+pub fn index(a []int, value int) int
+
+fn wrapped(a int,
+	b int) int
+
+fn real() int {
+	return 1
+}
+'
+	g, root := body_fixture(src)
+	defer {
+		os.rmdir_all(root) or {}
+	}
+	assert g.get_body('contains') == '// demo.v:4-4\npub fn contains(a []int, value int) bool'
+	assert g.get_body('wrapped') == '// demo.v:9-10\nfn wrapped(a int,\n\tb int) int'
+	assert g.get_body('real').ends_with('\treturn 1\n}')
+}

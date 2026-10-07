@@ -165,13 +165,15 @@ fn (f &V3File) header_end_line(offset i32) int {
 				// a header continues past a line break inside brackets, or
 				// when the body's `{` starts the next line
 				if depth <= 0 && !f.src[i + 1..].trim_left(' \t\r\n').starts_with('{') {
-					break
+					// no body: the header ends on the line this newline ends
+					return f.line_of(i32(i))
 				}
 			}
 			else {}
 		}
 	}
-	return f.line_of(offset)
+	// the file ended inside the header, with no newline after it
+	return f.line_of(i32(f.src.len - 1))
 }
 
 // subtree_span is the first byte a node and its descendants cover, and the

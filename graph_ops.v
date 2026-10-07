@@ -441,6 +441,18 @@ pub fn (g Graph) get_body(node string) string {
 	lines := src.replace('\r\n', '\n').split('\n')
 	start := if s.line > 0 { s.line - 1 } else { 0 }
 	mut end := if s.end_line > s.line { s.end_line } else { 0 }
+	if s.kind in [.function, .method] {
+		// A function's end_line is the last line of its header. When no `{`
+		// opens a body there, the declaration has none (`pub fn (a array)
+		// contains(value voidptr) bool` in a .c.v file), and the header is all
+		// of it; reading on to the next declaration would serve the blank lines
+		// and doc comment in between.
+		header_end := if s.end_line > s.line { s.end_line } else { s.line }
+		if header_end >= 1 && header_end <= lines.len
+			&& !lines[header_end - 1].all_before('//').contains('{') {
+			end = header_end
+		}
+	}
 	if end == 0 {
 		// no reliable end line (e.g. fn bodies) — stop just before the next
 		// same-level declaration in this file, or at EOF.
