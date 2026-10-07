@@ -3347,3 +3347,36 @@ fn test_get_body_of_a_crlf_file_has_no_carriage_returns() {
 	assert body.split('\n').last() == '}', body
 	assert !body.contains('println(2)'), body
 }
+
+fn test_signatures_qualify_types_with_the_module_path_and_space_fn_types() {
+	// V 0.5.2 wrote a type's module as its full path wherever it appears, and
+	// a function type as `fn (...)`; V3 keeps the type as written.
+	$if !graphify_v3 ? {
+		return
+	}
+	src := 'module m
+
+import v.flat
+import gg.m4 as mat
+import encoding.binary { Endian }
+
+pub fn walk(ids []flat.NodeId, by map[string]flat.Node, cb fn(flat.NodeId) bool) ?flat.NodeId {
+	return none
+}
+
+struct S {
+	v   mat.Vec4
+	e   Endian
+	all [][]flat.Op
+}
+
+type Visit = fn(&flat.Node, voidptr)
+'
+	fr := extract_v_text_result(src, 'm/m.v')
+	syms := maps_by_id(fr.symbols)
+	assert syms['m.walk'].signature == 'pub fn walk(ids []v.flat.NodeId, by map[string]v.flat.Node, cb fn (v.flat.NodeId) bool) ?v.flat.NodeId'
+	assert syms['m.S.v'].signature == 'v gg.m4.Vec4'
+	assert syms['m.S.e'].signature == 'e encoding.binary.Endian'
+	assert syms['m.S.all'].signature == 'all [][]v.flat.Op'
+	assert syms['m.Visit'].signature == 'type Visit = fn (&v.flat.Node, voidptr)'
+}

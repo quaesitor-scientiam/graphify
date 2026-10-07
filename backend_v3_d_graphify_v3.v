@@ -77,10 +77,6 @@ mut:
 	// last segment of its path) to the module's resolved path (resolve_import),
 	// `geometry` -> `v.tests.geometry`
 	imports map[string]string
-	// aliases holds explicit `as` aliases and imports that resolved to a longer
-	// path: a type written with one is expanded to the module's path, as V
-	// 0.5.2 named it
-	aliases map[string]string
 	// selected maps each name brought in by a selective import, `import util
 	// { shared }`, to its module's path
 	selected map[string]string
@@ -225,23 +221,50 @@ fn anon_type(t string) string {
 	return out
 }
 
-// type_text renders a type as V 0.5.2 did for this file: as written, with an
-// explicit import alias expanded to the module's path.
+// type_text renders a type as V 0.5.2 did for this file: each module
+// qualifier, wherever it sits in the type, written as the module's resolved
+// path (`[]flat.NodeId` -> `[]v.flat.NodeId`, `m4.Vec4` -> `gg.m4.Vec4`), a
+// type brought in by a selective import qualified the same way, and a
+// function type as `fn (...)`.
 fn (f &V3File) type_text(t_ string) string {
 	t := anon_type(t_)
-	mut prefix := ''
-	mut rest := t
-	for rest.len > 0 && rest[0] in [`&`, `?`, `!`] {
-		prefix += rest[0].ascii_str()
-		rest = rest[1..]
-	}
-	if rest.contains('.') {
-		head := rest.all_before('.')
-		if full := f.aliases[head] {
-			return prefix + full + '.' + rest.all_after('.')
+	mut out := []u8{cap: t.len + 16}
+	mut i := 0
+	for i < t.len {
+		c := t[i]
+		if !(c.is_letter() || c == `_`) || (i > 0 && (t[i - 1].is_alnum() || t[i - 1] == `_`)) {
+			out << c
+			i++
+			continue
 		}
+		// a dotted name, `a`, `flat.NodeId`, `gg.m4.Vec4`
+		mut j := i
+		for j < t.len {
+			if t[j].is_alnum() || t[j] == `_` {
+				j++
+			} else if t[j] == `.` && j + 1 < t.len && (t[j + 1].is_letter() || t[j + 1] == `_`) {
+				j++
+			} else {
+				break
+			}
+		}
+		mut word := t[i..j]
+		if word == 'fn' && j < t.len && t[j] == `(` {
+			word = 'fn '
+		} else if word.contains('.') {
+			if full := f.imports[word.all_before('.')] {
+				word = full + '.' + word.all_after('.')
+			}
+		} else if word[0].is_capital() {
+			// a type from a selective import, `import m { T }`, is `m.T`
+			if mod := f.selected[word] {
+				word = mod + '.' + word
+			}
+		}
+		out << word.bytes()
+		i = j
 	}
-	return t
+	return out.bytestr()
 }
 
 // base_name keeps a type's final identifier, as V 0.5.2's base_type_name did:
@@ -306,9 +329,6 @@ fn (mut f V3File) extract(root flat.NodeId) ([]Symbol, []Edge) {
 		path := resolve_import(written, f.real_path, f.rel)
 		alias := if n.typ != '' { n.typ } else { written.all_after_last('.') }
 		f.imports[alias] = path
-		if alias != written.all_after_last('.') || path != written {
-			f.aliases[alias] = path
-		}
 		for k in f.kids(id) {
 			sel := f.node(k)
 			if sel.kind == .ident {
