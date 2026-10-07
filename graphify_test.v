@@ -1628,13 +1628,42 @@ fn ring_of_cliques_graph(n_cliques int, clique_size int) Graph {
 	return g
 }
 
+// drill_views_plausible is the relationship between the drill-views a run
+// rendered and the communities that qualified for one (>= drill_min_members
+// members) that must hold for ANY Louvain run. compute_drill_views looks at
+// the largest drill_max_candidates qualifying communities, so those are the
+// candidates: it can never render more views than candidates, and a candidate
+// only goes without a view when it fails the "really has >= 2 sub-communities"
+// gate and is skipped without being backfilled -- allow a little slack for
+// that rather than assert a count the code does not guarantee. How many
+// communities qualify is not fixed: Louvain's shuffled visitation order (see
+// communities.v) makes it vary run to run (9 to 22 for the 400-clique ring
+// below over 150 local runs, and a macOS CI run rendered only 6 views), so a
+// bound written in terms of the cap alone fails on correct runs.
+fn drill_views_plausible(views int, qualifying int) bool {
+	candidates := if qualifying < drill_max_candidates { qualifying } else { drill_max_candidates }
+	return views <= candidates && views >= candidates - 3
+}
+
+fn test_drill_view_count_is_bounded_by_the_candidates_not_by_the_cap() {
+	assert drill_views_plausible(10, 14) // more qualified than the cap: all ten candidates drilled
+	assert drill_views_plausible(10, 10)
+	assert drill_views_plausible(9, 9) // fewer qualified than the cap: one view each
+	assert drill_views_plausible(6, 6) // a run where only six communities reach 30 members
+	assert drill_views_plausible(8, 10) // two candidates skipped as unsplittable: within slack
+	assert drill_views_plausible(7, 14)
+	assert !drill_views_plausible(5, 10) // half the candidates dropped is not slack
+	assert !drill_views_plausible(11, 14) // the cap exceeded
+	assert !drill_views_plausible(7, 6) // more views than candidates
+}
+
 fn test_emit_graph_html_drill_views_capped_marked_and_disclosed() {
 	// One graph, computed once, checked for all of: some communities are
 	// large enough to be marked drillable and some are not (the size gate
 	// actually filters something, not everything); the number of emitted
-	// drill-views never exceeds drill_max_candidates; and since this ring
-	// produces well over drill_max_candidates qualifying communities, the
-	// "N of M" truncation disclosure is present, not silent.
+	// drill-views never exceeds drill_max_candidates; and whenever more
+	// communities qualify than get a view, the "N of M" truncation
+	// disclosure is present, not silent.
 	g := ring_of_cliques_graph(400, 5)
 	out := g.emit_graph_html()
 
@@ -1642,28 +1671,11 @@ fn test_emit_graph_html_drill_views_capped_marked_and_disclosed() {
 	badges := out.count('class="drill-badge-legend"')
 	legend_items := out.count('class="legend-item"')
 
-	assert views > 0 // this ring reliably produces qualifying, splittable communities
-	assert views <= drill_max_candidates // the cap is a hard ceiling, never exceeded
-	// occasionally one of the top-drill_max_candidates-by-size communities
-	// fails the "really has >=2 sub-communities" gate and gets skipped
-	// without being backfilled -- allow a little slack rather than
-	// asserting an exact count that isn't actually guaranteed by the code.
-	assert views >= drill_max_candidates - 3
-	assert views == badges // every drill-view has exactly one matching legend badge
-	assert legend_items > badges // not every community qualified -- the size gate filtered some out
-
-	// The "N of M" disclosure only appears when compute_drill_views actually
-	// dropped a qualifying (>= drill_min_members) community -- to the
-	// drill_max_candidates cap, or to the "not really splittable" gate --
-	// never unconditionally. Louvain's shuffled visitation order (see
-	// communities.v) means the number of >= drill_min_members communities
-	// this ring produces varies run to run, so don't assume it's always
-	// more than drill_max_candidates: recover the actual qualifying count
-	// the same way compute_drill_views did, from the legend's own
-	// per-community sizes (legend and drill views are built from the same
-	// `comms` slice inside emit_graph_html, and layout_ring always keeps
-	// at least one member per community, so every qualifying community is
-	// guaranteed a legend entry to count here).
+	// Recover the actual qualifying count the same way compute_drill_views
+	// did, from the legend's own per-community sizes (legend and drill views
+	// are built from the same `comms` slice inside emit_graph_html, and
+	// layout_ring always keeps at least one member per community, so every
+	// qualifying community is guaranteed a legend entry to count here).
 	mut qualifying := 0
 	mut rest := out
 	for {
@@ -1675,6 +1687,17 @@ fn test_emit_graph_html_drill_views_capped_marked_and_disclosed() {
 		}
 		rest = tail[end..]
 	}
+
+	assert views > 0 // this ring reliably produces qualifying, splittable communities
+	assert views <= drill_max_candidates // the cap is a hard ceiling, never exceeded
+	assert drill_views_plausible(views, qualifying), 'views=${views} qualifying=${qualifying}'
+	assert views == badges // every drill-view has exactly one matching legend badge
+	assert legend_items > badges // not every community qualified -- the size gate filtered some out
+
+	// The "N of M" disclosure only appears when compute_drill_views actually
+	// dropped a qualifying (>= drill_min_members) community -- to the
+	// drill_max_candidates cap, or to the "not really splittable" gate --
+	// never unconditionally. So it is expected exactly when qualifying > views.
 	assert qualifying >= views // every rendered drill-view came from a qualifying community
 	if qualifying > views {
 		assert out.contains('large communities include a detail view')
