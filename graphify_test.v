@@ -2800,3 +2800,73 @@ fn @select() {}
 	assert calls.any(it.to == 'app.shared')
 	assert calls.any(it.to == 'cmd.app.select')
 }
+
+fn test_struct_and_interface_embeds_become_embeds_edges() {
+	// V 0.5.2's parser lists an embedded struct in StructDecl.embeds, not in
+	// `fields`, and an embedded interface in InterfaceDecl.embeds; the
+	// extractor only looked for is_embed on fields, so no embeds edge was ever
+	// emitted. The decoy `Base` in another module checks that each edge
+	// resolves to the declaration in the embedding type's own module.
+	root := write_tree('embeds', {
+		'demo/demo.v':   'module demo
+
+struct Base {
+	id int
+}
+
+struct Derived {
+	Base
+	name string
+}
+
+interface Reader {
+	read() int
+}
+
+interface ReadCloser {
+	Reader
+	close()
+}
+'
+		'demo/gen.v':    'module demo
+
+struct Middleware[T] {
+	ctx T
+}
+
+struct App {
+	Middleware[Base]
+}
+'
+		'other/other.v': 'module other
+
+pub struct Base {}
+
+pub struct Middleware[T] {}
+
+pub interface Reader {
+	read() int
+}
+'
+	})
+	defer {
+		os.rmdir_all(root) or {}
+	}
+	g := build_graph(Options{ root: root })
+	assert g.edges.any(it.kind == .embeds && it.from == 'demo.Derived' && it.to == 'demo.Base')
+	assert g.edges.any(it.kind == .embeds && it.from == 'demo.ReadCloser'
+		&& it.to == 'demo.Reader')
+	// a generic embed is named by its base type, not lost to the brackets
+	assert g.edges.any(it.kind == .embeds && it.from == 'demo.App' && it.to == 'demo.Middleware')
+	// the embedded type is not also a field symbol
+	assert !g.symbols.any(it.kind == .field && it.parent == 'demo.Derived' && it.name == 'Base')
+	assert g.symbols.any(it.kind == .field && it.id == 'demo.Derived.name')
+}
+
+fn test_strip_generic_args() {
+	assert strip_generic_args('veb.Middleware[Context]') == 'veb.Middleware'
+	assert strip_generic_args('[]Foo[T]') == '[]Foo'
+	assert strip_generic_args('map[string]Foo[map[int]T]') == 'map[string]Foo'
+	assert strip_generic_args('[4]int') == '[4]int'
+	assert strip_generic_args('&Pair[K, V]') == '&Pair'
+}

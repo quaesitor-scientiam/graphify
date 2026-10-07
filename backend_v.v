@@ -397,17 +397,14 @@ fn extract_from_ast(file &ast.File, mut table ast.Table, rel string, src []strin
 						to:   '${id}.${f.name}'
 						kind: .defines
 					}
-					base := base_type_name(table, f.typ, v_mod)
-					if f.is_embed {
-						edges << Edge{
-							from: id
-							to:   base
-							kind: .embeds
-							file: rel
-						}
-					}
-					add_ref(id, base, rel, mut edges, mut rseen)
+					add_ref(id, base_type_name(table, f.typ, v_mod), rel, mut edges, mut
+						rseen)
 				}
+				// Embedded structs are not in `fields`: V 0.5.2's parser keeps
+				// them out of the AST's field list (only the table's copy has
+				// them, flagged is_embed) and lists them in `embeds` instead.
+				add_embeds(id, stmt.embeds.map(it.typ), mut table, v_mod, rel, mut edges, mut
+					rseen)
 			}
 			ast.EnumDecl {
 				short := stmt.name.all_after_last('.')
@@ -450,6 +447,9 @@ fn extract_from_ast(file &ast.File, mut table ast.Table, rel string, src []strin
 					to:   id
 					kind: .defines
 				}
+				mut rseen := map[string]bool{}
+				add_embeds(id, stmt.embeds.map(it.typ), mut table, v_mod, rel, mut edges, mut
+					rseen)
 			}
 			ast.ConstDecl {
 				for cf in stmt.fields {
@@ -500,6 +500,21 @@ fn top_level_decls(stmts []ast.Stmt) []ast.Stmt {
 		out << stmt
 	}
 	return out
+}
+
+// add_embeds records an `embeds` edge, plus the usual type reference, from the
+// struct or interface `id` to each embedded type.
+fn add_embeds(id string, types []ast.Type, mut table ast.Table, v_mod string, rel string, mut edges []Edge, mut seen map[string]bool) {
+	for typ in types {
+		base := base_type_name(table, typ, v_mod)
+		edges << Edge{
+			from: id
+			to:   base
+			kind: .embeds
+			file: rel
+		}
+		add_ref(id, base, rel, mut edges, mut seen)
+	}
 }
 
 fn fn_id(mod_id string, v_mod string, fd ast.FnDecl, mut table ast.Table) string {
@@ -592,7 +607,7 @@ fn end_of(pos token.Pos) int {
 // `map[string]User` to its trailing identifier (`User`), so it can be matched to
 // a declared type symbol. Builtins/externals simply won't resolve and are dropped.
 fn base_type_name(table &ast.Table, typ ast.Type, v_mod string) string {
-	name := clean_type(table, typ, v_mod)
+	name := strip_generic_args(clean_type(table, typ, v_mod))
 	mut out := ''
 	for ch in name {
 		if (ch >= `a` && ch <= `z`) || (ch >= `A` && ch <= `Z`)
@@ -603,6 +618,35 @@ fn base_type_name(table &ast.Table, typ ast.Type, v_mod string) string {
 		}
 	}
 	return out
+}
+
+// strip_generic_args drops the `[...]` argument list after a generic type's
+// name, so `veb.Middleware[Context]` is read as `veb.Middleware` rather than
+// leaving base_type_name nothing after the closing bracket. A `[` that
+// follows an identifier opens generic arguments, except after `map`, whose
+// brackets hold the key type; array brackets (`[]Foo`, `[4]Foo`) never follow
+// an identifier and are kept.
+fn strip_generic_args(name string) string {
+	mut out := []u8{cap: name.len}
+	mut depth := 0
+	for i := 0; i < name.len; i++ {
+		ch := name[i]
+		if depth > 0 {
+			if ch == `[` {
+				depth++
+			} else if ch == `]` {
+				depth--
+			}
+			continue
+		}
+		if ch == `[` && out.len > 0 && (out.last().is_alnum() || out.last() == `_`)
+			&& !out.bytestr().ends_with('map') {
+			depth = 1
+			continue
+		}
+		out << ch
+	}
+	return out.bytestr()
 }
 
 // add_ref records a `references` edge to a type name, deduped per declaration.

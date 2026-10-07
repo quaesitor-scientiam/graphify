@@ -632,9 +632,9 @@ fn resolve_edges(mut g Graph) {
 		// site_of answers "where does this edge's `from` live", so it only
 		// needs the kinds backend_v.v actually emits calls/embeds/references
 		// edges from: fn/method (calls, and param/receiver/return-type
-		// references) and struct (field-type references and embeds). Enums,
-		// interfaces, and type_aliases are only ever a `to`, never a `from`.
-		if s.kind in [SymbolKind.function, .method, .struct_] {
+		// references), struct (field-type references and embeds) and
+		// interface (embeds). Enums and type_aliases are only ever a `to`.
+		if s.kind in [SymbolKind.function, .method, .struct_, .interface_] {
 			site_of[s.id] = DeclSite{
 				mod:     s.parent
 				file:    s.file
