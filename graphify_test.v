@@ -3197,3 +3197,38 @@ pub mut:
 		assert !e.to.contains('_x2f_') && !e.to.contains('_x5c_'), e.to
 	}
 }
+
+fn test_if_guarded_functions_keep_their_calls_on_every_host() {
+	// V3's parser drops the body of an `@[if cond]` function when cond is
+	// false on this host, so each machine lost the other's calls.
+	src := 'module m
+
+fn helper() {}
+
+@[if windows]
+fn on_windows() {
+	helper()
+}
+
+@[if !windows]
+fn elsewhere() {
+	helper()
+}
+
+/// traced logs
+@[if trace ?; inline]
+fn traced() {
+	helper()
+}
+'
+	fr := extract_v_text_result(src, 'm/m.v')
+	assert fr.parse_error == ''
+	syms := maps_by_id(fr.symbols)
+	for f in ['on_windows', 'elsewhere', 'traced'] {
+		assert fr.edges.any(it.kind == .calls && it.from == 'm.${f}' && it.to.ends_with('helper')), f
+	}
+	assert syms['m.on_windows'].line == 6
+	assert syms['m.traced'].line == 17
+	assert without_if_attrs('@[if a ?; inline]\nfn f() {}\n') == '@[${' '.repeat(8)}inline]\nfn f() {}\n'
+	assert without_if_attrs('\t@[if a]\nx').len == '\t@[if a]\nx'.len
+}

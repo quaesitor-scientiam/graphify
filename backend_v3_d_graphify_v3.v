@@ -20,6 +20,10 @@ pub fn extract_v_file_result(path string, rel string) FileResult {
 	src := os.read_file(path) or { return FileResult{
 		parse_error: 'cannot read the file: ${err}'
 	} }
+	if src.contains('[if ') {
+		// see without_if_attrs: parse a copy with the guards blanked
+		return extract_v_text_result(src, rel)
+	}
 	return extract_v3(path, src, rel)
 }
 
@@ -35,7 +39,7 @@ pub fn extract_v_text_result(source string, rel string) FileResult {
 	dir := os.join_path(os.temp_dir(), 'graphify_v3_text_${os.getpid()}')
 	os.mkdir_all(dir) or {}
 	path := os.join_path(dir, os.file_name(rel))
-	os.write_file(path, source) or { return FileResult{
+	os.write_file(path, without_if_attrs(source)) or { return FileResult{
 		parse_error: 'cannot write a temporary file: ${err}'
 	} }
 	defer {

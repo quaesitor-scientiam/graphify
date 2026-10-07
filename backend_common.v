@@ -126,3 +126,46 @@ fn add_ref(from string, typename string, file string, mut edges []Edge, mut seen
 		file: file
 	}
 }
+
+// without_if_attrs blanks each `@[if cond]` guard (and the `if cond;` part of
+// `@[if cond ?; inline]`) with spaces. V3's parser drops a guarded
+// declaration's body when the condition is false on this host, so an
+// `@[if windows]` function lost its calls on the Mac and an `@[if !windows]`
+// one on Windows; V 0.5.2 kept both. Spaces keep every offset and line.
+fn without_if_attrs(src string) string {
+	if !src.contains('[if ') {
+		return src
+	}
+	mut b := src.bytes()
+	mut line_start := 0
+	for line_start < b.len {
+		mut line_end := line_start
+		for line_end < b.len && b[line_end] != `\n` {
+			line_end++
+		}
+		mut i := line_start
+		for i < line_end && (b[i] == ` ` || b[i] == `\t`) {
+			i++
+		}
+		open := i
+		if i < line_end && b[i] == `@` {
+			i++
+		}
+		if i + 4 <= line_end && b[i] == `[` && b[i + 1] == `i` && b[i + 2] == `f`
+			&& b[i + 3] == ` ` {
+			mut close := i + 4
+			for close < line_end && b[close] != `]` && b[close] != `;` {
+				close++
+			}
+			if close < line_end {
+				// `@[if c]` goes entirely; `@[if c; inline]` keeps `@[` and the rest
+				from := if b[close] == `]` { open } else { i + 1 }
+				for k in from .. close + 1 {
+					b[k] = ` `
+				}
+			}
+		}
+		line_start = line_end + 1
+	}
+	return b.bytestr()
+}
