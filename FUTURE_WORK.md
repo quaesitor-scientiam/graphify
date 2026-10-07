@@ -377,9 +377,11 @@ Known gaps before it can become the default:
   `v.preludes.embed_file`): 1,840 on vlang, which V3 doesn't record.
 - A few line numbers differ: a script's `main` starts at its first statement
   (V 0.5.2 said line 1), and a `const` ends a line earlier.
-- The test suite passes under `-d graphify_v3` on macOS and Windows (October
-  2026); not yet checked on Linux, not in CI, and the release build and the
-  hook still use `-old-compiler`.
+- The release build, the hook and the update script still use
+  `-old-compiler`. CI covers V3 (October 2026): the `v3-extractor` job runs
+  the tests under `-d graphify_v3` on Linux, macOS and Windows and extracts
+  one pinned vlang commit on each, and `v3-same-graph` fails unless the three
+  graphs have the same symbols and edges.
 
 Mac and Windows graphs of vlang `abcebfc16d` were compared in October 2026:
 same 136,165 symbols, 3 edges apart. Each difference depended on the host and
