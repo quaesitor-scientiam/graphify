@@ -373,6 +373,18 @@ sizes differ in 27, because each parser substitutes some constants
 source exactly; and 7 module symbols show the declared module name where
 V 0.5.2 showed the directory's.
 
+Line numbers follow V 0.5.2's (October 2026): a function's `end_line` is the
+last line of its header, the line of the `{` that opens its body, and a
+script's `main` spans its first statement to the end of its last (V 0.5.2
+said line 1 to line 1). Of 479 symbols whose lines still differ on vlang,
+the rest are V 0.5.2's errors or deliberate: its end lines run past a
+generic header, a `&[]T` return type or a body-less declaration into the
+next one; a module's line is the `module` keyword's where V 0.5.2 gave the
+attribute above it (159 files start with an attribute); a declaration
+repeated in several `$if` branches is listed at the first, since V3 keeps
+them all; and a struct field's end line covers a default value spanning
+several lines.
+
 Mapping notes, for whoever moves this forward: methods are `fn_decl`s whose
 value is `Recv.name` with the receiver as the first `param`; a static method
 is `T@static@f` (graphify's `T__static__f`); a body-less V declaration in a
@@ -387,8 +399,6 @@ Known gaps before it can become the default:
 - V 0.5.2's parser adds pseudo-imports the source doesn't write
   (`builtin.closure` for a closure, `sync.threads` for `spawn`, `sync`,
   `v.preludes.embed_file`): 1,840 on vlang, which V3 doesn't record.
-- A few line numbers differ: a script's `main` starts at its first statement
-  (V 0.5.2 said line 1), and a `const` ends a line earlier.
 - The release build, the hook and the update script still use
   `-old-compiler`. CI covers V3 (October 2026): the `v3-extractor` job runs
   the tests under `-d graphify_v3` on Linux, macOS and Windows and extracts
