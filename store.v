@@ -8,15 +8,10 @@ import strings
 // json2.encode's reflection is far too slow at graph scale (616s for vlang's
 // full 100k-symbol graph).
 //
-// IMPORTANT: the CLI binary (cmd/cli, which calls this) must be built with
-// `-gc none`. Boehm GC (V's `-prod` default) made this same encoder take
-// 200s+ for a mere 16k symbols — some per-call GC bookkeeping in the hot
-// write_string/write_u8 loop, not an allocation problem (verified: those
-// calls are allocation-free, and stripping them to no-ops made the loop
-// instant). Disabling GC entirely is safe here because graphify.exe only
-// ever runs as a short-lived, one-shot process (extract, or a single query)
-// that exits and lets the OS reclaim everything — do NOT apply -gc none to
-// graphify-mcp.exe (cmd/mcp), which stays resident for a whole session.
+// The CLI used to need `-gc none` because Boehm GC made this encoder take
+// minutes on V 0.5.2. Built by V3 with the GC, the vlang graph (98 MB) writes
+// as fast as without it on macOS and Windows, at a third of the peak memory
+// (1.3 GB vs 3.8 GB), so every binary now builds with the GC.
 //
 // The write itself is staged through a temp file and published with
 // atomic_replace, so a reader of `path` (a long-lived graphify-mcp.exe, or a

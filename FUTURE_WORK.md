@@ -621,7 +621,7 @@ Workaround, from a worktree:
 
 ```
 mkdir -p /tmp/gfshim && ln -s "$PWD" /tmp/gfshim/graphify
-v -path "/tmp/gfshim|@vlib|@vmodules" -prod -gc none -o bin/graphify cmd/cli
+v -path "/tmp/gfshim|@vlib|@vmodules" -prod -o bin/graphify cmd/cli
 ```
 
 Related: `v test .` from the main checkout also descends into

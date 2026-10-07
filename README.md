@@ -447,24 +447,19 @@ Claude Code and Codex:
 | `get_neighbors(node)` | names of all directly linked symbols |
 | `shortest_path(a, b)` | relationship path between two symbols |
 
-Build and register it with the client you use. `cmd/cli` and `cmd/hooks` both build `-gc none`: both are one-shot, short-lived
-processes — `graphify extract`'s own README section above already explains why
-(Boehm GC's per-call overhead caused a ~500x slowdown on the graph.json write
-path, 616s -> 32s on the full vlang repo). Do NOT add `-gc none` to
-`graphify-mcp` below — it's a long-lived server process and needs bounded
-memory. The binary name gets an `.exe` suffix on Windows only; the rest of
-this doc omits it.
+Build and register it with the client you use. The binary name gets an
+`.exe` suffix on Windows only; the rest of this doc omits it.
 
 Build with current V (the V3 compiler); run the tests with `v test .`.
-Extracting the V compiler repo peaks at about 3.8 GB with `-gc none`. On
+Extracting the V compiler repo peaks at about 1.3 GB. On
 macOS 27, V itself has to be built with `-cc cc` until vlang/v#29744 is
 fixed (a V binary linked by its bundled TCC can start with garbage in its
 globals); graphify's own builds need nothing extra.
 
 ```
-v -prod -gc none -o bin/graphify         cmd/cli     # extract, query, etc.
-v -prod -gc none -o bin/graphify-hook    build cmd/hooks/graphify_hook.vsh   # Claude Code hook, see below
-v -prod          -o bin/graphify-mcp     cmd/mcp
+v -prod -o bin/graphify         cmd/cli     # extract, query, etc.
+v -prod -o bin/graphify-hook    build cmd/hooks/graphify_hook.vsh   # Claude Code hook, see below
+v -prod -o bin/graphify-mcp     cmd/mcp
 bin/graphify extract .                 # produce graphify-out/graph.json first
 ```
 
@@ -639,7 +634,7 @@ hours).
   a hidden `pwsh`, not `v run`. Build it first:
 
   ```
-  v -prod -gc none -o bin\update-vlang-graph.exe build bin\update-vlang-graph.vsh
+  v -prod -o bin\update-vlang-graph.exe build bin\update-vlang-graph.vsh
   ```
 
   Then create the task in the Task Scheduler GUI with:
@@ -749,7 +744,7 @@ Known gaps and evidence-gated future work are recorded in
 - [x] `graphify-out/` bundle: `graph.json`, `GRAPH_REPORT.md`, `manifest.json`
 - [x] `extract` / `query` (BFS/DFS + token budget) / `path` / `explain` / `body` / `skeleton`
 - [x] **resilient extraction** — files parsed in worker-process batches across `nr_cpus()` concurrent workers, so a file that panics V's parser is skipped + reported, not fatal. Torture-tested on the full V compiler repo: 103,253 symbols in ~12s cold, 3 unparseable files isolated.
-- [x] **extraction performance** — the full V compiler repo went 616s → ~12s, via two independent fixes. (1) `graphify.exe` is built `-gc none`: V's default Boehm GC costs roughly 590µs *per call* on the repeated small `strings.Builder` appends that writing `graph.json` is made of, which is not an allocation problem — isolated benchmarks showed the same loop run instantly with the writes stripped. Safe because the CLI is a one-shot process that exits; `graphify-mcp.exe` deliberately keeps the GC, being long-lived. (2) batch workers run concurrently rather than one at a time (32s → 12s), verified byte-identical against the sequential path.
+- [x] **extraction performance** — the full V compiler repo went 616s → ~12s, via two independent fixes. (1) `graphify.exe` is built `-gc none`: V's default Boehm GC costs roughly 590µs *per call* on the repeated small `strings.Builder` appends that writing `graph.json` is made of, which is not an allocation problem — isolated benchmarks showed the same loop run instantly with the writes stripped. Safe because the CLI is a one-shot process that exits; `graphify-mcp.exe` deliberately keeps the GC, being long-lived. (2) batch workers run concurrently rather than one at a time (32s → 12s), verified byte-identical against the sequential path. (Since the V3 port the GC no longer slows the write — 13s with it vs 16s without on Windows, 2.7s vs 2.4s on macOS — so `-gc none` was dropped on 2026-10-07, cutting peak memory from 3.8 GB to 1.3 GB.)
 - [x] Phase 2: MCP server (`query_graph`, `get_node`, `get_neighbors`, `shortest_path`) + Claude Code `.mcp.json` and Codex `config.toml` registration
 - [x] Phase 3: Claude Code wiring — `SKILL.md`, `/graphify`, `SessionStart` + `PreToolUse` hooks, git rebuild hook
 - [x] **SHA256 incremental cache** (`.gf_cache.ndjson`) — a file whose content hash is unchanged since the last `extract` is reused as-is; only new/changed files are reparsed (~11s → ~4s on a full no-op re-run of the V compiler repo). Also tied to the running binary's own hash, not just each file's — see below.

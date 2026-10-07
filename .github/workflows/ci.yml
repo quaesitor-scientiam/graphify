@@ -29,11 +29,11 @@ jobs:
           sudo ./v symlink
 
       - name: Build CLI
-        run: v -prod -gc none -o bin/graphify cmd/cli
+        run: v -prod -o bin/graphify cmd/cli
 
       - name: Build hook binary
         # `build`, not plain `v file.vsh`: a .vsh is otherwise compiled AND run.
-        run: v -prod -gc none -o bin/graphify-hook build cmd/hooks/graphify_hook.vsh
+        run: v -prod -o bin/graphify-hook build cmd/hooks/graphify_hook.vsh
 
       - name: Build MCP server
         run: v -prod -o bin/graphify-mcp cmd/mcp
