@@ -187,6 +187,32 @@ Recovery has one side effect: in script-style files (top-level statements, no
 inside a top-level call, which it records as a declaration with no name.
 Extraction drops nameless function declarations; on vlang there were 338.
 
+Nameless struct and `type` declarations are not dropped. Each is a real
+declaration that V 0.5.2 could not parse and returned empty. On vlang `abcebfc16d` (graph of 7 October) there are 27 such symbols in
+25 files, 21 structs and 6 `type` declarations, with an empty name, the id
+`<module>.` and, since the parser gives them no position, mostly line 1. By
+the first error `-check-syntax` reports for each file: 8 files declare a
+single-letter capital name (`pub struct M`), which V 0.5.2 reserves for
+generic parameters and which vlang's own tests use; the rest have newer syntax
+inside the declaration, such as a generic type alias, sum types with named
+variants, or `mut` or an embedded struct in a struct body. In
+`vlib/v/tests/single_letter_result/single_letter_result.v` the graph has the
+module and the two functions but neither struct `M` nor its field `x`, so the
+`!M` and `?M` in the signatures stay unresolved. Within a module the nameless
+ids collide and are separated as `<id>@<file>`. The effect is small (27 of
+135,723 symbols; 8 of the files are test fixtures for single-letter names) and
+is left as is, because the V3 port removes the class.
+
+Two fixes were considered and not made. Dropping them like nameless functions
+would remove the noise but gain nothing, since the declaration is already
+lost. Reading the name and line from the declaration's first source line in
+`reparse_by_declaration` (`pub struct M {`) would put the struct back and let
+references to it resolve, but not its fields. Neither was checked for edges
+that already point at the nameless ids. One nameless struct, in
+`vlib/strconv/format_thousands.v`, was not traced to a declaration: that
+file's syntax error is a generic constraint on a function, and the function
+itself survives with its parameters and return type missing.
+
 Files whose parse reported an error are listed in the manifest's new `partial`
 list (245 on vlang), counted in `graphify extract`'s output, and classified by
 `graphify diff` as parsed with syntax errors. They are served from the
