@@ -550,16 +550,32 @@ using the wrong paths.
 
 ### `bin/update-vlang-graph.vsh` — scheduled graph refresh
 
-Pulls the target repo and re-extracts only if there were new commits. Wired
-into a scheduler — Windows Task Scheduler, macOS `launchd`, or Linux `cron`,
-see **Scheduling** below; can also be run by hand.
+Pulls the target repo, rebuilds graphify if it is out of date, and
+re-extracts if either changed anything. Wired into a scheduler — Windows Task
+Scheduler, macOS `launchd`, or Linux `cron`, see **Scheduling** below; can
+also be run by hand.
 
 ```
-v run bin/update-vlang-graph.vsh              # git pull, extract only if new commits
-v run bin/update-vlang-graph.vsh -NoPull      # skip the pull, always re-extract
+v run bin/update-vlang-graph.vsh                  # pull; extract if anything changed
+v run bin/update-vlang-graph.vsh -NoPull          # skip the pull, always re-extract
+v run bin/update-vlang-graph.vsh -Commit <sha>    # move up to that commit, not the newest
+v run bin/update-vlang-graph.vsh -NoBuild         # never rebuild graphify
 ```
 
-Logs to `<store>/update.log`.
+The graph depends on graphify's own code and on the V parser it was compiled
+with, the `vlib` of the `v` on `PATH`, so a binary built before either one
+changed extracts a different graph. The script records what each build saw in
+`bin/.build-stamp` (graphify's commit and uncommitted changes, `v version`,
+and `vlib`'s git tree) and, after pulling, rebuilds `bin/graphify` and any
+`graphify-mcp` and `graphify-hook` beside it whenever that no longer matches.
+Each binary is built under a temporary name and swapped in, so an MCP server
+that is running it doesn't block the build on Windows. When the `v` on `PATH`
+is the vlang checkout being extracted, a pull that changes `vlib` triggers the
+rebuild by itself.
+
+`-Commit` lets two machines extract exactly the same source: it fetches and
+fast-forwards the repo to that commit, and refuses to move it back or off its
+branch. Logs to `<store>/update.log`.
 
 ### `bin/switch-vlang-graph.vsh` — branch-aware graph switching
 
@@ -676,10 +692,11 @@ hours).
   `crontab -e` and add
   `0 3 * * * v run /path/to/graphify/bin/update-vlang-graph.vsh >> /path/to/graph_data/cron.log 2>&1`.
 
-On every platform the job runs the prebuilt `bin/graphify`, so after pulling
-extractor changes, rebuild it (build commands above). The first extract after
-a rebuild is a full re-parse, because the incremental cache is tied to the
-binary that wrote it.
+On every platform the job rebuilds `bin/graphify` itself when graphify or V's
+`vlib` has changed (see above). The first extract after a rebuild is a full
+re-parse, because the incremental cache is tied to the binary that wrote it.
+The Windows task's own `update-vlang-graph.exe` is not rebuilt; rebuild it
+after changing the script.
 
 ## Claude Code wiring
 
