@@ -77,8 +77,9 @@ silently render a partial graph: truncation must remain visible to the user.
 
 ## 6. The extractor depends on V's removed V1 frontend
 
-`backend_v.v` imports `v.ast`, `v.parser`, `v.pref`, and `v.token` from V's
-V1 compiler frontend. Upstream V removed V1 and made V3 the default compiler
+The extractor (`backend_v.v`, since split into
+`backend_v_notd_graphify_v3.v` and `backend_common.v`) imports `v.ast`,
+`v.parser`, `v.pref`, and `v.token` from V's V1 compiler frontend. Upstream V removed V1 and made V3 the default compiler
 (vlang commit `2a7447b5e5`, #28556): `vlib/v/ast` no longer exists, and
 `v.parser`, `v.pref`, and `v.token` are now V3 modules with different APIs.
 
@@ -305,6 +306,62 @@ graphify unchanged. Only `backend_v.v` imports V's frontend (`v.ast`,
 On macOS 27, build V with `-cc cc` for this: a V compiler linked by the
 bundled TCC can start with garbage in its zero-initialized globals and panic
 or hang on any program (vlang/v#29744; TCC's Mach-O writer).
+
+### The V3 extractor (in progress, October 2026)
+
+`backend_v3_d_graphify_v3.v` reads V3's flat AST and is built in place of the
+V 0.5.2 extractor with plain V and `-d graphify_v3` (`v -cc cc -d graphify_v3
+-o bin/graphify cmd/cli`); the default `-old-compiler` build is unchanged.
+The test suite passes against both, with the tests of V 0.5.2's own syntax
+errors and pseudo-imports returning early under `-d graphify_v3` and the
+tests of a file-level `$if` expecting every branch there.
+
+It parses with `preserve_comptime_conditionals`, so every branch of a `$if`
+is kept, at file scope and in function bodies: the host dependence of §8 goes
+away, and a call inside `$if debug {}` is still a call. On vlang `abcebfc16d`,
+against the V 0.5.2 extractor on the same tree:
+
+| | V 0.5.2 | V3 |
+|---|---|---|
+| symbols | 135,746 | 136,165 |
+| calls resolved / total | 209,831 / 243,794 | 214,703 / 248,638 |
+| type references resolved / total | 80,442 / 117,066 | 82,273 / 120,023 |
+| embeds resolved / total | 668 / 678 | 668 / 678 |
+| files flagged with syntax errors | 220 (+3 unparseable) | 34 |
+| full extraction | 2.90 s | 2.14 s |
+
+The symbols only V 0.5.2 has are its pseudo-imports (`builtin.closure`,
+2,042), nameless declarations from its parse failures, and generic receivers
+it spelled `Arc<T>` where every other id uses `Arc[T]`. The ones only V3 has
+are other platforms' declarations, the three files V 0.5.2 could not parse,
+and declarations V 0.5.2 lost to syntax it did not know. Of the 34 flagged
+files, 29 are inline assembly for an architecture other than the host's,
+which V3's parser rejects; the rest are in `x/multiwindow` and two test
+fixtures.
+
+Mapping notes, for whoever moves this forward: methods are `fn_decl`s whose
+value is `Recv.name` with the receiver as the first `param`; a static method
+is `T@static@f` (graphify's `T__static__f`); a body-less V declaration in a
+`.c.v` file is a `c_fn_decl` like `fn C.puts`, with the `C.` dropped, so only
+the source line tells them apart; an embedded struct is a `field_decl` named
+by its type as written; V3 records no visibility, so `pub` is read from the
+source line and a field's from the nearest access label; an error diagnostic
+has an empty severity.
+
+Known gaps before it can become the default:
+
+- The body of an `@[if flag ?]` function is dropped when the flag is unset,
+  even with every `$if` kept, so its calls are missing (`elog` in
+  `cmd/tools/vwatch.v`, a few hundred calls on vlang).
+- Signatures show types as written (`fn(string) string`,
+  `protobuf.ProtoScalar`) rather than V 0.5.2's resolved form (`fn (string)
+  string`, `encoding.protobuf.ProtoScalar`): 10,427 signatures differ.
+- Imports are recorded as written, not resolved (`import json2` stays
+  `json2`).
+- A few line numbers differ: a script's `main` starts at its first statement
+  (V 0.5.2 said line 1), and a `const` ends a line earlier.
+- Not yet checked on Windows or Linux, not in CI, and the release build and
+  the hook still use `-old-compiler`.
 
 The spike's probe programs were not kept; the method above is enough to repeat
 it.

@@ -347,7 +347,7 @@ fn regenerate_defines(mut g Graph) {
 
 // main_unit_files returns the files that declare `module main` (or no module),
 // read from their module symbol's signature. Module ids are built from the
-// directory (see module_id in backend_v.v), so `cmd/tools/vself.v` has the
+// directory (see module_id in backend_common.v), so `cmd/tools/vself.v` has the
 // parent `cmd.tools` although it is a standalone program like every other
 // file there; only the declaration says so.
 fn main_unit_files(g Graph) map[string]bool {
@@ -639,7 +639,7 @@ fn resolve_edges(mut g Graph) {
 			}
 		}
 		// site_of answers "where does this edge's `from` live", so it only
-		// needs the kinds backend_v.v actually emits calls/embeds/references
+		// needs the kinds the extractor actually emits calls/embeds/references
 		// edges from: fn/method (calls, and param/receiver/return-type
 		// references), struct (field-type references and embeds), interface
 		// (embeds) and type alias (the types it is built from). Enums are only

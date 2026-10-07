@@ -68,8 +68,8 @@ and `bench/live/count_tokens.ps1`.
 
 ## Design
 
-V only, by design: `backend_v.v` extracts symbols and edges via V's own
-compiler frontend (`v.parser` + `v.ast`), which gives full fidelity with no
+V only, by design: the extractor reads symbols and edges through V's own
+compiler frontend, which gives full fidelity with no
 separate grammar to maintain and no gaps from a minimal binding. An earlier
 draft sketched a second, tree-sitter-backed path for other languages
 (`SourceFile.lang`, a language filter on `Options`, a `backend_ts.v` stub);
