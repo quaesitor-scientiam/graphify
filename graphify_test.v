@@ -2653,3 +2653,95 @@ fn use(s Server) string {
 	assert g.edges.any(it.kind == .defines && it.from == 'demo' && it.to == 'demo::const::answer')
 	assert g.edges.any(it.kind == .calls && it.from == 'demo.use' && it.to == 'demo.Server.username')
 }
+
+fn test_module_qualified_calls_resolve_through_the_import() {
+	// The parser reports `os.join_path(...)` as the raw name `os.join_path`,
+	// and an aliased `json.decode()` with the alias already expanded to the
+	// import path (`x.json2.decode`). A same-named function in an unrelated
+	// module keeps the bare name from being unique on its own.
+	root := write_tree('qualified_calls', {
+		'lib/os/os.v':       'module os
+
+pub fn join_path() {}
+'
+		'lib/x/json2/j.v':   'module json2
+
+pub fn decode() {}
+'
+		'lib/decoy/decoy.v': 'module decoy
+
+pub fn join_path() {}
+
+pub fn decode() {}
+'
+		'app/app.v':         'module app
+
+import os
+import x.json2 as json
+
+fn run() {
+	os.join_path()
+	json.decode()
+}
+'
+	})
+	defer {
+		os.rmdir_all(root) or {}
+	}
+	g := build_graph(Options{ root: root })
+	assert g.edges.any(it.kind == .calls && it.from == 'app.run' && it.to == 'lib.os.join_path')
+	assert g.edges.any(it.kind == .calls && it.from == 'app.run' && it.to == 'lib.x.json2.decode')
+}
+
+fn test_module_qualified_calls_trust_only_one_module() {
+	// `import rand` reaches both `lib.rand` and `lib.crypto.rand`, so
+	// `rand.int` is left alone. And the parser prefixes an unqualified call
+	// with the *current* module's declared name, even `shared()` after
+	// `import util { shared }`, which comes out as `app.shared`: that prefix
+	// means module `cmd.app` itself, so a call to the keyword-named `@select`
+	// (which the parser also prefixes, as with `net.select` in vlib) resolves there,
+	// but `shared` -- declared in no module of that id -- must not be pinned
+	// on another module that merely ends in `app`.
+	root := write_tree('qualified_unsure', {
+		'lib/rand/rand.v':         'module rand
+
+pub fn int() {}
+'
+		'lib/crypto/rand/rand.v':  'module rand
+
+pub fn int() {}
+'
+		'lib/util/util.v':         'module util
+
+pub fn shared() {}
+
+pub fn @select() {}
+'
+		'lib/elsewhere/app/app.v': 'module app
+
+pub fn shared() {}
+'
+		'cmd/app/app.v':           'module app
+
+import rand
+import util { shared }
+
+fn run() {
+	rand.int()
+	shared()
+	select()
+}
+
+fn @select() {}
+'
+	})
+	defer {
+		os.rmdir_all(root) or {}
+	}
+	g := build_graph(Options{ root: root })
+	calls := g.edges.filter(it.kind == .calls && it.from == 'cmd.app.run')
+	assert calls.len == 3
+	assert calls.any(it.to == 'rand.int')
+	assert calls.any(it.to == 'app.shared')
+	assert calls.any(it.to == 'cmd.app.select')
+}
