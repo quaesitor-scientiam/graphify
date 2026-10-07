@@ -328,7 +328,7 @@ pub fn (g Graph) explain(node string) string {
 		out << 'called by     : ${capped(called_by)}'
 	}
 	if any_inferred {
-		out << '  ^ [inferred] = picked among several same-named candidates by locality/visibility, not a name that was unambiguous outright — see the edge provenance note in README'
+		out << '  ^ [inferred] = picked among several same-named candidates by the inferred receiver type or by locality/visibility, not a name that was unambiguous outright — see the edge provenance note in README'
 	}
 	// A call whose name matches several declarations cannot be attributed to
 	// one of them, so index() drops it and the `called by` line above silently

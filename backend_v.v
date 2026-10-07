@@ -709,12 +709,16 @@ fn (mut f V3File) extract_fn(id flat.NodeId, mut syms []Symbol, mut edges []Edge
 		add_ref(fid, base_name(n.typ), f.rel, mut edges, mut rseen)
 	}
 	mut locals := map[string]string{}
+	mut vars := map[string]string{}
+	for pid in params {
+		pn := f.node(pid)
+		if pn.value != '' && pn.value != '_' && pn.typ != '' {
+			vars[pn.value] = 't:' + f.type_text(pn.typ)
+		}
+	}
 	for i := start; i < params.len; i++ {
 		pn := f.node(params[i])
-		t := f.recv_type(pn.typ)
-		if pn.value != '' && pn.value != '_'
-			&& t.bytes().all(it.is_alnum() || it == `_` || it == `.`)
-			&& !is_generic_param(t.all_after_last('.')) {
+		if t := f.param_type(pn) {
 			locals[pn.value] = t
 		}
 	}
@@ -724,6 +728,7 @@ fn (mut f V3File) extract_fn(id flat.NodeId, mut syms []Symbol, mut edges []Edge
 		recv_type: if is_method { '${f.mod_id}.${recv_typ.trim_left('&')}' } else { '' }
 		file:      f.rel
 		locals:    locals
+		vars:      vars
 	}
 	mut seen := map[string]bool{}
 	mut body := []flat.NodeId{}
@@ -932,6 +937,17 @@ fn (mut f V3File) extract_type(id flat.NodeId, mut syms []Symbol, mut edges []Ed
 	}
 }
 
+// param_type is the type id of a parameter whose type is a plain name, for
+// V3CallCtx.locals.
+fn (f &V3File) param_type(pn &flat.Node) ?string {
+	t := f.recv_type(pn.typ)
+	if pn.value != '' && pn.value != '_' && t.bytes().all(it.is_alnum() || it == `_` || it == `.`)
+		&& !is_generic_param(t.all_after_last('.')) {
+		return t
+	}
+	return none
+}
+
 // fn_type_parts returns the parameter and return types of a function type
 // written as text, `fn(id NodeId) bool` -> [NodeId, bool].
 fn fn_type_parts(t string) []string {
@@ -952,18 +968,49 @@ fn fn_type_parts(t string) []string {
 }
 
 // V3CallCtx is what the call walk knows at one point in a body: the enclosing
-// declaration, its receiver, and the locals whose type is written in the code.
+// declaration, its receiver, the locals whose type is written in the code, and
+// a type recipe (see recipe) for each variable whose type can be worked out.
 struct V3CallCtx {
 	from      string
 	recv_name string
 	recv_type string
 	file      string
-	locals    map[string]string
+mut:
+	locals map[string]string
+	vars   map[string]string
 }
 
-// walk_list walks sibling nodes in order. A `:=` that names its type
-// (`x := Foo{}`) types `x` for the siblings after it and nothing outside this
-// list, which is ordinary lexical scoping.
+// recipe_sep separates the steps of a type recipe. It is a control character
+// that never occurs in V source and that the batch protocol passes through.
+const recipe_sep = '\x05'
+
+// methods_with_it are the array methods whose argument is an expression over
+// each element, named `it`.
+const methods_with_it = ['filter', 'map', 'any', 'all', 'count']
+
+// with_vars returns `ctx` with `names` set to the matching recipes; an empty
+// recipe forgets the name, since the new variable shadows the outer one.
+fn (ctx V3CallCtx) with_vars(names []string, recipes []string) V3CallCtx {
+	mut vars := ctx.vars.clone()
+	mut locals := ctx.locals.clone()
+	for i, name in names {
+		locals.delete(name)
+		if recipes[i] == '' {
+			vars.delete(name)
+		} else {
+			vars[name] = recipes[i]
+		}
+	}
+	return V3CallCtx{
+		...ctx
+		locals: locals
+		vars:   vars
+	}
+}
+
+// walk_list walks sibling nodes in order. A `:=` types its variables for the
+// siblings after it and nothing outside this list, which is ordinary lexical
+// scoping.
 fn (mut f V3File) walk_list(ids []flat.NodeId, ctx V3CallCtx, mut edges []Edge, mut seen map[string]bool) {
 	mut cur := ctx
 	for id in ids {
@@ -972,26 +1019,127 @@ fn (mut f V3File) walk_list(ids []flat.NodeId, ctx V3CallCtx, mut edges []Edge, 
 }
 
 fn (mut f V3File) walk(id flat.NodeId, ctx V3CallCtx, mut edges []Edge, mut seen map[string]bool) V3CallCtx {
+	if int(id) < 0 {
+		return ctx
+	}
 	n := f.node(id)
 	kids := f.kids(id)
-	if n.kind == .call && kids.len > 0 {
-		f.record_call(kids[0], ctx, mut edges, mut seen)
-	}
-	f.walk_list(kids, ctx, mut edges, mut seen)
-	if n.kind == .decl_assign && kids.len == 2 {
-		left := f.node(kids[0])
-		if left.kind == .ident {
-			if t := f.struct_init_type(kids[1]) {
-				mut locals := ctx.locals.clone()
-				locals[left.value] = f.recv_type(t)
-				return V3CallCtx{
-					...ctx
-					locals: locals
+	match n.kind {
+		.call {
+			if kids.len > 0 {
+				f.record_call(kids[0], ctx, mut edges, mut seen)
+				callee := f.node(kids[0])
+				ck := f.kids(kids[0])
+				if callee.kind == .selector && callee.value in methods_with_it && ck.len > 0 {
+					// `xs.filter(it.ok())`: `it` is one element of `xs`
+					r := f.recipe(ck[0], ctx)
+					f.walk(kids[0], ctx, mut edges, mut seen)
+					it_recipe := if r == '' { '' } else { r + recipe_sep + '[]' }
+					it_ctx := ctx.with_vars(['it'], [it_recipe])
+					f.walk_list(kids[1..], it_ctx, mut edges, mut seen)
+					return ctx
 				}
 			}
 		}
+		.for_in_stmt {
+			if kids.len >= 3 {
+				// `for v in xs`, `for k, v in xs`: the second slot is empty
+				// without a key
+				iter := f.node(kids[2])
+				r := f.recipe(kids[2], ctx)
+				mut names := []string{}
+				mut recipes := []string{}
+				if iter.kind == .range {
+					names << f.node(kids[0]).value
+					recipes << 't:int'
+				} else if int(kids[1]) < 0 {
+					names << f.node(kids[0]).value
+					recipes << if r == '' { '' } else { r + recipe_sep + '[]' }
+				} else {
+					names << f.node(kids[0]).value
+					recipes << if r == '' { '' } else { r + recipe_sep + 'k' }
+					names << f.node(kids[1]).value
+					recipes << if r == '' { '' } else { r + recipe_sep + '[]' }
+				}
+				f.walk_list(kids, ctx.with_vars(names, recipes), mut edges, mut seen)
+				return ctx
+			}
+		}
+		.or_expr {
+			// inside `or { ... }`, `err` is the error
+			if kids.len == 2 {
+				f.walk(kids[0], ctx, mut edges, mut seen)
+				f.walk(kids[1], ctx.with_vars(['err'], ['t:IError']), mut edges, mut seen)
+				return ctx
+			}
+		}
+		.fn_literal {
+			mut names := []string{}
+			mut recipes := []string{}
+			for k in kids {
+				p := f.node(k)
+				if p.kind == .param && p.value != '' {
+					names << p.value
+					recipes << if p.typ != '' { 't:' + f.type_text(p.typ) } else { '' }
+				}
+			}
+			mut inner := ctx.with_vars(names, recipes)
+			for k in kids {
+				p := f.node(k)
+				if p.kind == .param {
+					if t := f.param_type(p) {
+						inner.locals[p.value] = t
+					}
+				}
+			}
+			f.walk_list(kids, inner, mut edges, mut seen)
+			return ctx
+		}
+		else {}
+	}
+	f.walk_list(kids, ctx, mut edges, mut seen)
+	if n.kind == .decl_assign {
+		return f.declare(n, kids, ctx)
 	}
 	return ctx
+}
+
+// declare returns `ctx` with the variables a `:=` declares. `a := x` has the
+// children [a, x], `a, b := x, y` [a, x, b, y], and `a, b := f()` [a, f(), b].
+fn (f &V3File) declare(n &flat.Node, kids []flat.NodeId, ctx V3CallCtx) V3CallCtx {
+	count := if n.value == '' { 1 } else { n.value.int() }
+	mut names := []string{}
+	mut recipes := []string{}
+	if kids.len == 2 * count {
+		for i := 0; i < kids.len; i += 2 {
+			names << f.node(kids[i]).value
+			recipes << f.recipe(kids[i + 1], ctx)
+		}
+	} else if count > 1 && kids.len == count + 1 {
+		r := f.recipe(kids[1], ctx)
+		mut lhs := [kids[0]]
+		lhs << kids[2..]
+		for i, k in lhs {
+			names << f.node(k).value
+			recipes << if r == '' { '' } else { r + recipe_sep + '#${i}' }
+		}
+	} else {
+		return ctx
+	}
+	mut out := ctx.with_vars(names, recipes)
+	if count == 1 && f.node(kids[0]).kind == .ident {
+		// a struct literal names its type outright, which resolves without
+		// the graph (recv_type)
+		if t := f.struct_init_type(kids[1]) {
+			mut locals := out.locals.clone()
+			locals[names[0]] = f.recv_type(t)
+			out = V3CallCtx{
+				...out
+				locals: locals
+			}
+		}
+	}
+	return out
 }
 
 // struct_init_type is the type of a struct literal written directly, `Foo{}`
@@ -1010,78 +1158,249 @@ fn (f &V3File) struct_init_type(id flat.NodeId) ?string {
 	return none
 }
 
-// record_call adds one `calls` edge per distinct callee name in a body: a
-// plain `foo()`, a module-qualified `os.join_path()` named by the module's
-// path (`json.decode` -> `x.json2.decode`), a static `Box.new()` as
-// `Box__static__new`, or a method `x.foo()` with the receiver's type when it is
-// written in the code.
-fn (mut f V3File) record_call(callee_id flat.NodeId, ctx V3CallCtx, mut edges []Edge, mut seen map[string]bool) {
+// recipe says how to find the type of the expression `id` from what the file
+// states, as steps that resolve_edges follows through the whole graph (see
+// infer.v): a start, `t:<type>` for a type written here (in this file's
+// terms, as type_text renders it) or `c:<callee>` for the return type of a
+// call, named as record_call names it; then any of `m:<name>` (the return type
+// of that method), `f:<name>` (that field's type), `[]` (an element), `k` (a
+// map's key, or an array's index), `a` (an array of it) and `#<i>` (that value
+// of a multi-value return), joined by recipe_sep. It is '' when the type
+// can't be worked out this way.
+fn (f &V3File) recipe(id flat.NodeId, ctx V3CallCtx) string {
+	if int(id) < 0 {
+		return ''
+	}
+	n := f.node(id)
+	kids := f.kids(id)
+	match n.kind {
+		.string_literal, .string_interp {
+			return 't:string'
+		}
+		.int_literal {
+			return 't:int'
+		}
+		.float_literal {
+			return 't:f64'
+		}
+		.bool_literal {
+			return 't:bool'
+		}
+		.char_literal {
+			return 't:rune'
+		}
+		.ident {
+			return ctx.vars[n.value] or { '' }
+		}
+		.paren, .or_expr {
+			return if kids.len > 0 { f.recipe(kids[0], ctx) } else { '' }
+		}
+		.prefix {
+			if kids.len == 1 {
+				if n.op in [.amp, .mul, .minus, .bit_not] {
+					return f.recipe(kids[0], ctx)
+				}
+				if n.op == .not {
+					return 't:bool'
+				}
+			}
+		}
+		.struct_init, .map_init, .cast_expr, .as_expr {
+			if n.value != '' {
+				return 't:' + f.type_text(n.value)
+			}
+		}
+		.array_init {
+			t := if n.typ != '' { n.typ } else { n.value }
+			if t != '' {
+				return 't:' + f.type_text(t)
+			}
+		}
+		.spawn_expr {
+			return 't:thread'
+		}
+		.array_literal {
+			if kids.len > 0 {
+				r := f.recipe(kids[0], ctx)
+				if r != '' {
+					return r + recipe_sep + 'a'
+				}
+			}
+		}
+		.index {
+			if kids.len > 0 {
+				r := f.recipe(kids[0], ctx)
+				if r == '' || n.value == 'range' {
+					// a slice has the type of what it slices
+					return r
+				}
+				return r + recipe_sep + '[]'
+			}
+		}
+		.selector {
+			if n.value in ['len', 'cap'] {
+				return 't:int'
+			}
+			if kids.len == 1 {
+				t := f.node(kids[0])
+				if t.kind == .ident && (t.value in f.imports || t.value in ['C', 'JS']) {
+					// a module's const, whose type the graph doesn't record
+					return ''
+				}
+				r := f.recipe(kids[0], ctx)
+				if r != '' {
+					return r + recipe_sep + 'f:' + n.value
+				}
+			}
+		}
+		.call {
+			if kids.len == 0 {
+				return ''
+			}
+			name, is_method, target := f.callee(kids[0], ctx)
+			if name == '' {
+				return ''
+			}
+			if !is_method {
+				return 'c:' + name
+			}
+			r := f.recipe(target, ctx)
+			if r != '' {
+				return r + recipe_sep + 'm:' + name
+			}
+		}
+		.if_expr {
+			for k in kids {
+				if f.node(k).kind == .block {
+					return f.last_value(k, ctx)
+				}
+			}
+		}
+		.match_stmt {
+			for k in kids {
+				if f.node(k).kind == .match_branch {
+					return f.last_value(k, ctx)
+				}
+			}
+		}
+		.infix {
+			if n.op in [.eq, .ne, .lt, .gt, .le, .ge, .logical_and, .logical_or] {
+				return 't:bool'
+			}
+			if n.op in [.plus, .minus, .mul, .div, .mod] && kids.len > 0 {
+				return f.recipe(kids[0], ctx)
+			}
+		}
+		else {}
+	}
+	return ''
+}
+
+// last_value is the recipe of the value a block or match branch ends with.
+fn (f &V3File) last_value(id flat.NodeId, ctx V3CallCtx) string {
+	kids := f.kids(id)
+	if kids.len == 0 {
+		return ''
+	}
+	last := f.node(kids.last())
+	lk := f.kids(kids.last())
+	if last.kind == .expr_stmt && lk.len > 0 {
+		return f.recipe(lk[0], ctx)
+	}
+	return ''
+}
+
+// callee names the function a call refers to: a plain `foo()`, a
+// module-qualified `os.join_path()` named by the module's path (`json.decode`
+// -> `x.json2.decode`), a static `Box.new()` as `Box__static__new`, or a
+// method `x.foo()` as `foo`, with the receiver expression `x`.
+fn (f &V3File) callee(callee_id flat.NodeId, ctx V3CallCtx) (string, bool, flat.NodeId) {
 	mut cid := callee_id
 	if f.node(cid).kind == .index {
 		// a generic call, `f[int](x)`
 		ks := f.kids(cid)
 		if ks.len == 0 {
-			return
+			return '', false, flat.NodeId(-1)
 		}
 		cid = ks[0]
 	}
 	c := f.node(cid)
-	mut name := ''
-	mut is_method := false
-	mut rt := ''
 	if c.kind == .ident {
-		name = c.value.trim_left('@')
+		mut name := c.value.trim_left('@')
 		if mod := f.selected[name] {
 			name = '${mod}.${name}'
 		}
-	} else if c.kind == .selector {
-		ks := f.kids(cid)
-		if ks.len == 0 {
-			return
-		}
-		target := f.node(ks[0])
-		if target.kind == .selector && c.value.len > 0 && target.value.len > 0
-			&& target.value[0].is_capital() {
-			// a static method through its module, `flat.FlatAst.new()`
-			tk := f.kids(ks[0])
-			if tk.len > 0 && f.node(tk[0]).kind == .ident {
-				if mod := f.imports[f.node(tk[0]).value] {
-					name = '${mod}.${target.value}__static__${c.value}'
-				}
-			}
-		}
-		if name != '' {
-		} else if target.kind == .ident && (target.value in ['C', 'JS'] || target.value in f.imports) {
-			mod := f.imports[target.value] or { target.value }
-			name = '${mod}.${c.value}'
-		} else if target.kind == .ident && target.value.len > 0 && target.value[0].is_capital()
-			&& target.value !in ctx.locals {
-			name = '${target.value}__static__${c.value}'
-		} else {
-			name = c.value
-			is_method = true
-			if target.kind == .ident {
-				if ctx.recv_name != '' && target.value == ctx.recv_name {
-					rt = ctx.recv_type
-				} else if t := ctx.locals[target.value] {
-					rt = t
-				}
-			} else if target.kind == .struct_init && target.value != '' {
-				rt = f.recv_type(target.value)
+		return name, false, flat.NodeId(-1)
+	}
+	if c.kind != .selector {
+		return '', false, flat.NodeId(-1)
+	}
+	ks := f.kids(cid)
+	if ks.len == 0 {
+		return '', false, flat.NodeId(-1)
+	}
+	target := f.node(ks[0])
+	if target.kind == .selector && c.value.len > 0 && target.value.len > 0
+		&& target.value[0].is_capital() {
+		// a static method through its module, `flat.FlatAst.new()`
+		tk := f.kids(ks[0])
+		if tk.len > 0 && f.node(tk[0]).kind == .ident {
+			if mod := f.imports[f.node(tk[0]).value] {
+				return '${mod}.${target.value}__static__${c.value}', false, flat.NodeId(-1)
 			}
 		}
 	}
-	if name == '' || name in seen || name.starts_with('$') || name.starts_with('__v_') {
+	if target.kind == .ident && (target.value in ['C', 'JS'] || target.value in f.imports)
+		&& target.value !in ctx.vars {
+		mod := f.imports[target.value] or { target.value }
+		return '${mod}.${c.value}', false, flat.NodeId(-1)
+	}
+	if target.kind == .ident && target.value.len > 0 && target.value[0].is_capital()
+		&& target.value !in ctx.locals {
+		return '${target.value}__static__${c.value}', false, flat.NodeId(-1)
+	}
+	return c.value, true, ks[0]
+}
+
+// record_call adds one `calls` edge per distinct callee in a body (see
+// callee). A method call carries its receiver's type when the code writes it
+// (recv_type), and otherwise the recipe for working it out (recv_recipe), so
+// `a.len()` and `b.len()` on different types are separate edges.
+fn (mut f V3File) record_call(callee_id flat.NodeId, ctx V3CallCtx, mut edges []Edge, mut seen map[string]bool) {
+	name, is_method, target_id := f.callee(callee_id, ctx)
+	mut rt := ''
+	mut recipe := ''
+	if is_method {
+		target := f.node(target_id)
+		if target.kind == .ident {
+			if ctx.recv_name != '' && target.value == ctx.recv_name {
+				rt = ctx.recv_type
+			} else if t := ctx.locals[target.value] {
+				rt = t
+			}
+		} else if target.kind == .struct_init && target.value != '' {
+			rt = f.recv_type(target.value)
+		}
+		if rt == '' {
+			recipe = f.recipe(target_id, ctx)
+		}
+	}
+	if name == '' || name.starts_with('$') || name.starts_with('__v_') {
 		// `$` and `__v_` names are compile-time forms and V3's own stand-ins
 		return
 	}
-	seen[name] = true
+	key := '${name}\x00${rt}\x00${recipe}'
+	if key in seen {
+		return
+	}
+	seen[key] = true
 	edges << Edge{
-		from:      ctx.from
-		to:        name
-		kind:      .calls
-		is_method: is_method
-		recv_type: rt
-		file:      ctx.file
+		from:        ctx.from
+		to:          name
+		kind:        .calls
+		is_method:   is_method
+		recv_type:   rt
+		recv_recipe: recipe
+		file:        ctx.file
 	}
 }
