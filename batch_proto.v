@@ -10,7 +10,7 @@ module graphify
 //   edge_section: edge\x02edge\x02... (empty if no edges)
 //   parse_error : FileResult.parse_error (empty if the file parsed cleanly)
 //   sym  : id\x01name\x01kind_int\x01sig\x01file\x01line\x01end_line\x01is_pub\x01parent\x01doc
-//   edge : from\x01to\x01kind_int\x01is_method\x01recv_type
+//   edge : from\x01to\x01kind_int\x01is_method\x01recv_type\x01file
 //
 // \x01 = field sep, \x02 = record sep, \x03 = section sep, \x04 = encoded
 // newline. Signatures and doc strings may contain any printable char; the only
@@ -52,7 +52,7 @@ pub fn encode_file_result(fr FileResult) string {
 			'1'
 		} else {
 			'0'
-		}}${bp_fs}${bp_clean(e.recv_type)}'
+		}}${bp_fs}${bp_clean(e.recv_type)}${bp_fs}${bp_clean(e.file)}'
 	}
 	return sym_parts.join(bp_rs) + bp_ss + edge_parts.join(bp_rs) + bp_ss + bp_clean(fr.parse_error)
 }
@@ -96,6 +96,9 @@ pub fn decode_file_result(line string) FileResult {
 				// previous build decodes instead of panicking on f[3]
 				is_method: f.len > 3 && f[3] == '1'
 				recv_type: if f.len > 4 { f[4] } else { '' }
+				// disambiguate_ids renames an edge's `from` by this file; without
+				// it every call from a renamed declaration pointed at `id@`
+				file: if f.len > 5 { f[5] } else { '' }
 			}
 		}
 	}

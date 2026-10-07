@@ -2477,6 +2477,28 @@ fn test_file_result_parse_error_round_trips_through_the_batch_protocol() {
 	assert clean.parse_error == ''
 }
 
+fn test_edge_file_round_trips_through_the_batch_protocol() {
+	// disambiguate_ids renames a calls edge's `from` to `${from}@${file}`. The
+	// protocol used to drop Edge.file, so on the worker path that `graphify
+	// extract` takes, every call from a renamed declaration (each standalone
+	// program's `main`) came out from `main@`, an id that does not exist.
+	// The typed local matters: track_assign rebuilt the call context after it
+	// and dropped the file, so every later call in the body lost it too.
+	fr := extract_v_text_result('module main
+
+struct Foo {}
+
+fn main() {
+	f := Foo{}
+	println(f)
+}
+', 'tools/a.v')
+	back := decode_file_result(encode_file_result(fr))
+	calls := back.edges.filter(it.kind == .calls)
+	assert calls.len > 0
+	assert calls.all(it.file == 'tools/a.v')
+}
+
 fn test_cache_round_trips_a_partial_results_parse_error() {
 	// A file with syntax errors that does not change is reused from the cache
 	// next run rather than reparsed, so the cache must keep its parse error.

@@ -747,14 +747,11 @@ fn track_assign(stmt ast.AssignStmt, ctx CallCtx) CallCtx {
 	}
 	mut locals := ctx.locals.clone()
 	locals[name] = recv_type_str(ctx.table, ctx.mod_id, ctx.v_mod, si.typ)
+	// spread, so no field is dropped: listing them by hand once lost `file`,
+	// and with it the disambiguated `from` of every later call in the body
 	return CallCtx{
-		from:      ctx.from
-		recv_name: ctx.recv_name
-		recv_type: ctx.recv_type
-		table:     ctx.table
-		mod_id:    ctx.mod_id
-		v_mod:     ctx.v_mod
-		locals:    locals
+		...ctx
+		locals: locals
 	}
 }
 
