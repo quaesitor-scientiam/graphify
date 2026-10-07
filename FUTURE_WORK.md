@@ -285,7 +285,26 @@ different compilers, and both define `v.parser`. They can coexist as two
 worker binaries behind the existing `_parse-batch` protocol, which would allow
 V1 as a per-file fallback and as a cross-check during the transition. That
 requires the core module to build without either frontend, under both
-compilers, which has not been checked.
+compilers.
+
+**The core builds under V3 (checked October 2026).** With `backend_v.v`
+replaced by a stub that keeps its public functions (`extract_v_file`,
+`extract_v_text` and their `_result` forms, plus the frontend-free helpers
+`module_id`, `import_id`, `strip_generic_args`, `is_generic_param`) and
+returns no symbols, every other file compiles under plain V3 (vlang
+`abcebfc16d`) without a change: `cmd/cli`, `cmd/mcp` and the hook script all
+build. Of the 104 tests, the 61 that do not extract source pass; the other 43
+fail only because the stub extracts nothing. On the real vlang graph, the
+V3-built CLI gives byte-identical output to the V1-built one for `overview`,
+`explain`, `query`, `path` and `diff`, and with `-prod` loads and summarizes
+the graph in 0.47 s against 0.38 s. So the port is confined to the
+extractor: a V3 `backend_v.v` behind the same functions, with the rest of
+graphify unchanged. Only `backend_v.v` imports V's frontend (`v.ast`,
+`v.parser`, `v.pref`, `v.token`, `v.scanner`).
+
+On macOS 27, build V with `-cc cc` for this: a V compiler linked by the
+bundled TCC can start with garbage in its zero-initialized globals and panic
+or hang on any program (vlang/v#29744; TCC's Mach-O writer).
 
 The spike's probe programs were not kept; the method above is enough to repeat
 it.
