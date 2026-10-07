@@ -14,3 +14,6 @@ graphify.config.ps1
 graphify.config.json
 .mcp.json
 .claude/settings.json
+bin/.build-stamp
+bin/*.old
+bin/*.new
