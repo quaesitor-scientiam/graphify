@@ -355,6 +355,7 @@ fn extract_from_ast(file &ast.File, mut table ast.Table, rel string, src []strin
 					mod_id: mod_id
 					v_mod:  v_mod
 					file:   rel
+					locals: param_types(stmt, table, mod_id, v_mod)
 				}, mut edges)
 			}
 			ast.StructDecl {
@@ -881,6 +882,27 @@ fn struct_init_of(e ast.Expr) ast.StructInit {
 // prefix (see its own doc comment), so this re-adds it only when clean_type
 // actually stripped something, and leaves an already-qualified foreign type
 // (`other.Bar`) untouched.
+// param_types maps each named parameter of `fd` to its type, as walk_call
+// stamps it on a method call: `s.contains(x)` inside `fn f(s string)` needs no
+// inference, the type is written on the declaration just like a receiver's.
+// Only plain named types are kept; an array, map, option or function type is
+// not the receiver type of any declared method.
+fn param_types(fd ast.FnDecl, table &ast.Table, mod_id string, v_mod string) map[string]string {
+	mut out := map[string]string{}
+	start := if fd.is_method { 1 } else { 0 }
+	for i := start; i < fd.params.len; i++ {
+		p := fd.params[i]
+		if p.name == '' || p.name == '_' || p.typ == 0 {
+			continue
+		}
+		t := recv_type_str(table, mod_id, v_mod, p.typ)
+		if t.bytes().all(it.is_alnum() || it == `_` || it == `.`) && !is_generic_param(t.all_after_last('.')) {
+			out[p.name] = t
+		}
+	}
+	return out
+}
+
 fn recv_type_str(table &ast.Table, mod_id string, v_mod string, typ ast.Type) string {
 	resolved := clean_type(table, typ, v_mod).trim_left('&')
 	return if resolved.contains('.') { resolved } else { '${mod_id}.${resolved}' }

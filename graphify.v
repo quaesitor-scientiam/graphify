@@ -799,6 +799,9 @@ fn resolve_callee(e Edge, by_name map[string][]CallCand, site_of map[string]Decl
 				return CallResolution{ id: c.id, inferred: false }
 			}
 		}
+		if res := resolve_by_receiver_type(e, cands, site_of) {
+			return res
+		}
 	}
 	mut narrowed := []CallCand{}
 	for c in cands {
@@ -870,6 +873,51 @@ mut:
 	declared string            // the name on the file's `module` line
 	is_main  bool              // in a standalone program, see main_unit_files
 	prefixes map[string]string // import path or alias -> import path
+}
+
+// resolve_by_receiver_type resolves a method call whose receiver type is known
+// (see walk_call) but whose type id is not `e.recv_type` verbatim: the type is
+// written as V names it, `string` or `strings.Builder`, while ids carry the
+// declaring directory, `vlib.builtin.string` and `vlib.strings.Builder`. It
+// takes the methods named `<Type>.<name>` and keeps the first tier with any:
+// the caller's own file, its module, then a module the file imports or
+// builtin, the places V would find that type. The first two are as certain as
+// an exact match; matching an import by trailing segments is inferred.
+fn resolve_by_receiver_type(e Edge, cands []CallCand, site_of map[string]DeclSite) ?CallResolution {
+	tshort := e.recv_type.all_after_last('.')
+	qual := e.recv_type.all_before_last('.')
+	suffix := '.${tshort}.${e.to}'
+	caller := site_of[e.from] or { DeclSite{} }
+	file := if e.file != '' { e.file } else { caller.file }
+	mut same_file := []CallCand{}
+	mut own_mod := []CallCand{}
+	mut reachable := []CallCand{}
+	for c in cands {
+		if !c.is_method || !c.id.all_before('@').ends_with(suffix) || test_private(c.file, file) {
+			continue
+		}
+		if c.file == file {
+			same_file << c
+		}
+		if c.mod == qual && !caller.is_main {
+			own_mod << c
+		}
+		// a type from another module is written with the module the file
+		// imported it by (`strings.Builder`), so that names its module
+		if import_reaches(c.mod, 'builtin') || (qual != caller.mod && import_reaches(c.mod, qual)) {
+			reachable << c
+		}
+	}
+	if id := only_id(same_file) {
+		return CallResolution{ id: id, inferred: false }
+	}
+	if id := only_id(own_mod) {
+		return CallResolution{ id: id, inferred: false }
+	}
+	if id := only_id(reachable) {
+		return CallResolution{ id: id, inferred: true }
+	}
+	return none
 }
 
 // resolve_qualified_callee resolves a raw callee that the parser reported with

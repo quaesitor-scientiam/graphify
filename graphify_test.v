@@ -3000,3 +3000,51 @@ fn test_report_counts_builtin_type_references_apart_from_unresolved() {
 	assert r.contains('- references: extracted 0, inferred 0, built-in 2, unresolved 1')
 	assert r.contains('- calls: extracted 0, inferred 0, unresolved 1')
 }
+
+fn test_parameter_types_resolve_method_calls() {
+	// `s.contains(x)` inside `fn f(s string)` needs no inference: the type is
+	// written on the declaration. Each call has a same-named decoy method in
+	// the caller's own module, which the old same-module step picked instead.
+	root := write_tree('param_types', {
+		'lib/builtin/string.v':  'module builtin
+
+pub struct string {}
+
+pub fn (s string) contains(x string) bool {
+	return false
+}
+'
+		'lib/strings/builder.v': 'module strings
+
+pub struct Builder {}
+
+pub fn (mut b Builder) write_string(s string) {}
+'
+		'app/app.v':             'module app
+
+import strings
+
+struct Scope {}
+
+fn (s Scope) contains(x string) bool {
+	return false
+}
+
+fn (s Scope) write_string(x string) {}
+
+fn check(name string, mut sb strings.Builder) bool {
+	sb.write_string(name)
+	return name.contains(".")
+}
+'
+	})
+	defer {
+		os.rmdir_all(root) or {}
+	}
+	g := build_graph(Options{ root: root })
+	assert g.edges.any(it.kind == .calls && it.from == 'app.check'
+		&& it.to == 'lib.builtin.string.contains')
+	assert g.edges.any(it.kind == .calls && it.from == 'app.check'
+		&& it.to == 'lib.strings.Builder.write_string')
+	assert !g.edges.any(it.kind == .calls && it.from == 'app.check' && it.to.starts_with('app.Scope'))
+}
