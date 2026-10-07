@@ -3462,3 +3462,169 @@ fn test_type_text_helpers() {
 	assert elem_type('string') or { '' } == 'u8'
 	assert tuple_part('(int, map[string]int)', 1) or { '' } == 'map[string]int'
 }
+
+fn graph_of(files map[string]string) Graph {
+	mut g := Graph{}
+	for rel, src in files {
+		syms, edges := extract_v_text(src, rel)
+		g.symbols << syms
+		g.edges << edges
+	}
+	resolve_edges(mut g)
+	return g
+}
+
+fn test_interface_members_are_symbols() {
+	g := graph_of({
+		'lib/lib.v': 'module lib
+
+pub interface Logger {
+	Base
+	level int
+mut:
+	log(msg string) !
+	name() string
+}
+
+pub interface Base {
+	id() int
+}
+'
+	})
+	log := g.symbols.filter(it.id == 'lib.Logger.log')
+	assert log.len == 1
+	assert log[0].kind == .method
+	assert log[0].signature == 'fn (Logger) log(msg string) !'
+	name := g.symbols.filter(it.id == 'lib.Logger.name')
+	assert name.len == 1 && name[0].signature == 'fn (Logger) name() string'
+	level := g.symbols.filter(it.id == 'lib.Logger.level')
+	assert level.len == 1 && level[0].kind == .field && level[0].parent == 'lib.Logger'
+	assert g.symbols.filter(it.id == 'lib.Logger.Base').len == 0 // an embed, not a member
+	assert g.edges.any(it.kind == .embeds && it.from == 'lib.Logger' && it.to == 'lib.Base')
+}
+
+fn test_calls_through_interfaces_and_embeds_resolve() {
+	g := graph_of({
+		'vlib/builtin/err.v': 'module builtin
+
+pub interface IError {
+	msg() string
+	code() int
+}
+
+pub fn (s string) contains(x string) bool {
+	return true
+}
+'
+		'lib/lib.v':          'module lib
+
+pub struct Inner {}
+
+pub fn (i Inner) msg() string {
+	return ""
+}
+
+pub fn (i Inner) contains(x string) bool {
+	return false
+}
+
+pub struct Outer {
+	Inner
+}
+
+pub interface Source {
+	read() string
+}
+
+pub struct Holder {
+pub:
+	src Source
+}
+
+pub struct File {}
+
+pub fn (f File) read() string {
+	return ""
+}
+
+pub fn fail() ! {
+}
+'
+		'app/main.v':         'module main
+
+import lib
+
+fn run(o lib.Outer, h lib.Holder) {
+	lib.fail() or { err.msg().contains("x") }
+	o.msg()
+	h.src.read()
+}
+'
+	})
+	calls := g.edges.filter(it.kind == .calls && it.from == 'app.run').map(it.to)
+	assert 'vlib.builtin.IError.msg' in calls
+	assert 'vlib.builtin.string.contains' in calls
+	assert 'lib.Inner.contains' !in calls
+	assert 'lib.Inner.msg' in calls // promoted from the embedded struct
+	assert 'lib.Source.read' in calls
+	assert 'lib.File.read' !in calls
+}
+
+fn test_calls_without_declarations_are_undeclared() {
+	g := graph_of({
+		'lib/lib.v':  'module lib
+
+pub type Callback = fn (int) int
+
+pub struct Box {
+pub:
+	cb   fn (int) string
+	hook Callback
+}
+
+pub fn cb(x int) string {
+	return ""
+}
+
+pub fn hook(x int) int {
+	return x
+}
+
+pub fn work() {
+}
+
+pub fn apply(f fn (int) int) int {
+	return f(1)
+}
+'
+		'app/main.v': 'module main
+
+import lib
+
+fn run(b lib.Box) {
+	b.cb(1)
+	b.hook(2)
+	t := spawn lib.work()
+	t.wait()
+	g := fn (x int) int {
+		return x
+	}
+	g(3)
+}
+'
+	})
+	run := g.edges.filter(it.kind == .calls && it.from == 'app.run')
+	for name in ['cb', 'hook', 'wait', 'g'] {
+		e := run.filter(it.to == name)
+		assert e.len == 1, name
+		assert e[0].provenance == .undeclared, name
+	}
+	// `f(1)` calls the parameter, not some function named `f`
+	apply := g.edges.filter(it.kind == .calls && it.from == 'lib.apply')
+	assert apply.len == 1 && apply[0].to == 'f' && apply[0].provenance == .undeclared
+	assert !run.any(it.to == 'lib.cb' || it.to == 'lib.hook')
+	report := g.report()
+	assert report.contains('undeclared 5')
+	// and `explain` doesn't count them as possible callers of `lib.cb`
+	assert !g.explain('lib.cb').contains('possibly called by')
+}
