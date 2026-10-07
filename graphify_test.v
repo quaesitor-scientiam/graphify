@@ -3331,3 +3331,19 @@ fn test_imports_resolve_to_the_module_they_mean_in_the_tree() {
 	t := extract_v_text_result('module m\n\nimport geometry\n', 'vlib/crypto/x/m.v')
 	assert t.symbols.any(it.kind == .import_ && it.name == 'geometry')
 }
+
+fn test_get_body_of_a_crlf_file_has_no_carriage_returns() {
+	// A Windows checkout with core.autocrlf gives CRLF files. Split on `\n`
+	// alone every line kept a `\r`, and the closing-brace checks never
+	// matched (CI's Windows runner caught it).
+	src := 'module demo\n\nfn first() {\n\tprintln(1)\n}\n\nfn second() {\n\tprintln(2)\n}\n'.replace('\n',
+		'\r\n')
+	g, root := body_fixture(src)
+	defer {
+		os.rmdir_all(root) or {}
+	}
+	body := g.get_body('first')
+	assert !body.contains('\r'), body
+	assert body.split('\n').last() == '}', body
+	assert !body.contains('println(2)'), body
+}

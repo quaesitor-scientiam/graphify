@@ -408,7 +408,10 @@ pub fn (g Graph) get_body(node string) string {
 	src := os.read_file(os.join_path(g.source_root(s), s.file)) or {
 		return 'cannot read ${s.file}: ${err}'
 	}
-	lines := src.split('\n')
+	// a CRLF file (a Windows checkout with core.autocrlf) would otherwise
+	// leave a `\r` on every line, and the closing-brace checks below would
+	// never match
+	lines := src.replace('\r\n', '\n').split('\n')
 	start := if s.line > 0 { s.line - 1 } else { 0 }
 	mut end := if s.end_line > s.line { s.end_line } else { 0 }
 	if end == 0 {
