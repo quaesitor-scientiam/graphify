@@ -92,8 +92,8 @@ pub fn decode_file_result(line string) FileResult {
 				from: f[0]
 				to:   f[1]
 				kind: unsafe { EdgeKind(f[2].int()) }
-				// tolerate the older 3- and 5-field forms, so a cache written
-				// by a previous build decodes instead of panicking on f[3]
+				// tolerate the older 3-field form, so a cache written by a
+				// previous build decodes instead of panicking on f[3]
 				is_method: f.len > 3 && f[3] == '1'
 				recv_type: if f.len > 4 { f[4] } else { '' }
 				// disambiguate_ids renames an edge's `from` by this file; without

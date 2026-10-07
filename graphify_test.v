@@ -2477,7 +2477,7 @@ fn test_file_result_parse_error_round_trips_through_the_batch_protocol() {
 	assert clean.parse_error == ''
 }
 
-fn test_edge_file_round_trips_through_the_batch_protocol() {
+fn test_edge_round_trips_every_field_and_decodes_the_5_field_form() {
 	fr := FileResult{
 		edges: [
 			Edge{
@@ -2532,20 +2532,7 @@ fn test_disambiguated_caller_keeps_its_file_through_the_batch_protocol() {
 	assert calls.map(it.from).sorted() == ['main.main@a.v', 'main.main@b.v']
 }
 
-fn test_calls_after_a_tracked_local_keep_their_file() {
-	// track_assign derives a new CallCtx for the rest of the body once it
-	// sees `x := Foo{}`; every calls edge after that must still carry the
-	// file, or disambiguate_ids renames its caller to `id@`.
-	src := 'module main\n\nstruct Foo {}\n\nfn (f Foo) bar() {}\n\nfn helper() {}\n\nfn main() {\n\tx := Foo{}\n\tx.bar()\n\thelper()\n}\n'
-	fr := extract_v_text_result(src, 'a.v')
-	calls := fr.edges.filter(it.kind == .calls)
-	assert calls.len == 2
-	for e in calls {
-		assert e.file == 'a.v', '${e.to} has file "${e.file}"'
-	}
-}
-
-fn test_edge_file_survives_the_batch_protocol_after_a_typed_local() {
+fn test_edge_file_round_trips_through_the_batch_protocol() {
 	// disambiguate_ids renames a calls edge's `from` to `${from}@${file}`. The
 	// protocol used to drop Edge.file, so on the worker path that `graphify
 	// extract` takes, every call from a renamed declaration (each standalone
