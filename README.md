@@ -694,22 +694,17 @@ dogfoods it on itself):
 - **`.claude/settings.json`** (gitignored — copy `.claude/settings.json.example`,
   same per-machine pattern as `graphify.config.json`/`.mcp.json`) — a
   `SessionStart` hook injects standing guidance, and a `PreToolUse` hook on
-  `Grep|Glob` reminds Claude to consult the graph before scanning files. Both
-  call `bin/graphify-hook(.exe)` — the compiled `cmd/hooks/graphify_hook.vsh`
-  above — directly. It's prebuilt rather than run via `v run` because this
-  hook fires on every Grep/Glob/SessionStart, and `v run` recompiling from
-  source each time costs several seconds per call — the prebuilt binary
-  responds in well under 100ms. Settings.json is per-machine (not
-  `${CLAUDE_PROJECT_DIR}`-templated like `.mcp.json`) specifically so the one
-  `.exe` suffix difference can just be hardcoded directly, with no dispatcher
-  layer and no non-V dependency: an earlier version of this used a tiny pwsh
-  script to pick the binary name per OS (since a static JSON command can't
-  branch, and V always appends `.exe` on Windows regardless of the `-o` name
-  given, confirmed empirically — there's no way to build one binary name that
-  works unedited on all three platforms), but that made pwsh a real
-  dependency for macOS/Linux just to dispatch a 3-line decision. One
-  per-machine edit (matching the two config files you already edit) removes
-  that dependency entirely.
+  `Read|Grep|Glob` reminds Claude to consult the graph before reading or
+  scanning V files. Both call `bin/graphify-hook` — the compiled
+  `cmd/hooks/graphify_hook.vsh` above — directly. It's prebuilt rather than run
+  via `v run` because this hook fires on every Read/Grep/Glob/SessionStart, and
+  `v run` recompiling from source each time costs several seconds per call —
+  the prebuilt binary responds in well under 100ms. The command names the
+  binary without an extension: V always appends `.exe` on Windows, and the
+  shell Claude Code runs hooks through there (Git Bash) finds
+  `graphify-hook.exe` from `graphify-hook`, so the example works unedited on
+  every platform. If your setup runs hooks through a shell that does not,
+  add `.exe` to both commands in your copy.
 - **`.githooks/post-commit`** — rebuilds the graph after each commit. Enable with
   `git config core.hooksPath .githooks`.
 
@@ -768,6 +763,7 @@ Known gaps and evidence-gated future work are recorded in
 - [x] **`Index.by_id` id-collision fixed (2026-08-16).** `disambiguate_ids` (graphify.v) runs before edge resolution and gives colliding declarations their own distinct node identity — see the Usage section's Index.by_id note for the full mechanism and real before/after numbers (21.03% of all symbols silently discarded → 13.54%, with the fixable portion — genuine cross-build-unit collisions — going from 7,646 rows to 8).
 - [x] **`fn C.foo`/`fn JS.foo` extern-decl same-file collision fixed (2026-08-16).** The last 8 rows left over from the `Index.by_id` fix above were a distinct bug: `fn_id` (backend_v.v) doesn't preserve a declaration's `C.`/`JS.` language prefix in `short_name`, so a body-less extern binding and a same-named real V wrapper *in the same file* got an identical id — which a file-qualified suffix can't separate, since they already share a file. Fixed by skipping body-less non-V `FnDecl`s as symbols entirely; call resolution to an extern callee was already non-functional either way (the raw call name carries the `C.`/`JS.` prefix via a different parser field than `short_name` ever sees), so nothing that worked is lost. A fresh full-repo extraction shows 0 duplicate ids across all six kinds this pass targets, down from 4 ids / 8 symbols.
 - [x] **Incremental cache tied to the running binary, not just file hashes (2026-08-17).** `.gf_cache.ndjson` only ever checked each source file's own content hash — with no way to detect that graphify's *own extraction logic* had changed. The fix above changed which symbols get extracted from a file without changing `FileResult`'s on-disk shape, so a rebuilt binary kept serving pre-fix cached results indefinitely on an unchanged corpus: a daily-scheduled Windows extraction served stale, pre-fix symbol counts for weeks, caught only by comparing against a fresh macOS extraction of the identical commit. Fixed by hashing the running binary itself once per extract and stamping it into the cache header — a cache written by a *different* binary is discarded wholesale, even when every individual file's hash still matches, since the binary is what actually decides what a file's content extracts to. This subsumes the old hand-maintained `cache_format` version bump (any wire-format change necessarily changes the compiled binary anyway); `cache_format` itself is kept, now scoped to just the header's own envelope shape, so a pre-existing cache from before this fix is safely discarded rather than misparsed.
+- [x] **Scripts, external calls, and the hook example (2026-10-06).** A `main` file with statements at file scope and no `fn main` is a V script; the parser accepts one only in script mode and otherwise reports every statement as an error, so these 33 files on the V compiler's tree were flagged as partial although nothing was wrong. A `main` file that fails to parse is now tried in script mode, and taken when that is clean: its statements form `main`, calls included (flagged files 253 → 220). The report counts calls to `C.`/`JS.` functions as `external` (4,939 on vlang), apart from the unresolved. `.claude/settings.json.example` now names `bin/graphify-hook` without `.exe` and adds `Read` to the hook matcher.
 - [x] **Method calls on parameters (2026-10-06).** A parameter's type is written on its function's declaration, so `s.contains(x)` inside `fn f(s string)` needs no inference, just as a call on the method's own receiver did not. Parameters now seed the call walker's typed locals, and a receiver type is matched to a method by its short name in the caller's file, its module, an import or builtin, since `string` and `strings.Builder` are what V writes while ids carry `vlib.builtin` and `vlib.strings`. On vlang `abcebfc16d`: 2,268 more resolved calls (995 of them `string` methods) and 291 corrected, all calls that the same-module step had sent to an unrelated method of the same name (`name.contains` to `Scope.contains`). Of the 33,940 calls still unresolved, 4,939 are to C or JS functions and most of the rest are method calls on a receiver whose type only the checker knows.
 - [x] **`type` declarations, generic parameters, and test-file privacy (2026-10-06).** V's `type` declarations (aliases such as `type NodeId = i32`, sum types, function types) were never extracted, although the model had a kind for them, so every reference to one stayed unresolved or, worse, resolved to a same-named struct elsewhere (`Builder` to `v.ssa.Builder` instead of the alias `strings.Builder`). They are symbols now, with references to the types they are built from. A generic parameter such as `T` is no longer emitted as a reference, and a declaration in a `_test.v` file is visible only inside that file, as V compiles it: an `enum Color` in `vlib/builtin/map_test.v` had counted as part of builtin and been visible everywhere. On vlang `abcebfc16d`: 1,983 type declarations; resolved type references 69,430 → 80,442, with 794 retargeted from a wrong declaration. Of the 36,625 still unresolved, 35,072 name built-in primitives (`int`, `bool`), which have no declaration.
 - [x] **`embeds` edges, and references to generic types (2026-10-06).** No `embeds` edge had ever been emitted: V 0.5.2's parser lists an embedded struct in `StructDecl.embeds` rather than among the fields the extractor checked for `is_embed`, and an interface's embedded interfaces in `InterfaceDecl.embeds`. Both are read now, and a generic type such as `veb.Middleware[Context]` is named by its base type instead of coming out empty after the closing bracket. On the V compiler's own tree: 676 `embeds` edges (661 resolved) where there were none, and 1,900 more resolved type references.

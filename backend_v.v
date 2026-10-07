@@ -51,6 +51,24 @@ pub fn extract_v_text_result(source string, rel string) FileResult {
 // reparse_by_declaration).
 fn extract_parsed(file &ast.File, mut table ast.Table, source string, path string, rel string) FileResult {
 	lines := source.split('\n')
+	if file.errors.len > 0 && file.mod.name.all_after_last('.') == 'main' && !rel.ends_with('_test.v') {
+		// A script: statements at file scope with no `fn main`, which V runs
+		// as `v run file.v`. The parser accepts that only in script mode, and
+		// otherwise reports every top-level statement as an error although
+		// nothing is wrong with the file. In script mode those statements form
+		// a `main` function, calls and all; take that when it parses cleanly.
+		mut script_table := ast.new_table()
+		mut script_prefs := extract_prefs()
+		script_prefs.is_script = true
+		script := parser.parse_text(source, path, mut script_table, .skip_comments, script_prefs)
+		if script.errors.len == 0 {
+			ssyms, sedges := extract_from_ast(script, mut script_table, rel, lines)
+			return FileResult{
+				symbols: ssyms
+				edges:   sedges
+			}
+		}
+	}
 	mut syms, mut edges := extract_from_ast(file, mut table, rel, lines)
 	if file.errors.len > 0 {
 		syms, edges = reparse_by_declaration(source, path, rel, lines, syms, edges)

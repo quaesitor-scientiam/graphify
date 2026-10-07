@@ -195,7 +195,7 @@ copy's line ranges would point `get_body` at the wrong code once anything in
 the file moved. Compared with V 0.5.2's own `-check-syntax`, the list agrees
 on 212 files; the 33 it lists that the check does not are script-style files,
 whose top-level statements the check accepts as a standalone program but which
-recover fully here; and the 37 the check flags that are not listed are type
+recover fully here (since parsed in script mode instead, and no longer listed); and the 37 the check flags that are not listed are type
 conflicts from `-check-syntax` registering vlib/builtin types twice (33), the
 3 files that crash the parser (listed under `failed`), and one call to a
 function named `byte` that only parses without the built-in type table.

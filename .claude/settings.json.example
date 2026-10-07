@@ -5,18 +5,18 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PROJECT_DIR}/bin/graphify-hook.exe\""
+            "command": "\"${CLAUDE_PROJECT_DIR}/bin/graphify-hook\""
           }
         ]
       }
     ],
     "PreToolUse": [
       {
-        "matcher": "Grep|Glob",
+        "matcher": "Read|Grep|Glob",
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PROJECT_DIR}/bin/graphify-hook.exe\""
+            "command": "\"${CLAUDE_PROJECT_DIR}/bin/graphify-hook\""
           }
         ]
       }

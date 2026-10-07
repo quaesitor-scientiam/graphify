@@ -2464,13 +2464,16 @@ fn test_extract_reports_a_parse_error_and_recovers_past_it() {
 	assert 'after' in names
 }
 
-// A script-style file (top-level statements, no `fn main`) with an anonymous
-// fn inside a top-level call: recovering past the first "bad top level
+// Top-level statements with an anonymous fn inside a top-level call, in a
+// module other than `main` (a `main` file like this is a script and parses
+// cleanly in script mode): recovering past the first "bad top level
 // statement", the parser reaches that `fn` and records it as a top-level
 // declaration with no name. Such a node is not a real declaration and must
 // not become a symbol -- its id would just be `<module>.`.
 fn test_extract_drops_nameless_fn_declarations_from_error_recovery() {
-	src := 'import gg
+	src := 'module demo
+
+import gg
 
 gg.start(
 	frame_fn: fn (ctx &gg.Context) {
@@ -3014,14 +3017,16 @@ fn test_report_counts_builtin_type_references_apart_from_unresolved() {
 		}
 	}
 	// a call to an unknown `int` is not a type reference
-	g.edges << Edge{
-		from: 'demo.f'
-		to:   'int'
-		kind: .calls
+	for to in ['int', 'C.memcpy', 'JS.parseInt'] {
+		g.edges << Edge{
+			from: 'demo.f'
+			to:   to
+			kind: .calls
+		}
 	}
 	r := g.report()
 	assert r.contains('- references: extracted 0, inferred 0, built-in 2, unresolved 1')
-	assert r.contains('- calls: extracted 0, inferred 0, unresolved 1')
+	assert r.contains('- calls: extracted 0, inferred 0, external 2, unresolved 1')
 }
 
 fn test_parameter_types_resolve_method_calls() {
@@ -3070,4 +3075,29 @@ fn check(name string, mut sb strings.Builder) bool {
 	assert g.edges.any(it.kind == .calls && it.from == 'app.check'
 		&& it.to == 'lib.strings.Builder.write_string')
 	assert !g.edges.any(it.kind == .calls && it.from == 'app.check' && it.to.starts_with('app.Scope'))
+}
+
+fn test_script_file_parses_in_script_mode_without_a_parse_error() {
+	// Top-level statements with no `fn main` are a V script. Parsed as an
+	// ordinary file every statement is an error and the file was flagged as
+	// partial; in script mode they form `main`, with their calls.
+	src := 'import os
+
+fn helper() int {
+	return 1
+}
+
+println(os.args.len)
+x := helper()
+println(x)
+'
+	fr := extract_v_text_result(src, 'examples/script.v')
+	assert fr.parse_error == ''
+	ids := fr.symbols.map(it.id)
+	assert 'examples.helper' in ids
+	assert 'examples.main' in ids
+	assert fr.edges.any(it.kind == .calls && it.from == 'examples.main' && it.to.ends_with('helper'))
+	// a real syntax error in a main file is still reported
+	bad := extract_v_text_result('fn main() {\n\tx := [1, ...(y)]\n}\n', 'examples/bad.v')
+	assert bad.parse_error != ''
 }
