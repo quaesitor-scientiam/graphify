@@ -2477,6 +2477,74 @@ fn test_file_result_parse_error_round_trips_through_the_batch_protocol() {
 	assert clean.parse_error == ''
 }
 
+fn test_edge_file_round_trips_through_the_batch_protocol() {
+	fr := FileResult{
+		edges: [
+			Edge{
+				from:      'demo.Foo.bar'
+				to:        'baz'
+				kind:      .calls
+				is_method: true
+				recv_type: 'demo.Foo'
+				file:      'sub/demo.v'
+			},
+		]
+	}
+	back := decode_file_result(encode_file_result(fr))
+	assert back.edges.len == 1
+	assert back.edges[0].from == 'demo.Foo.bar'
+	assert back.edges[0].to == 'baz'
+	assert back.edges[0].kind == .calls
+	assert back.edges[0].is_method
+	assert back.edges[0].recv_type == 'demo.Foo'
+	assert back.edges[0].file == 'sub/demo.v'
+	// the older 5-field edge form still decodes, with no file
+	legacy := decode_file_result('${bp_ss}demo.a${bp_fs}b${bp_fs}${int(EdgeKind.calls)}${bp_fs}1${bp_fs}demo.T${bp_ss}')
+	assert legacy.edges.len == 1
+	assert legacy.edges[0].recv_type == 'demo.T'
+	assert legacy.edges[0].file == ''
+}
+
+fn test_disambiguated_caller_keeps_its_file_through_the_batch_protocol() {
+	// build_graph_resilient only ever sees a worker's FileResult after an
+	// encode/decode round trip (and a cached one after another) -- if
+	// Edge.file were dropped there, disambiguate_ids would rename the caller
+	// to `main.main@`, an id matching no symbol.
+	src := 'module main\n\nfn helper() {}\n\nfn main() {\n\thelper()\n}\n'
+	mut g := Graph{}
+	for rel in ['a.v', 'b.v'] {
+		fr := decode_file_result(encode_file_result(extract_v_text_result(src, rel)))
+		g.symbols << fr.symbols
+		g.edges << fr.edges
+	}
+	disambiguate_ids(mut g)
+	for e in g.edges.filter(it.kind == .calls) {
+		assert e.file != ''
+		assert e.from.ends_with('@${e.file}'), e.from
+	}
+	resolve_edges(mut g)
+	ids := g.symbols.map(it.id)
+	calls := g.edges.filter(it.kind == .calls)
+	assert calls.len == 2
+	for e in calls {
+		assert e.from in ids, e.from
+	}
+	assert calls.map(it.from).sorted() == ['main.main@a.v', 'main.main@b.v']
+}
+
+fn test_calls_after_a_tracked_local_keep_their_file() {
+	// track_assign derives a new CallCtx for the rest of the body once it
+	// sees `x := Foo{}`; every calls edge after that must still carry the
+	// file, or disambiguate_ids renames its caller to `id@`.
+	src := 'module main\n\nstruct Foo {}\n\nfn (f Foo) bar() {}\n\nfn helper() {}\n\nfn main() {\n\tx := Foo{}\n\tx.bar()\n\thelper()\n}\n'
+	fr := extract_v_text_result(src, 'a.v')
+	calls := fr.edges.filter(it.kind == .calls)
+	assert calls.len == 2
+	for e in calls {
+		assert e.file == 'a.v', '${e.to} has file "${e.file}"'
+	}
+}
+
 fn test_cache_round_trips_a_partial_results_parse_error() {
 	// A file with syntax errors that does not change is reused from the cache
 	// next run rather than reparsed, so the cache must keep its parse error.
