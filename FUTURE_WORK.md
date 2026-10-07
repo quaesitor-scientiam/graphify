@@ -341,9 +341,9 @@ assembly for another architecture parses fine but is reported as unsupported
 by the backend unless `prefs.supports_inline_asm` is set, which the extractor
 does, so the flagged list doesn't depend on the host.
 
-Under V3, `import graphify` in `cmd/` resolves to the checkout at
-`~/repo/graphify` (the parent of the module directory is on the module path),
-not to a worktree beside it: build the V3 binaries from the main checkout, or
+Under V3, `import graphify` in `cmd/` in a worktree under `.claude/worktrees/`
+resolved to the main checkout's files, not the worktree's (seen with `-v`;
+the lookup rule wasn't traced): build the V3 binaries from the main checkout, or
 a worktree's changes are silently left out.
 
 Mapping notes, for whoever moves this forward: methods are `fn_decl`s whose
