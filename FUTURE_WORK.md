@@ -519,6 +519,17 @@ preferences would need such a check before being relied on.
 Host independence therefore belongs to the V3 port (§6) rather than to the V1
 path.
 
+**The V3 extractor is host-independent (verified October 2026, vlang
+`abcebfc16d`).** Built with `-d graphify_v3` and extracted on the arm64 Mac
+and the x86_64 Windows machine, the two graphs have the same 136,168 symbols
+and 498,034 edges, field for field, and the same 5 flagged files; only
+`root`, the binary hash and the timestamp differ. Getting there took the
+fixes listed in §6: every `$if` and `$match` branch kept, `@[if]` guards
+blanked, inline assembly for another architecture not flagged, anonymous
+struct names without the path, and files walked and assembled in sorted
+order. The last also applies to the V1 extractor, whose graphs still differ
+by platform conditionals as described above.
+
 **V3 resolves this (October 2026 spike, §6).** V3's parser has a
 `preserve_comptime_conditionals` preference. With it set, every platform
 branch is kept, inside `comptime_if` nodes that carry the condition text
