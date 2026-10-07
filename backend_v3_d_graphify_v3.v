@@ -170,9 +170,42 @@ fn (f &V3File) field_is_pub(struct_line int, field_line int, is_c bool) bool {
 	return is_c
 }
 
+// anon_type renames V3's anonymous struct and union types, which embed the
+// file's absolute path (`AnonStruct__x2f_Users_..._vcs_x2e_v_1`, and
+// `AnonStruct_S_x3a__x5c_...` on Windows), to V 0.5.2's host-independent
+// `_VAnonStruct1`, keeping V3's per-file counter.
+fn anon_type(t string) string {
+	if !t.contains('Anon') {
+		return t
+	}
+	mut out := t
+	for kind in ['Struct', 'Union'] {
+		marker := 'Anon${kind}_'
+		mut from := 0
+		for {
+			start := out.index_after(marker, from) or { break }
+			mut end := start
+			for end < out.len && (out[end].is_alnum() || out[end] == `_`) {
+				end++
+			}
+			name := out[start..end]
+			counter := name.all_after_last('_')
+			if name.contains('_x2e_v_') && counter.len > 0 && counter.bytes().all(it.is_digit()) {
+				repl := '_VAnon${kind}${counter}'
+				out = out[..start] + repl + out[end..]
+				from = start + repl.len
+			} else {
+				from = end
+			}
+		}
+	}
+	return out
+}
+
 // type_text renders a type as V 0.5.2 did for this file: as written, with an
 // explicit import alias expanded to the module's path.
-fn (f &V3File) type_text(t string) string {
+fn (f &V3File) type_text(t_ string) string {
+	t := anon_type(t_)
 	mut prefix := ''
 	mut rest := t
 	for rest.len > 0 && rest[0] in [`&`, `?`, `!`] {
@@ -191,7 +224,7 @@ fn (f &V3File) type_text(t string) string {
 // base_name keeps a type's final identifier, as V 0.5.2's base_type_name did:
 // `[]&ast.Expr` -> `Expr`, `veb.Middleware[Context]` -> `Middleware`.
 fn base_name(t string) string {
-	name := strip_generic_args(t)
+	name := strip_generic_args(anon_type(t))
 	mut out := ''
 	for ch in name {
 		if (ch >= `a` && ch <= `z`) || (ch >= `A` && ch <= `Z`) || (ch >= `0` && ch <= `9`)

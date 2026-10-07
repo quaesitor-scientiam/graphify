@@ -111,6 +111,10 @@ pub fn build_graph_resilient(root string, worker_exe string, out_dir string) (Gr
 	bin_hash := file_hash(worker_exe)
 	old_cache := load_cache(out_dir, bin_hash)
 	mut new_cache := []CacheEntry{cap: files.len}
+	// each file's result, by relative path; the graph is assembled from it in
+	// `files` order at the end, so which of two same-id declarations comes
+	// first doesn't depend on what was cached, retried or parsed when
+	mut by_rel := map[string]FileResult{}
 
 	mut queue := []WorkItem{}
 	for path in files {
@@ -120,8 +124,7 @@ pub fn build_graph_resilient(root string, worker_exe string, out_dir string) (Gr
 			// unchanged since the last extract — reuse its symbols/edges
 			// instead of spending a worker parsing it again.
 			reused := fresh_reuse_of(old_cache[rel])
-			g.symbols << reused.fr.symbols
-			g.edges << reused.fr.edges
+			by_rel[rel] = reused.fr
 			new_cache << reused
 			if reused.fr.parse_error != '' {
 				partial << rel
@@ -164,8 +167,7 @@ pub fn build_graph_resilient(root string, worker_exe string, out_dir string) (Gr
 				for w in batch {
 					failed << w.rel
 					if fallback := stale_fallback_for(old_cache, w.rel) {
-						g.symbols << fallback.fr.symbols
-						g.edges << fallback.fr.edges
+						by_rel[w.rel] = fallback.fr
 						new_cache << fallback
 						stale << w.rel
 					}
@@ -198,9 +200,8 @@ pub fn build_graph_resilient(root string, worker_exe string, out_dir string) (Gr
 					continue
 				}
 				fr := decode_file_result(line)
-				g.symbols << fr.symbols
-				g.edges << fr.edges
 				if i < job.batch.len {
+					by_rel[job.batch[i].rel] = fr
 					if fr.parse_error != '' {
 						partial << job.batch[i].rel
 					}
@@ -219,8 +220,7 @@ pub fn build_graph_resilient(root string, worker_exe string, out_dir string) (Gr
 				crashed_rel := job.batch[completed].rel
 				failed << crashed_rel
 				if fallback := stale_fallback_for(old_cache, crashed_rel) {
-					g.symbols << fallback.fr.symbols
-					g.edges << fallback.fr.edges
+					by_rel[crashed_rel] = fallback.fr
 					new_cache << fallback
 					stale << crashed_rel
 				}
@@ -237,6 +237,15 @@ pub fn build_graph_resilient(root string, worker_exe string, out_dir string) (Gr
 		}
 	}
 
+	for path in files {
+		if fr := by_rel[rel_path(abs_root, path)] {
+			g.symbols << fr.symbols
+			g.edges << fr.edges
+		}
+	}
+	failed.sort()
+	stale.sort()
+	partial.sort()
 	save_cache(out_dir, bin_hash, new_cache)
 	disambiguate_ids(mut g)
 	separate_member_ids(mut g)

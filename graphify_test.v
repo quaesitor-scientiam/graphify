@@ -3151,3 +3151,49 @@ println(x)
 	bad := extract_v_text_result('fn main() {\n\tx := [1, 2\n}\n', 'examples/bad.v')
 	assert bad.parse_error != ''
 }
+
+fn test_source_files_are_listed_in_sorted_order() {
+	// os.ls returns the filesystem's order, which differs between APFS and
+	// NTFS; when two files declare the same id the first one read wins, so an
+	// unsorted walk gave Mac and Windows different graphs of the same tree.
+	root := write_tree('sorted_walk', {
+		'z.v':     'module main\n'
+		'a.v':     'module main\n'
+		'm/b.v':   'module m\n'
+		'm/a.v':   'module m\n'
+		'b/c/x.v': 'module c\n'
+	})
+	defer {
+		os.rmdir_all(root) or {}
+	}
+	files := find_source_files(root).map(it.all_after(os.real_path(root)).replace('\\', '/'))
+	assert files == ['/a.v', '/b/c/x.v', '/m/a.v', '/m/b.v', '/z.v']
+}
+
+fn test_anonymous_struct_types_do_not_name_the_host_path() {
+	// V3 names an anonymous struct after the file's absolute path, so the
+	// field's signature and its reference edge differed between machines.
+	src := 'module cli
+
+pub struct Command {
+pub mut:
+	defaults struct {
+	pub mut:
+		help bool
+	}
+	opt ?struct {
+		x int
+	}
+}
+'
+	fr := extract_v_text_result(src, 'vlib/cli/command.v')
+	syms := maps_by_id(fr.symbols)
+	for id in ['vlib.cli.Command.defaults', 'vlib.cli.Command.opt'] {
+		sig := syms[id] or { panic('missing ${id}') }.signature
+		assert sig.contains('_VAnonStruct'), sig
+		assert !sig.contains('_x2f_') && !sig.contains('_x5c_'), sig
+	}
+	for e in fr.edges {
+		assert !e.to.contains('_x2f_') && !e.to.contains('_x5c_'), e.to
+	}
+}

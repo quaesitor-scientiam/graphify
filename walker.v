@@ -13,7 +13,11 @@ pub fn find_source_files(root string) []string {
 }
 
 fn walk(dir string, mut out []string) {
-	entries := os.ls(dir) or { return }
+	mut entries := os.ls(dir) or { return }
+	// os.ls returns the filesystem's order, which differs between APFS, NTFS
+	// and ext4; when two files declare the same id the first one read wins,
+	// so sort to make the graph the same on every host.
+	entries.sort()
 	for e in entries {
 		full := os.join_path(dir, e)
 		if os.is_dir(full) {
