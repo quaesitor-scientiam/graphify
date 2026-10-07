@@ -377,9 +377,12 @@ signature), the graph is assembled in file order whatever the cache held,
 V3's anonymous struct names (which embed the absolute path) become
 `_VAnonStructN`, inline assembly for another architecture isn't flagged, and
 `@[if cond]` guards are blanked before V3 parses, since it drops a guarded
-body when the condition is false on the host (79 calls on vlang). A rerun on
-Windows should now give the same symbols and edges (`root` in graph.json is
-the machine's own path).
+body when the condition is false on the host (79 calls on vlang). The rerun
+then matched in every edge and all but one symbol: a `const` inside a
+file-scope `$match @OS`, which V3 resolves for the host even with every `$if`
+kept. The extractor now writes `$match @X` as `$match mut @X`, which makes
+the parser build the `$if` chain and keep every branch (3 consts on vlang).
+V 0.5.2's extractor records nothing declared inside a file-scope `$match`.
 
 The spike's probe programs were not kept; the method above is enough to repeat
 it.
