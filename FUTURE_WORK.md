@@ -356,7 +356,7 @@ stays host-independent, and names the module below `vlib` (`v.tests.helper`,
 V 0.5.2's nearest-first walk, which took `import rand` in `vlib/crypto/...`
 for `crypto.rand` and `import json2` for `x.json2`. On vlang: 23 fewer
 unresolved calls and 7 fewer unresolved type references; extraction 0.4 s
-slower (2.8 s).
+slower (2.8 s). The Mac and Windows graphs were still identical after it.
 
 Mapping notes, for whoever moves this forward: methods are `fn_decl`s whose
 value is `Recv.name` with the receiver as the first `param`; a static method
