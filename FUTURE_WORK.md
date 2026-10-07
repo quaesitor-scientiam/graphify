@@ -357,9 +357,6 @@ has an empty severity.
 
 Known gaps before it can become the default:
 
-- The body of an `@[if flag ?]` function is dropped when the flag is unset,
-  even with every `$if` kept, so its calls are missing (`elog` in
-  `cmd/tools/vwatch.v`, a few hundred calls on vlang).
 - Signatures show types as written (`fn(string) string`,
   `protobuf.ProtoScalar`) rather than V 0.5.2's resolved form (`fn (string)
   string`, `encoding.protobuf.ProtoScalar`): 10,427 signatures differ.
@@ -369,8 +366,19 @@ Known gaps before it can become the default:
   (V 0.5.2 said line 1), and a `const` ends a line earlier.
 - The test suite passes under `-d graphify_v3` on macOS and Windows (October
   2026); not yet checked on Linux, not in CI, and the release build and the
-  hook still use `-old-compiler`. Mac and Windows graphs of the same vlang
-  commit have not yet been compared.
+  hook still use `-old-compiler`.
+
+Mac and Windows graphs of vlang `abcebfc16d` were compared in October 2026:
+same 136,165 symbols, 3 edges apart. Each difference depended on the host and
+is fixed for both extractors where it applied: directories are walked in
+sorted order (the first of two same-id declarations wins, and `os.ls` order
+differs between APFS and NTFS: 1,734 symbols took another file's line or
+signature), the graph is assembled in file order whatever the cache held,
+V3's anonymous struct names (which embed the absolute path) become
+`_VAnonStructN`, inline assembly for another architecture isn't flagged, and
+`@[if cond]` guards are blanked before V3 parses, since it drops a guarded
+body when the condition is false on the host (79 calls on vlang). A rerun on
+Windows should now give the same graph byte for byte.
 
 The spike's probe programs were not kept; the method above is enough to repeat
 it.
