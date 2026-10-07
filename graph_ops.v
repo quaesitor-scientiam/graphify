@@ -280,25 +280,25 @@ pub fn (g Graph) explain(node string) string {
 		}
 	}
 	if defined_in.len > 0 {
-		out << 'defined in    : ${uniq(defined_in).join(', ')}'
+		out << 'defined in    : ${capped(defined_in)}'
 	}
 	if defines.len > 0 {
-		out << 'defines       : ${uniq(defines).join(', ')}'
+		out << 'defines       : ${capped(defines)}'
 	}
 	if embeds.len > 0 {
-		out << 'embeds        : ${uniq(embeds).join(', ')}'
+		out << 'embeds        : ${capped(embeds)}'
 	}
 	if references.len > 0 {
-		out << 'references    : ${uniq(references).join(', ')}'
+		out << 'references    : ${capped(references)}'
 	}
 	if referenced_by.len > 0 {
-		out << 'referenced by : ${uniq(referenced_by).join(', ')}'
+		out << 'referenced by : ${capped(referenced_by)}'
 	}
 	if calls.len > 0 {
-		out << 'calls         : ${uniq(calls).join(', ')}'
+		out << 'calls         : ${capped(calls)}'
 	}
 	if called_by.len > 0 {
-		out << 'called by     : ${uniq(called_by).join(', ')}'
+		out << 'called by     : ${capped(called_by)}'
 	}
 	if any_inferred {
 		out << '  ^ [inferred] = picked among several same-named candidates by locality/visibility, not a name that was unambiguous outright — see the edge provenance note in README'
@@ -334,6 +334,22 @@ pub fn (g Graph) explain(node string) string {
 		out << '(use `get_body ${s.name}` to read its source)'
 	}
 	return out.join('\n')
+}
+
+// explain_list_cap bounds each relation list explain prints. A widely used
+// symbol has thousands of relations (`vlib.v.flat.NodeId` is referenced by over
+// 4,000 declarations, 270,000 characters), more than an MCP client accepts in
+// one result; the count of the rest says how widely it is used.
+const explain_list_cap = 40
+
+// capped renders a relation list, deduplicated, with at most explain_list_cap
+// entries and a count of the rest.
+fn capped(items []string) string {
+	all := uniq(items)
+	if all.len <= explain_list_cap {
+		return all.join(', ')
+	}
+	return all[..explain_list_cap].join(', ') + ' … (+${all.len - explain_list_cap} more)'
 }
 
 fn name_of(idx Index, id string) string {

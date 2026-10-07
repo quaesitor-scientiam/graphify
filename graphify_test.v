@@ -2942,3 +2942,35 @@ fn paint(c color.Color) {}
 	g := build_graph(Options{ root: root })
 	assert g.edges.any(it.kind == .references && it.from == 'app.paint' && it.to == 'lib.color.Color')
 }
+
+fn test_explain_caps_each_relation_list() {
+	// A symbol referenced by thousands of declarations used to produce one
+	// unbounded line; an MCP client rejects a result that large.
+	mut g := Graph{}
+	g.symbols << Symbol{
+		id:   'demo.Hub'
+		name: 'Hub'
+		kind: .struct_
+		file: 'demo.v'
+		line: 1
+	}
+	for i in 0 .. explain_list_cap + 25 {
+		g.symbols << Symbol{
+			id:   'demo.user${i}'
+			name: 'user${i}'
+			kind: .function
+			file: 'demo.v'
+			line: i + 2
+		}
+		g.edges << Edge{
+			from: 'demo.user${i}'
+			to:   'demo.Hub'
+			kind: .references
+		}
+	}
+	out := g.explain('demo.Hub')
+	line := out.split('\n').filter(it.starts_with('referenced by'))[0]
+	assert line.count('user') == explain_list_cap
+	assert line.ends_with('… (+25 more)')
+	assert capped(['a', 'b', 'a']) == 'a, b'
+}
