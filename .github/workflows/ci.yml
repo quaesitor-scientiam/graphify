@@ -87,6 +87,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # `shell: bash` on Windows runs whichever bash.exe comes first on PATH,
+      # and on some runner images that is WSL's stub in WindowsApps, which
+      # fails with no Linux distribution installed. Put Git Bash first.
+      - name: Use Git Bash for bash steps (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Add-Content $env:GITHUB_PATH "C:\Program Files\Git\bin"
+
       # Outside the workspace, as in build-and-smoke-test, and at the pinned
       # commit, so every runner extracts the same tree.
       - name: Fetch V at the pinned commit
