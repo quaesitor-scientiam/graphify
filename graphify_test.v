@@ -3424,3 +3424,60 @@ fn brace_below() int
 	assert main.line == 3
 	assert main.end_line == 5
 }
+
+fn test_imports_the_parser_adds_by_itself_are_marked_implied() {
+	// V's parser imports `builtin.closure` for a closure, `sync.threads` for
+	// `spawn`, `sync` for channels and `math` for `**`, though the file
+	// doesn't write them. They are dependencies, so they stay, marked.
+	src := 'module m
+
+import os
+
+fn work() int {
+	return 1
+}
+
+fn f(ch chan int) {
+	g := fn () {}
+	t := spawn work()
+	y := 2 ** 3
+	println(os.args)
+}
+'
+	fr := extract_v_text_result(src, 'm/m.v')
+	mut sigs := map[string]string{}
+	for s in fr.symbols {
+		if s.kind == .import_ {
+			sigs[s.name] = s.signature
+		}
+	}
+	assert sigs['os'] == 'import os'
+	assert sigs['builtin.closure'] == 'import builtin.closure (implied)', sigs.str()
+	assert sigs['sync.threads'] == 'import sync.threads (implied)', sigs.str()
+	assert sigs['sync'] == 'import sync (implied)', sigs.str()
+	assert sigs['math'] == 'import math (implied)', sigs.str()
+	assert fr.edges.any(it.kind == .imports && it.from == 'm' && it.to == 'sync.threads')
+	// one the file writes is not marked
+	w := extract_v_text_result('module m\n\nimport sync\n\nfn f(ch chan int) {}\n', 'm/w.v')
+	assert w.symbols.filter(it.kind == .import_).map(it.signature) == ['import sync']
+}
+
+fn test_an_implied_import_does_not_make_a_module_visible_to_calls() {
+	// A channel implies `sync`, but the file can't name anything in it, so a
+	// bare `helper()` must not resolve into sync's or another module's
+	// `helper`: counting implied imports turned 160 resolved `ch.close()`-style
+	// calls on vlang ambiguous.
+	root := write_tree('implied_visibility', {
+		'm/m.v':         'module m\n\nfn f(ch chan int) {\n\thelper()\n}\n'
+		'sync/sync.v':   'module sync\n\npub fn helper() {}\n'
+		'other/other.v': 'module other\n\npub fn helper() {}\n'
+	})
+	defer {
+		os.rmdir_all(root) or {}
+	}
+	g := build_graph(Options{ root: root })
+	assert g.symbols.any(it.kind == .import_ && it.signature == 'import sync (implied)')
+	call := g.edges.filter(it.kind == .calls && it.from == 'm.f')
+	assert call.len == 1
+	assert call[0].to == 'helper', call[0].to
+}

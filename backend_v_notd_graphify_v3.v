@@ -245,13 +245,21 @@ fn extract_from_ast(file &ast.File, mut table ast.Table, rel string, src []strin
 		line:      file.mod.pos.line_nr + 1
 	}
 
-	// imports
+	// imports, among them the ones the parser adds by itself when it meets a
+	// closure, `spawn`, a channel and so on (auto_imports), marked `(implied)`
+	// as the V3 extractor's extract_implied_imports marks them. One written
+	// in the file keeps its own line, which is an `import` line.
 	for imp in file.imports {
+		ln := imp.pos.line_nr
+		implied := imp.mod in file.auto_imports
+			&& !(ln >= 0 && ln < src.len && src[ln].trim_space().starts_with('import '))
 		syms << Symbol{
 			id:        import_id(mod_id, imp.mod)
 			name:      imp.mod
 			kind:      .import_
-			signature: 'import ${imp.mod}' + if imp.alias != imp.mod && imp.alias != '' {
+			signature: 'import ${imp.mod}' + if implied {
+				' (implied)'
+			} else if imp.alias != imp.mod && imp.alias != '' {
 				' as ${imp.alias}'
 			} else {
 				''

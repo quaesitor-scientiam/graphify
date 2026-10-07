@@ -615,7 +615,10 @@ fn resolve_edges(mut g Graph) {
 	mut imports_of := map[string][]string{} // file -> modules it imports
 	mut scope_of := map[string]FileScope{} // file -> what a callee prefix can name
 	for s in g.symbols {
-		if s.kind == .import_ {
+		// an import the parser implies (`sync` for a channel) is a dependency,
+		// but the file can't name anything through it, so it widens neither
+		// what a call may resolve to nor what a prefix means
+		if s.kind == .import_ && !s.signature.ends_with('(implied)') {
 			imports_of[s.file] << s.name
 			mut sc := scope_of[s.file] or { FileScope{} }
 			sc.prefixes[s.name] = s.name

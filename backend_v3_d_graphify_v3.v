@@ -407,6 +407,7 @@ fn (mut f V3File) extract(root flat.NodeId) ([]Symbol, []Edge) {
 			kind: .imports
 		}
 	}
+	f.extract_implied_imports(declared, mut syms, mut edges)
 	if declared == 'main' {
 		f.extract_script_main(top, mut syms, mut edges)
 	}
@@ -423,6 +424,140 @@ fn (mut f V3File) extract(root flat.NodeId) ([]Symbol, []Edge) {
 		}
 	}
 	return syms, edges
+}
+
+// extract_implied_imports records the modules V's parser imports by itself
+// when a file uses certain syntax, as V 0.5.2's register_auto_import did:
+// `builtin.closure` for an anonymous function, `sync.threads` for `spawn` or
+// a `thread` type, `sync` for channels, `<-`, `shared`, `lock` and `select`,
+// `math` for `**`, `v.preludes.embed_file` for `$embed_file` and `v.debug`
+// for `$dbg`. Each is an import symbol whose signature ends in `(implied)`,
+// on the line of its first use, so it serves dependency questions without
+// passing for an import the file writes. A module doesn't imply itself, and
+// an explicit import of the module comes first. Unlike V 0.5.2, it doesn't
+// count an `it` expression (`a.map(it * 2)`) as a closure, since it compiles
+// inline, nor a variable named `shared`.
+fn (mut f V3File) extract_implied_imports(declared string, mut syms []Symbol, mut edges []Edge) {
+	mut first := map[string]i32{}
+	is_js := f.rel.ends_with('.js.v')
+	for i, n in f.a.nodes {
+		if i == 0 || n.pos.offset < 0 {
+			continue
+		}
+		mut found := []string{}
+		match n.kind {
+			.fn_literal {
+				// V 0.5.2 skipped it for the JS backend
+				if !is_js {
+					found << 'builtin.closure'
+				}
+			}
+			.spawn_expr {
+				found << 'sync.threads'
+			}
+			.lock_expr, .select_stmt {
+				found << 'sync'
+			}
+			.debugger_stmt {
+				found << 'v.debug'
+			}
+			.struct_init {
+				if n.value == 'embed_file.EmbedFileData' {
+					found << 'v.preludes.embed_file'
+					end := int_min(int(n.pos.end), f.src.len)
+					if n.pos.offset < end && f.src[n.pos.offset..end].contains('.zlib') {
+						found << 'v.preludes.embed_file.zlib'
+					}
+				} else if 'chan' in type_words(n.value) {
+					// a channel literal, `chan int{cap: 5}`
+					found << 'sync'
+				}
+			}
+			else {}
+		}
+		// `op` means an operator only on these; declarations reuse the field
+		if n.kind in [.prefix, .infix, .assign, .selector_assign, .index_assign] {
+			if n.op == .arrow {
+				found << 'sync'
+			} else if n.op in [.power, .power_assign] {
+				found << 'math'
+			}
+		}
+		if n.kind == .decl_assign && n.value == 'shared' {
+			found << 'sync'
+		}
+		if n.typ != '' && n.kind != .struct_init {
+			words := type_words(n.typ)
+			if 'chan' in words || 'shared' in words {
+				found << 'sync'
+			}
+			if 'thread' in words {
+				found << 'sync.threads'
+			}
+		}
+		for m in found {
+			if m !in first || n.pos.offset < first[m] {
+				first[m] = n.pos.offset
+			}
+		}
+	}
+	if first.len == 0 {
+		return
+	}
+	mut written := map[string]bool{}
+	for _, path in f.imports {
+		written[path] = true
+	}
+	// a `module main` file, such as a test beside vlib/sync, imports `sync`
+	own := if declared == 'main' { '' } else { own_module_name(f.rel) }
+	mut mods := first.keys()
+	mods.sort()
+	for m in mods {
+		if m == own || m in written {
+			continue
+		}
+		syms << Symbol{
+			id:        import_id(f.mod_id, m)
+			name:      m
+			kind:      .import_
+			signature: 'import ${m} (implied)'
+			file:      f.rel
+			line:      f.line_of(first[m])
+			parent:    f.mod_id
+		}
+		edges << Edge{
+			from: f.mod_id
+			to:   m
+			kind: .imports
+		}
+	}
+}
+
+// type_words splits a type's text into its identifiers: `[]chan int` ->
+// [chan, int].
+fn type_words(t string) []string {
+	mut words := []string{}
+	mut start := -1
+	for i := 0; i <= t.len; i++ {
+		ident := i < t.len && (t[i].is_alnum() || t[i] == `_`)
+		if ident && start < 0 {
+			start = i
+		} else if !ident && start >= 0 {
+			words << t[start..i]
+			start = -1
+		}
+	}
+	return words
+}
+
+// own_module_name is the module a file in V's own `vlib` belongs to, as V
+// names it (`vlib/sync/threads/x.v` -> `sync.threads`); '' elsewhere.
+fn own_module_name(rel string) string {
+	r := rel.replace('\\', '/')
+	if !r.starts_with('vlib/') || !r[5..].contains('/') {
+		return ''
+	}
+	return r[5..].all_before_last('/').replace('/', '.')
 }
 
 // script_stmt_kinds are the statements a V script may have at file scope.
