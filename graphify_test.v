@@ -3275,3 +3275,59 @@ fn pick() {
 	}
 	assert with_every_match_branch(r'$match @OS {') == r'$match mut @OS {'
 }
+
+fn test_imports_resolve_to_the_module_they_mean_in_the_tree() {
+	// V3's import node holds the path as written. resolve_import names the
+	// module the way V 0.5.2 did, below `vlib`, but in V3's lookup order and
+	// only inside the extracted tree: `rand` in vlib/crypto/x is vlib/rand,
+	// though vlib/crypto/rand is nearer (V 0.5.2 said `crypto.rand`).
+	$if !graphify_v3 ? {
+		return
+	}
+	root := write_tree('import_resolution', {
+		'vlib/rand/rand.v':                   'module rand\n\npub fn intn(n int) int {\n\treturn n\n}\n'
+		'vlib/crypto/rand/rand.v':            'module rand\n\npub fn read(n int) int {\n\treturn n\n}\n'
+		'vlib/crypto/x/x.v':                  'module x\n\nimport rand\nimport geometry\nimport os\n\nfn f() int {\n\treturn rand.intn(geometry.area())\n}\n'
+		'vlib/crypto/x/geometry/geometry.v':  'module geometry\n\npub fn area() int {\n\treturn 1\n}\n'
+		'vlib/v/tests/deep/user/user_test.v': 'module main\n\nimport helper\n\nfn test_u() {\n\thelper.go()\n}\n'
+		'vlib/v/tests/helper/helper.v':       'module helper\n\npub fn go() {}\n'
+		'examples/app/main.v':                'module main\n\nimport widgets as w\nimport os\n\nfn main() {\n\tw.draw()\n}\n'
+		'examples/app/widgets/widgets.v':     'module widgets\n\npub fn draw() {}\n'
+		'examples/app/empty/readme.md':       'no sources\n'
+	})
+	defer {
+		os.rmdir_all(root) or {}
+	}
+	real := os.real_path(root)
+	imports := fn [real] (rel string) map[string]string {
+		fr := extract_v_file_result(os.join_path(real, rel), rel)
+		mut m := map[string]string{}
+		for s in fr.symbols {
+			if s.kind == .import_ {
+				m[s.signature] = s.name
+			}
+		}
+		for e in fr.edges {
+			if e.kind == .calls {
+				m['call ${e.to}'] = e.from
+			}
+		}
+		return m
+	}
+	x := imports('vlib/crypto/x/x.v')
+	assert 'import rand' in x, x.str()
+	assert 'import crypto.x.geometry as geometry' in x, x.str()
+	assert 'import os' in x, x.str()
+	assert 'call rand.intn' in x, x.str()
+	assert 'call crypto.x.geometry.area' in x, x.str()
+	u := imports('vlib/v/tests/deep/user/user_test.v')
+	assert 'import v.tests.helper as helper' in u, u.str()
+	assert 'call v.tests.helper.go' in u, u.str()
+	app := imports('examples/app/main.v')
+	assert 'import examples.app.widgets as w' in app, app.str()
+	assert 'import os' in app, app.str()
+	assert 'call examples.app.widgets.draw' in app, app.str()
+	// text has no place in a tree, so its imports stay as written
+	t := extract_v_text_result('module m\n\nimport geometry\n', 'vlib/crypto/x/m.v')
+	assert t.symbols.any(it.kind == .import_ && it.name == 'geometry')
+}

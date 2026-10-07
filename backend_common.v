@@ -178,3 +178,65 @@ fn without_if_attrs(src string) string {
 fn with_every_match_branch(src string) string {
 	return src.replace(r'$match @', r'$match mut @')
 }
+
+// resolve_import names the module an `import` means, looking only inside the
+// extracted tree so the result is the same on every host. `file_path` is the
+// importing file and `rel` its path from the tree's root; without them the
+// import is kept as written. The lookup follows V3's order: the importing
+// project's root (its nearest v.mod), the importing file's directory, the
+// tree's own `vlib` (when extracting V itself), then each ancestor directory.
+// A candidate is a directory holding .v files. The name is the module's path
+// below `vlib` (`v.tests.geometry`, and `os` for vlib/os), or below the tree's
+// root elsewhere. A module found nowhere, such as the standard library of a
+// project that doesn't include it, stays as written.
+fn resolve_import(mod string, file_path string, rel string) string {
+	if file_path == '' || rel == '' || mod == '' {
+		return mod
+	}
+	fp := file_path.replace('\\', '/')
+	r := rel.replace('\\', '/')
+	if !fp.ends_with('/' + r) {
+		return mod
+	}
+	root := fp[..fp.len - r.len - 1]
+	file_dir := fp.all_before_last('/')
+	mod_path := mod.replace('.', '/')
+	vlib := if os.file_name(root) == 'vlib' { root } else { root + '/vlib' }
+	mut cands := []string{}
+	mut d := file_dir
+	for {
+		if os.exists(d + '/v.mod') {
+			cands << d + '/' + mod_path
+			break
+		}
+		if d.len <= root.len {
+			break
+		}
+		d = d.all_before_last('/')
+	}
+	cands << file_dir + '/' + mod_path
+	cands << vlib + '/' + mod_path
+	d = file_dir
+	for {
+		cands << d + '/' + mod_path
+		if d.len <= root.len {
+			break
+		}
+		d = d.all_before_last('/')
+	}
+	for c in cands {
+		if has_v_sources(c) {
+			base := if c.starts_with(vlib + '/') { vlib } else { root }
+			return c[base.len + 1..].replace('/', '.')
+		}
+	}
+	return mod
+}
+
+fn has_v_sources(dir string) bool {
+	if !os.is_dir(dir) {
+		return false
+	}
+	entries := os.ls(dir) or { return false }
+	return entries.any(it.ends_with('.v'))
+}

@@ -17,14 +17,16 @@ pub fn extract_v_file(path string, rel string) ([]Symbol, []Edge) {
 }
 
 pub fn extract_v_file_result(path string, rel string) FileResult {
-	src := os.read_file(path) or { return FileResult{
-		parse_error: 'cannot read the file: ${err}'
-	} }
+	src := os.read_file(path) or {
+		return FileResult{
+			parse_error: 'cannot read the file: ${err}'
+		}
+	}
 	if src.contains('[if ') || src.contains(r'$match @') {
 		// see without_if_attrs and with_every_match_branch: parse a rewritten copy
-		return extract_v_text_result(src, rel)
+		return extract_v3_rewritten(src, rel, path)
 	}
-	return extract_v3(path, src, rel)
+	return extract_v3(path, src, rel, path)
 }
 
 pub fn extract_v_text(source string, rel string) ([]Symbol, []Edge) {
@@ -36,6 +38,12 @@ pub fn extract_v_text(source string, rel string) ([]Symbol, []Edge) {
 // reads only files. The file keeps `rel`'s name, which decides `_test.v`
 // handling and platform suffixes.
 pub fn extract_v_text_result(source string, rel string) FileResult {
+	return extract_v3_rewritten(source, rel, '')
+}
+
+// extract_v3_rewritten parses the rewritten copy; `real_path` is the file it
+// came from, if any, for resolving its imports.
+fn extract_v3_rewritten(source string, rel string, real_path string) FileResult {
 	dir := os.join_path(os.temp_dir(), 'graphify_v3_text_${os.getpid()}')
 	os.mkdir_all(dir) or {}
 	path := os.join_path(dir, os.file_name(rel))
@@ -43,13 +51,15 @@ pub fn extract_v_text_result(source string, rel string) FileResult {
 	// adds text; blanking the `@[if]` guards adds none, and the original
 	// attribute lines stay visible to it
 	text := with_every_match_branch(source)
-	os.write_file(path, without_if_attrs(text)) or { return FileResult{
-		parse_error: 'cannot write a temporary file: ${err}'
-	} }
+	os.write_file(path, without_if_attrs(text)) or {
+		return FileResult{
+			parse_error: 'cannot write a temporary file: ${err}'
+		}
+	}
 	defer {
 		os.rm(path) or {}
 	}
-	return extract_v3(path, text, rel)
+	return extract_v3(path, text, rel, real_path)
 }
 
 // V3File is one parsed file and what the walk needs to read it.
@@ -60,19 +70,23 @@ mut:
 	lines       []string
 	line_starts []int
 	rel         string
-	mod_id      string
+	// real_path is the file on disk, for resolve_import; '' for text
+	real_path string
+	mod_id    string
 	// imports maps each name an import is used by in code (its alias, or the
-	// last segment of its path) to the path, `json` -> `x.json2`
+	// last segment of its path) to the module's resolved path (resolve_import),
+	// `geometry` -> `v.tests.geometry`
 	imports map[string]string
-	// aliases holds only explicit `as` aliases: a type written with one is
-	// expanded to the module's path, as V 0.5.2 named it
+	// aliases holds explicit `as` aliases and imports that resolved to a longer
+	// path: a type written with one is expanded to the module's path, as V
+	// 0.5.2 named it
 	aliases map[string]string
 	// selected maps each name brought in by a selective import, `import util
 	// { shared }`, to its module's path
 	selected map[string]string
 }
 
-fn extract_v3(path string, src string, rel string) FileResult {
+fn extract_v3(path string, src string, rel string, real_path string) FileResult {
 	mut prefs := pref.new_preferences()
 	// Keep every branch of a `$if`, at file scope and in bodies, instead of the
 	// one this machine would compile: the graph then no longer depends on the
@@ -117,6 +131,7 @@ fn extract_v3(path string, src string, rel string) FileResult {
 		lines:       src.split('\n')
 		line_starts: starts
 		rel:         rel
+		real_path:   real_path
 	}
 	syms, edges := f.extract(flat.NodeId(root))
 	return FileResult{
@@ -287,10 +302,11 @@ fn (mut f V3File) extract(root flat.NodeId) ([]Symbol, []Edge) {
 		if n.kind != .import_decl {
 			continue
 		}
-		path := n.value
-		alias := if n.typ != '' { n.typ } else { path.all_after_last('.') }
+		written := n.value
+		path := resolve_import(written, f.real_path, f.rel)
+		alias := if n.typ != '' { n.typ } else { written.all_after_last('.') }
 		f.imports[alias] = path
-		if alias != path.all_after_last('.') {
+		if alias != written.all_after_last('.') || path != written {
 			f.aliases[alias] = path
 		}
 		for k in f.kids(id) {
