@@ -712,8 +712,8 @@ fn (mut f V3File) extract_fn(id flat.NodeId, mut syms []Symbol, mut edges []Edge
 	mut vars := map[string]string{}
 	for pid in params {
 		pn := f.node(pid)
-		if pn.value != '' && pn.value != '_' && pn.typ != '' {
-			vars[pn.value] = 't:' + f.type_text(pn.typ)
+		if pn.value != '' && pn.value != '_' {
+			vars[pn.value] = if pn.typ != '' { 't:' + f.type_text(pn.typ) } else { '' }
 		}
 	}
 	for i := start; i < params.len; i++ {
@@ -854,10 +854,45 @@ fn (mut f V3File) extract_interface(id flat.NodeId, mut syms []Symbol, mut edges
 	mut rseen := map[string]bool{}
 	for k in f.kids(id) {
 		m := f.node(k)
+		if m.kind != .interface_field {
+			continue
+		}
+		mline := f.line_of(m.pos.offset)
+		if m.op == .dot {
+			// a method; V3 marks it with `op`, its parameters are its children
+			mut parts := []string{}
+			mut mseen := map[string]bool{}
+			mid := '${iid}.${m.value}'
+			for pk in f.kids(k) {
+				pn := f.node(pk)
+				if pn.kind == .param {
+					parts << '${pn.value} ${f.type_text(pn.typ)}'
+					add_ref(mid, base_name(pn.typ), f.rel, mut edges, mut mseen)
+				}
+			}
+			mut sig := 'fn (${short}) ${m.value}(${parts.join(', ')})'
+			if m.typ != '' && m.typ != 'void' {
+				sig += ' ${f.type_text(m.typ)}'
+				add_ref(mid, base_name(m.typ), f.rel, mut edges, mut mseen)
+			}
+			f.add_symbol(mut syms, mut edges, Symbol{
+				id:        mid
+				name:      m.value
+				kind:      .method
+				signature: sig
+				file:      f.rel
+				line:      mline
+				end_line:  mline
+				is_pub:    is_pub
+				parent:    f.mod_id
+				doc:       doc_from(f.lines, mline)
+			})
+			continue
+		}
 		// an embedded interface is a member with no type and a capitalized
-		// name; methods and fields are lower case
+		// name; fields are lower case
 		base := base_name(m.value)
-		if m.kind == .interface_field && m.typ == '' && base.len > 0 && base[0].is_capital() {
+		if m.typ == '' && base.len > 0 && base[0].is_capital() {
 			edges << Edge{
 				from: iid
 				to:   base
@@ -865,6 +900,21 @@ fn (mut f V3File) extract_interface(id flat.NodeId, mut syms []Symbol, mut edges
 				file: f.rel
 			}
 			add_ref(iid, base, f.rel, mut edges, mut rseen)
+			continue
+		}
+		if m.typ != '' {
+			f.add_symbol(mut syms, mut edges, Symbol{
+				id:        '${iid}.${m.value}'
+				name:      m.value
+				kind:      .field
+				signature: '${m.value} ${f.type_text(m.typ)}'
+				file:      f.rel
+				line:      mline
+				end_line:  mline
+				is_pub:    is_pub
+				parent:    iid
+			})
+			add_ref(iid, base_name(m.typ), f.rel, mut edges, mut rseen)
 		}
 	}
 }
@@ -988,18 +1038,14 @@ const recipe_sep = '\x05'
 // each element, named `it`.
 const methods_with_it = ['filter', 'map', 'any', 'all', 'count']
 
-// with_vars returns `ctx` with `names` set to the matching recipes; an empty
-// recipe forgets the name, since the new variable shadows the outer one.
+// with_vars returns `ctx` with `names` declared, each with its recipe ('' when
+// its type is unknown); the new variable shadows any outer one.
 fn (ctx V3CallCtx) with_vars(names []string, recipes []string) V3CallCtx {
 	mut vars := ctx.vars.clone()
 	mut locals := ctx.locals.clone()
 	for i, name in names {
 		locals.delete(name)
-		if recipes[i] == '' {
-			vars.delete(name)
-		} else {
-			vars[name] = recipes[i]
-		}
+		vars[name] = recipes[i]
 	}
 	return V3CallCtx{
 		...ctx
@@ -1030,12 +1076,18 @@ fn (mut f V3File) walk(id flat.NodeId, ctx V3CallCtx, mut edges []Edge, mut seen
 				f.record_call(kids[0], ctx, mut edges, mut seen)
 				callee := f.node(kids[0])
 				ck := f.kids(kids[0])
-				if callee.kind == .selector && callee.value in methods_with_it && ck.len > 0 {
-					// `xs.filter(it.ok())`: `it` is one element of `xs`
+				if callee.kind == .selector && ck.len > 0
+					&& (callee.value in methods_with_it || callee.value in ['sort', 'sorted']) {
+					// `xs.filter(it.ok())`: `it` is one element of `xs`, and so
+					// are `a` and `b` in `xs.sort(a.x < b.x)`
 					r := f.recipe(ck[0], ctx)
 					f.walk(kids[0], ctx, mut edges, mut seen)
-					it_recipe := if r == '' { '' } else { r + recipe_sep + '[]' }
-					it_ctx := ctx.with_vars(['it'], [it_recipe])
+					elem := if r == '' { '' } else { r + recipe_sep + '[]' }
+					it_ctx := if callee.value in methods_with_it {
+						ctx.with_vars(['it'], [elem])
+					} else {
+						ctx.with_vars(['a', 'b'], [elem, elem])
+					}
 					f.walk_list(kids[1..], it_ctx, mut edges, mut seen)
 					return ctx
 				}
@@ -1389,7 +1441,9 @@ fn (mut f V3File) record_call(callee_id flat.NodeId, ctx V3CallCtx, mut edges []
 		// `$` and `__v_` names are compile-time forms and V3's own stand-ins
 		return
 	}
-	key := '${name}\x00${rt}\x00${recipe}'
+	// `f()` where `f` is a variable or parameter calls a function value
+	value_call := !is_method && name in ctx.vars
+	key := '${name}\x00${rt}\x00${recipe}\x00${value_call}'
 	if key in seen {
 		return
 	}
@@ -1402,5 +1456,6 @@ fn (mut f V3File) record_call(callee_id flat.NodeId, ctx V3CallCtx, mut edges []
 		recv_type:   rt
 		recv_recipe: recipe
 		file:        ctx.file
+		provenance:  if value_call { EdgeProvenance.undeclared } else { .extracted }
 	}
 }

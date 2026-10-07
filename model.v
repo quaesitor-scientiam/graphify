@@ -34,9 +34,14 @@ pub enum EdgeKind {
 // self-receiver shortcut); it is `inferred` when several real declarations
 // shared the name and one was picked by a locality/visibility heuristic, or
 // by the receiver's type as worked out through the graph (see infer.v).
+// `undeclared` marks an unresolved `calls` edge that has no declaration to
+// resolve to: a call of a function value (a variable, parameter or field of
+// function type), or a method V provides without declaring it
+// (`thread.wait()`, `array.filter()`). Its `to` stays the raw name.
 pub enum EdgeProvenance {
 	extracted
 	inferred
+	undeclared
 }
 
 // Symbol is one node in the graph: a single declaration.

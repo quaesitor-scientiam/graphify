@@ -23,18 +23,21 @@ V compiler's tree (b69f626f14) it cut unresolved calls from 28,642 to 7,733
 which a sample showed were mostly wrong (`name.contains('.')` on a string had
 resolved to `v.types.Scope.contains`).
 
-What remains, by receiver:
+**Interface members and undeclared calls (October 2026).** An interface's
+methods and fields are now symbols (`builtin.IError.msg`), so `err.msg()`
+and any call on an interface-typed value resolve to the interface's method;
+methods and fields reached through an embedded struct or interface are
+followed too. A call with no declaration to resolve to, of a function value
+(a variable, parameter or function-typed field), `thread.wait()` or an array
+method the compiler provides, is marked `undeclared` instead of counting as
+unresolved, and `explain` no longer lists it as a possible caller of a
+same-named function. On the same tree: 3,775 calls unresolved (1.5%), 1,631
+undeclared.
 
-- `err.msg()`, `err.code()` and other interface methods (about 2,300): an
-  interface's methods are not symbols in the graph, so there is nothing to
-  resolve to. Extracting them would let these resolve to the interface's
-  declaration.
-- calls of function values and closures (about 1,350), and `thread.wait()`
-  (about 400): no declaration exists; these could be counted apart from the
-  unresolved ones.
-- the rest (about 3,700): a module's const or global (the graph records no
-  type for one), a field reached through an embedded struct, generics, and
-  receivers whose type V itself infers.
+What remains is mostly a module's const or global as a receiver (the graph
+records no type for one), generics, receivers whose type V itself infers,
+and calls whose receiver the recipe doesn't cover (a `match` arm's
+variable, a multi-line chain).
 
 The raw edge is retained and `explain` reports ambiguous callers rather than
 inventing links. A future opt-in deep mode could run the checker over a whole

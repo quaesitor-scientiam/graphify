@@ -597,6 +597,9 @@ fn only_type_id(cands []TypeCand) ?string {
 struct CallResolution {
 	id       string
 	inferred bool
+	// undeclared: the call has no declaration to resolve to (see
+	// EdgeProvenance), and `id` is empty
+	undeclared bool
 }
 
 // resolve_edges turns raw names into symbol ids where a single matching
@@ -721,6 +724,12 @@ fn resolve_edges(mut g Graph) {
 	mut fn_names := map[string]string{}
 	mut field_type := map[string]string{}
 	mut alias_of := map[string]string{}
+	mut embeds_of := map[string][]Edge{}
+	for e in g.edges {
+		if e.kind == .embeds {
+			embeds_of[e.from] << e
+		}
+	}
 	for s in g.symbols {
 		match s.kind {
 			.function, .method {
@@ -749,6 +758,7 @@ fn resolve_edges(mut g Graph) {
 		name_of:      fn_names
 		field_type:   field_type
 		alias_of:     alias_of
+		embeds_of:    embeds_of
 	}
 	mut resolved := []Edge{cap: g.edges.len}
 	// record_call keeps one edge per callee and receiver, so two raw edges
@@ -760,7 +770,27 @@ fn resolve_edges(mut g Graph) {
 			// edge to it would send every consumer to whichever declaration
 			// happened to be indexed first. The raw name is honestly
 			// ambiguous rather than falsely precise.
+			if e.provenance == .undeclared {
+				// a call of a function value, found at extraction
+				key := '${e.from}\x00${e.to}'
+				if key !in seen_call {
+					seen_call[key] = resolved.len
+					resolved << e
+				}
+				continue
+			}
 			if res := inf.infer_call(e) {
+				if res.undeclared {
+					key := '${e.from}\x00${e.to}'
+					if key !in seen_call {
+						seen_call[key] = resolved.len
+						resolved << Edge{
+							...e
+							provenance: .undeclared
+						}
+					}
+					continue
+				}
 				if !unaddressable[res.id] {
 					key := '${e.from}\x00${res.id}'
 					if at := seen_call[key] {

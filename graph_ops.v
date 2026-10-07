@@ -340,7 +340,8 @@ pub fn (g Graph) explain(node string) string {
 		if same_name.len > 1 {
 			mut maybe := []string{}
 			for e in g.edges {
-				if e.kind == .calls && e.to == s.name && e.from in idx.by_id {
+				if e.kind == .calls && e.to == s.name && e.from in idx.by_id
+					&& e.provenance != .undeclared {
 					maybe << label(idx, e.from)
 				}
 			}

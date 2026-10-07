@@ -97,7 +97,7 @@ pub fn (g Graph) report() string {
 	}
 	b << ''
 	b << '## Edges by provenance'
-	b << '`extracted` = unique name or (calls only) a parser-typed receiver; `inferred` = picked among several real candidates by the inferred receiver type or by locality/visibility; `built-in` = a primitive type such as `int`, which has no declaration to resolve to; `external` = a call to a `C.` or `JS.` function; `unresolved` = name stayed ambiguous or unknown.'
+	b << '`extracted` = unique name or (calls only) a parser-typed receiver; `inferred` = picked among several real candidates by the inferred receiver type or by locality/visibility; `built-in` = a primitive type such as `int`, which has no declaration to resolve to; `external` = a call to a `C.` or `JS.` function; `undeclared` = a call with no declaration to resolve to, of a function value or a method V provides itself (`thread.wait()`); `unresolved` = name stayed ambiguous or unknown.'
 	b << '- calls: ${calls_prov.str()}'
 	b << '- references: ${refs_prov.str()}'
 	b << '- embeds: ${embeds_prov.str()}'
@@ -175,13 +175,15 @@ mut:
 	inferred   int
 	builtin    int // a primitive type name, see builtin_type_names
 	external   int // a call to a `C.` or `JS.` function
+	undeclared int // a call with no declaration, see EdgeProvenance
 	unresolved int
 }
 
 fn (c ProvCounts) str() string {
 	builtin := if c.builtin > 0 { ', built-in ${c.builtin}' } else { '' }
 	external := if c.external > 0 { ', external ${c.external}' } else { '' }
-	return 'extracted ${c.extracted}, inferred ${c.inferred}${builtin}${external}, unresolved ${c.unresolved}'
+	undeclared := if c.undeclared > 0 { ', undeclared ${c.undeclared}' } else { '' }
+	return 'extracted ${c.extracted}, inferred ${c.inferred}${builtin}${external}${undeclared}, unresolved ${c.unresolved}'
 }
 
 // builtin_type_names are V's primitive types. Unlike `string`, `array` and
@@ -210,6 +212,8 @@ fn count_provenance(idx Index, edges []Edge, kind EdgeKind) ProvCounts {
 				// the binding `fn C.foo(...)` is deliberately not a symbol (see
 				// extract_from_ast), and its body is foreign code anyway
 				c.external++
+			} else if e.provenance == .undeclared {
+				c.undeclared++
 			} else {
 				c.unresolved++
 			}
