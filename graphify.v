@@ -407,6 +407,15 @@ fn import_reaches(mod_id string, imported string) bool {
 	return mod_id == imported || mod_id.ends_with('.' + imported)
 }
 
+// test_private reports whether a declaration in `decl_file` is hidden from code
+// in `caller_file`: V compiles each `_test.v` file as its own program, so what
+// one declares is visible only inside it. Without this, an `enum Color` in
+// vlib/builtin/map_test.v counted as part of builtin and was visible from
+// every file in the repo.
+fn test_private(decl_file string, caller_file string) bool {
+	return decl_file.ends_with('_test.v') && decl_file != caller_file
+}
+
 // visible_from reports whether a declaration in module `mod` can be reached
 // from a file in `caller`'s module that imports `imports`: V's visibility rule
 // of own module, imports, and the auto-imported builtin.
@@ -632,9 +641,10 @@ fn resolve_edges(mut g Graph) {
 		// site_of answers "where does this edge's `from` live", so it only
 		// needs the kinds backend_v.v actually emits calls/embeds/references
 		// edges from: fn/method (calls, and param/receiver/return-type
-		// references), struct (field-type references and embeds) and
-		// interface (embeds). Enums and type_aliases are only ever a `to`.
-		if s.kind in [SymbolKind.function, .method, .struct_, .interface_] {
+		// references), struct (field-type references and embeds), interface
+		// (embeds) and type alias (the types it is built from). Enums are only
+		// ever a `to`.
+		if s.kind in [SymbolKind.function, .method, .struct_, .interface_, .type_alias] {
 			site_of[s.id] = DeclSite{
 				mod:     s.parent
 				file:    s.file
@@ -825,7 +835,7 @@ fn resolve_callee(e Edge, by_name map[string][]CallCand, site_of map[string]Decl
 	if caller.mod != '' && !caller.is_main {
 		mut same_mod := []CallCand{}
 		for c in narrowed {
-			if c.mod == caller.mod {
+			if c.mod == caller.mod && !test_private(c.file, caller.file) {
 				same_mod << c
 			}
 		}
@@ -842,7 +852,7 @@ fn resolve_callee(e Edge, by_name map[string][]CallCand, site_of map[string]Decl
 	imports := imports_of[caller.file] or { []string{} }
 	mut visible := []CallCand{}
 	for c in narrowed {
-		if visible_from(c.mod, caller, imports) {
+		if visible_from(c.mod, caller, imports) && !test_private(c.file, caller.file) {
 			visible << c
 		}
 	}
@@ -899,7 +909,7 @@ fn resolve_qualified_callee(e Edge, by_name map[string][]CallCand, site_of map[s
 		// `main` is shared by every standalone program, so the own-module
 		// match there is held to the caller's own file
 		own := prefix == scope.declared && c.mod == scope.mod && (!scope.is_main || c.file == file)
-		if own || (imported != '' && import_reaches(c.mod, imported)) {
+		if (own || (imported != '' && import_reaches(c.mod, imported))) && !test_private(c.file, file) {
 			fits << c
 		}
 	}
@@ -940,7 +950,7 @@ fn resolve_type_ref(e Edge, by_type_name map[string][]TypeCand, site_of map[stri
 	if caller.mod != '' && !caller.is_main {
 		mut same_mod := []TypeCand{}
 		for c in cands {
-			if c.mod == caller.mod {
+			if c.mod == caller.mod && !test_private(c.file, caller.file) {
 				same_mod << c
 			}
 		}
@@ -951,7 +961,7 @@ fn resolve_type_ref(e Edge, by_type_name map[string][]TypeCand, site_of map[stri
 	imports := imports_of[caller.file] or { []string{} }
 	mut visible := []TypeCand{}
 	for c in cands {
-		if visible_from(c.mod, caller, imports) {
+		if visible_from(c.mod, caller, imports) && !test_private(c.file, caller.file) {
 			visible << c
 		}
 	}

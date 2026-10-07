@@ -2870,3 +2870,75 @@ fn test_strip_generic_args() {
 	assert strip_generic_args('[4]int') == '[4]int'
 	assert strip_generic_args('&Pair[K, V]') == '&Pair'
 }
+
+fn test_type_declarations_are_symbols_and_resolve_references() {
+	// `type` declarations (alias, sum type, fn type) were never extracted, so
+	// every reference to one, `NodeId` in vlib/v/flat above all, stayed
+	// unresolved. A generic parameter such as `T` names no declaration and
+	// is not emitted as a reference at all.
+	src := 'module demo
+
+pub type NodeId = i32
+
+struct Leaf {}
+
+struct Branch {}
+
+type Tree = Branch | Leaf
+
+type Visit = fn (id NodeId) bool
+
+fn walk[T](t Tree, start NodeId, v Visit, extra T) {}
+'
+	root := write_tree('type_decls', {
+		'demo/demo.v': src
+	})
+	defer {
+		os.rmdir_all(root) or {}
+	}
+	g := build_graph(Options{ root: root })
+	by_id := maps_by_id(g.symbols)
+	assert by_id['demo.NodeId'].kind == .type_alias
+	assert by_id['demo.NodeId'].signature == 'pub type NodeId = i32'
+	assert by_id['demo.Tree'].signature == 'type Tree = Branch | Leaf'
+	assert by_id['demo.Visit'].kind == .type_alias
+	assert g.edges.any(it.kind == .defines && it.from == 'demo' && it.to == 'demo.Tree')
+	assert g.edges.any(it.kind == .references && it.from == 'demo.Tree' && it.to == 'demo.Leaf')
+	assert g.edges.any(it.kind == .references && it.from == 'demo.Visit' && it.to == 'demo.NodeId')
+	for want in ['demo.Tree', 'demo.NodeId', 'demo.Visit'] {
+		assert g.edges.any(it.kind == .references && it.from == 'demo.walk' && it.to == want), want
+	}
+	assert !g.edges.any(it.kind == .references && it.to == 'T')
+}
+
+fn test_test_file_declarations_are_not_visible_to_other_files() {
+	// vlib/builtin/map_test.v declares `enum Color`; treating it as part of
+	// builtin made it visible everywhere and won `Color` over the real one.
+	root := write_tree('test_private', {
+		'lib/builtin/map_test.v': 'module builtin
+
+enum Color {
+	red
+}
+
+fn test_color() {
+	_ = Color.red
+}
+'
+		'lib/color/color.v':      'module color
+
+pub type Color = int
+'
+		'app/app.v':              'module app
+
+import color
+
+fn paint(c color.Color) {}
+'
+	})
+	defer {
+		os.rmdir_all(root) or {}
+	}
+	g := build_graph(Options{ root: root })
+	assert g.edges.any(it.kind == .references && it.from == 'app.paint' && it.to == 'lib.color.Color')
+}

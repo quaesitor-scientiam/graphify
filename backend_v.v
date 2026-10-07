@@ -451,6 +451,61 @@ fn extract_from_ast(file &ast.File, mut table ast.Table, rel string, src []strin
 				add_embeds(id, stmt.embeds.map(it.typ), mut table, v_mod, rel, mut edges, mut
 					rseen)
 			}
+			ast.TypeDecl {
+				// `type X = Y` (alias), `type X = A | B` (sum type) and `type X =
+				// fn (...)`: V's own type names, which references and embeds
+				// point at as often as at structs.
+				short := stmt.name.all_after_last('.')
+				id := '${mod_id}.${short}'
+				pos := stmt.pos
+				mut parts := []ast.Type{}
+				mut rhs := ''
+				match stmt {
+					ast.AliasTypeDecl {
+						parts << stmt.parent_type
+						rhs = clean_type(table, stmt.parent_type, v_mod)
+					}
+					ast.SumTypeDecl {
+						for vt in stmt.variants {
+							parts << vt.typ
+						}
+						rhs = parts.map(clean_type(table, it, v_mod)).join(' | ')
+					}
+					ast.FnTypeDecl {
+						rhs = clean_type(table, stmt.typ, v_mod)
+						sym := table.sym(stmt.typ)
+						if sym.info is ast.FnType {
+							for prm in sym.info.func.params {
+								parts << prm.typ
+							}
+							if sym.info.func.return_type != ast.void_type {
+								parts << sym.info.func.return_type
+							}
+						}
+					}
+				}
+				syms << Symbol{
+					id:        id
+					name:      short
+					kind:      .type_alias
+					signature: (if stmt.is_pub { 'pub ' } else { '' }) + 'type ${short} = ${rhs}'
+					file:      rel
+					line:      pos.line_nr + 1
+					end_line:  end_of(pos)
+					is_pub:    stmt.is_pub
+					parent:    mod_id
+					doc:       doc_from(src, pos.line_nr + 1)
+				}
+				edges << Edge{
+					from: mod_id
+					to:   id
+					kind: .defines
+				}
+				mut rseen := map[string]bool{}
+				for t in parts {
+					add_ref(id, base_type_name(table, t, v_mod), rel, mut edges, mut rseen)
+				}
+			}
 			ast.ConstDecl {
 				for cf in stmt.fields {
 					id := '${mod_id}.${cf.name.all_after_last('.')}'
@@ -649,9 +704,16 @@ fn strip_generic_args(name string) string {
 	return out.bytestr()
 }
 
+// is_generic_param reports whether a type name is a generic parameter such as
+// `T`: V requires those to be exactly one capital letter, and they name no
+// declaration, so a reference to one could never resolve.
+fn is_generic_param(name string) bool {
+	return name.len == 1 && name[0] >= `A` && name[0] <= `Z`
+}
+
 // add_ref records a `references` edge to a type name, deduped per declaration.
 fn add_ref(from string, typename string, file string, mut edges []Edge, mut seen map[string]bool) {
-	if typename == '' || typename in seen {
+	if typename == '' || typename in seen || is_generic_param(typename) {
 		return
 	}
 	seen[typename] = true
