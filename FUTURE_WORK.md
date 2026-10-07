@@ -346,6 +346,18 @@ resolved to the main checkout's files, not the worktree's (seen with `-v`;
 the lookup rule wasn't traced): build the V3 binaries from the main checkout, or
 a worktree's changes are silently left out.
 
+Imports are resolved (`resolve_import` in backend_common.v, October 2026): V3
+records the path as written, so `import helper` in `vlib/v/tests/x` was just
+`helper`, ambiguous among the many test modules of that name. The lookup
+follows V3's order (the nearest v.mod's root, the importing file's
+directory, `vlib`, then ancestors) but only inside the extracted tree, so it
+stays host-independent, and names the module below `vlib` (`v.tests.helper`,
+`os`) or below the tree's root (`cmd.tools.vpm.test_utils`). It corrects
+V 0.5.2's nearest-first walk, which took `import rand` in `vlib/crypto/...`
+for `crypto.rand` and `import json2` for `x.json2`. On vlang: 23 fewer
+unresolved calls and 7 fewer unresolved type references; extraction 0.4 s
+slower (2.8 s).
+
 Mapping notes, for whoever moves this forward: methods are `fn_decl`s whose
 value is `Recv.name` with the receiver as the first `param`; a static method
 is `T@static@f` (graphify's `T__static__f`); a body-less V declaration in a
@@ -360,8 +372,9 @@ Known gaps before it can become the default:
 - Signatures show types as written (`fn(string) string`,
   `protobuf.ProtoScalar`) rather than V 0.5.2's resolved form (`fn (string)
   string`, `encoding.protobuf.ProtoScalar`): 10,427 signatures differ.
-- Imports are recorded as written, not resolved (`import json2` stays
-  `json2`).
+- V 0.5.2's parser adds pseudo-imports the source doesn't write
+  (`builtin.closure` for a closure, `sync.threads` for `spawn`, `sync`,
+  `v.preludes.embed_file`): 1,840 on vlang, which V3 doesn't record.
 - A few line numbers differ: a script's `main` starts at its first statement
   (V 0.5.2 said line 1), and a `const` ends a line earlier.
 - The test suite passes under `-d graphify_v3` on macOS and Windows (October
