@@ -703,8 +703,7 @@ dogfoods it on itself):
   binary without an extension: V always appends `.exe` on Windows, and the
   shell Claude Code runs hooks through there (Git Bash) finds
   `graphify-hook.exe` from `graphify-hook`, so the example works unedited on
-  every platform. If your setup runs hooks through a shell that does not,
-  add `.exe` to both commands in your copy.
+  every platform (tested on macOS and Windows).
 - **`.githooks/post-commit`** — rebuilds the graph after each commit. Enable with
   `git config core.hooksPath .githooks`.
 
