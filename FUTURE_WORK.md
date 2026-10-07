@@ -378,7 +378,8 @@ V3's anonymous struct names (which embed the absolute path) become
 `_VAnonStructN`, inline assembly for another architecture isn't flagged, and
 `@[if cond]` guards are blanked before V3 parses, since it drops a guarded
 body when the condition is false on the host (79 calls on vlang). A rerun on
-Windows should now give the same graph byte for byte.
+Windows should now give the same symbols and edges (`root` in graph.json is
+the machine's own path).
 
 The spike's probe programs were not kept; the method above is enough to repeat
 it.
