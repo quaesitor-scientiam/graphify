@@ -70,6 +70,11 @@ pub fn (g Graph) find(text string) []string {
 // resolve_one returns the single best id for a node reference (exact id, exact
 // name, or unique signature substring), or '' if none/ambiguous.
 pub fn (g Graph) resolve_one(query string) string {
+	// An empty reference names nothing: without this guard '' is a substring of
+	// every name and the fuzzy pass below would return an arbitrary symbol.
+	if query.trim_space() == '' {
+		return ''
+	}
 	idx := g.index()
 	if query in idx.by_id {
 		return query
@@ -87,6 +92,28 @@ pub fn (g Graph) resolve_one(query string) string {
 		}
 	}
 	return if matches.len > 0 { matches[0] } else { '' }
+}
+
+// required_tool_args lists, per MCP tool, the arguments it cannot run without.
+pub const required_tool_args = {
+	'query_graph':   ['text']
+	'get_node':      ['node']
+	'get_body':      ['node']
+	'get_neighbors': ['node']
+	'shortest_path': ['a', 'b']
+}
+
+// missing_tool_arg returns an error message naming the first required argument
+// of `tool` that is absent or blank in `args`, or '' when all are present.
+// `args` holds only the arguments the caller actually sent as strings, so a
+// JSON null or a non-string never reaches resolve_one as the text "null".
+pub fn missing_tool_arg(tool string, args map[string]string) string {
+	for name in required_tool_args[tool] or { []string{} } {
+		if args[name] or { '' }.trim_space() == '' {
+			return '${tool}: missing required argument `${name}`'
+		}
+	}
+	return ''
 }
 
 // query seeds from symbols matching `text`, walks outward over the graph

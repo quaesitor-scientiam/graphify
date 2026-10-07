@@ -3481,3 +3481,50 @@ fn test_an_implied_import_does_not_make_a_module_visible_to_calls() {
 	assert call.len == 1
 	assert call[0].to == 'helper', call[0].to
 }
+
+fn test_resolve_one_matches_nothing_for_an_empty_reference() {
+	mut g := Graph{}
+	g.symbols = [
+		Symbol{
+			id:     'json2.null'
+			name:   'null'
+			kind:   .constant
+			parent: 'json2'
+			file:   'types.v'
+		},
+		Symbol{
+			id:     'demo.greet'
+			name:   'greet'
+			kind:   .function
+			parent: 'demo'
+			file:   'demo.v'
+		},
+	]
+	assert g.resolve_one('') == ''
+	assert g.resolve_one('   ') == ''
+	assert g.resolve_one('greet') == 'demo.greet'
+	assert g.shortest_path('', 'greet').len == 0
+	assert g.neighbor_names('').len == 0
+}
+
+fn test_missing_tool_arg_names_the_absent_or_blank_argument() {
+	// The MCP layer passes only string-valued arguments, so a client sending
+	// `{"name": "x"}` instead of `{"node": "x"}` arrives here without `node`.
+	assert missing_tool_arg('get_node', {
+		'name': 'vlib.os.join_path'
+	}) == 'get_node: missing required argument `node`'
+	assert missing_tool_arg('get_body', {
+		'node': ''
+	}) == 'get_body: missing required argument `node`'
+	assert missing_tool_arg('get_neighbors', map[string]string{}) == 'get_neighbors: missing required argument `node`'
+	assert missing_tool_arg('query_graph', {
+		'text': '  '
+	}) == 'query_graph: missing required argument `text`'
+	assert missing_tool_arg('shortest_path', {
+		'a': 'x'
+	}) == 'shortest_path: missing required argument `b`'
+	assert missing_tool_arg('get_node', {
+		'node': 'greet'
+	}) == ''
+	assert missing_tool_arg('overview', map[string]string{}) == ''
+}

@@ -86,6 +86,16 @@ fn handle(line string, g graphify.Graph) string {
 }
 
 fn call_tool(name string, args map[string]json2.Any, g graphify.Graph) json2.Any {
+	mut str_args := map[string]string{}
+	for k, v in args {
+		if v is string {
+			str_args[k] = v
+		}
+	}
+	missing := graphify.missing_tool_arg(name, str_args)
+	if missing != '' {
+		return tool_result(missing, true)
+	}
 	text := match name {
 		'query_graph' {
 			budget := if 'budget' in args { (args['budget'] or { json2.null }).int() } else { 2000 }
@@ -122,15 +132,24 @@ fn call_tool(name string, args map[string]json2.Any, g graphify.Graph) json2.Any
 			'unknown tool: ${name}'
 		}
 	}
+	return tool_result(text, false)
+}
 
-	return jobj({
+// tool_result wraps `text` as an MCP tools/call result; `is_error` marks it as a
+// tool error the client should surface rather than treat as an answer.
+fn tool_result(text string, is_error bool) json2.Any {
+	mut res := {
 		'content': jarr([
 			jobj({
 				'type': jstr('text')
 				'text': jstr(text)
 			}),
 		])
-	})
+	}
+	if is_error {
+		res['isError'] = json2.Any(true)
+	}
+	return jobj(res)
 }
 
 // --- MCP metadata ---
