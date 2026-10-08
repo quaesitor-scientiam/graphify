@@ -467,10 +467,10 @@ v -prod -o bin/graphify-mcp     cmd/mcp
 bin/graphify extract .                 # produce graphify-out/graph.json first
 ```
 
-Build from the main checkout: in a Claude Code worktree under
-`.claude/worktrees/`, `import graphify` resolves to the main checkout's
-sources, and from the main checkout `v test .` also runs every worktree's
-copy of the tests ([FUTURE_WORK.md §9](FUTURE_WORK.md#9-building-inside-a-git-worktree-compiles-the-main-checkout)).
+Any checkout builds its own sources, including a Claude Code worktree under
+`.claude/worktrees/`: `graphify/alias.v` points `import graphify` at the
+checkout holding it. From the main checkout, `v test .` also runs every
+worktree's copy of the tests ([FUTURE_WORK.md §9](FUTURE_WORK.md#9-building-inside-a-git-worktree-compiles-the-main-checkout-fixed-october-2026)).
 
 The hook needs the `build` subcommand because its source is a `.vsh` script.
 Without it, V treats the file as a script to compile *and run*. Each build

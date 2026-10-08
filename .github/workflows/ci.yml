@@ -65,6 +65,22 @@ jobs:
           grep_on /tmp/graphify-hook-proj/main.v | grep -q additionalContext
           test "$(grep_on /tmp/graphify-hook-proj/README.md)" = '{}'
 
+      # A Claude Code worktree sits inside the main checkout, which is a
+      # directory named `graphify`; `import graphify` once resolved to it
+      # rather than to the worktree (FUTURE_WORK.md section 9). Build a copy
+      # in that layout and fail if any graphify source comes from outside it.
+      # Last, so the copy isn't in the smoke test's extract.
+      - name: A worktree builds its own sources
+        run: |
+          wt=.claude/worktrees/ci-check
+          mkdir -p "$wt"
+          git archive HEAD | tar -x -C "$wt"
+          cd "$wt"
+          v -print-v-files cmd/cli > files.txt
+          grep -q '/ci-check/backend_v.v$' files.txt
+          ! grep -v '/vlib/' files.txt | grep -v '/ci-check/'
+          v -o /tmp/graphify-wt cmd/cli
+
   # The tests, on every OS, and a check that extraction gives the same graph
   # on every OS (FUTURE_WORK.md section 8): each runner extracts the same
   # vlang commit, the one V itself is built from, and same-graph compares

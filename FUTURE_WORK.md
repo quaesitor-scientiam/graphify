@@ -400,9 +400,8 @@ by the backend unless `prefs.supports_inline_asm` is set, which the extractor
 does, so the flagged list doesn't depend on the host.
 
 Under V3, `import graphify` in `cmd/` in a worktree under `.claude/worktrees/`
-resolved to the main checkout's files, not the worktree's (seen with `-v`;
-the lookup rule wasn't traced): build the V3 binaries from the main checkout, or
-a worktree's changes are silently left out.
+resolved to the main checkout's files, not the worktree's; `graphify/alias.v`
+fixed that (§9).
 
 Imports are resolved (`resolve_import` in backend_common.v, October 2026): V3
 records the path as written, so `import helper` in `vlib/v/tests/x` was just
@@ -651,30 +650,35 @@ the Mac and Windows, and can never show up in a comparison between the two.
 Preserve mode parsed all 7,467 files without crashing, and no file had fewer
 functions than in default mode.
 
-## 9. Building inside a git worktree compiles the main checkout
+## 9. Building inside a git worktree compiles the main checkout (fixed, October 2026)
 
-`cmd/cli`, `cmd/mcp`, and `cmd/hooks/graphify_hook.vsh` all `import graphify`,
-and V resolves that import by directory name, walking up from the program
-being built. Claude Code worktrees live at `.claude/worktrees/<name>/`, so from
-a worktree the nearest directory named `graphify` is the main checkout. The
-build succeeds, but every binary built in a worktree contains the main
-checkout's code, not the worktree's.
+`cmd/cli`, `cmd/mcp`, and `cmd/hooks/graphify_hook.vsh` all `import graphify`.
+V3 looks for an imported module beside the importing file, then at the
+project root (the nearest `v.mod`), then in vlib and `~/.vmodules`, and last
+in each directory above the importer (`resolve_ancestor_module_path` in
+`vlib/v/driver/driver.v`). graphify's sources are the project root itself,
+not a `graphify/` directory in it, so only that last walk found them, and it
+took the first directory named `graphify` above the program. Claude Code
+worktrees live at `.claude/worktrees/<name>/`, so from a worktree that was
+the main checkout: every binary built there silently contained the main
+checkout's code. A checkout in a directory with any other name, and no
+`graphify` above it, didn't build at all.
 
-Tests are not affected the same way: `graphify_test.v` is itself
-`module graphify` in the repository root, so `v test` compiles the worktree's
-sources directly. A change can therefore pass its tests in a worktree while
-the binaries built there do not contain it. This happened while fixing the
-symbol id scheme. `v -print-v-files cmd/cli` shows which sources a build will
-use.
+`graphify/alias.v` makes the project root resolve to itself:
 
-Workaround, from a worktree:
-
-```
-mkdir -p /tmp/gfshim && ln -s "$PWD" /tmp/gfshim/graphify
-v -path "/tmp/gfshim|@vlib|@vmodules" -prod -o bin/graphify cmd/cli
+```v ignore
+@[alias: '@VMODROOT']
+module graphify
 ```
 
-Related: `v test .` from the main checkout also descends into
+V checks for a module alias at the project root before vlib or the walk up, and
+`@VMODROOT` is the checkout holding `alias.v`, so `import graphify` now
+means the checkout being built, whatever its directory is called. CI builds
+a copy of the checkout from inside the main one, the worktree layout, and
+fails if any graphify source comes from outside it. `v -print-v-files
+cmd/cli` shows which sources a build uses.
+
+Still true: `v test .` from the main checkout also descends into
 `.claude/worktrees/` and runs every worktree's copy of the tests, each against
 whatever commit that worktree has checked out. Since `77742d7` and `e48a80c`
 those copies no longer race on shared temp directories, but their results
@@ -682,6 +686,3 @@ describe stale code; the main checkout's own result is the line for
 `graphify_test.v` at the root. (With V 0.5.2, `v test graphify_test.v`
 tested just that file; V3 compiles a file given that way on its own, without
 the rest of the module, so it fails.)
-
-A durable fix could be a build script that detects a worktree and adds the
-module path itself, or at least a README note in the build section.
