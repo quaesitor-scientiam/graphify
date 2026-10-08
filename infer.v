@@ -30,6 +30,7 @@ struct Infer {
 	field_id     map[string]string // '<struct id>\x00<field>' -> the field's symbol id
 	consts       map[string][]Symbol // name -> the consts and globals with a recipe
 	enum_ids     map[string]bool     // ids of enums
+	dynamic_ids  map[string]bool     // ids of sum types and interfaces
 mut:
 	memo map[string]InferredType
 }
@@ -52,6 +53,10 @@ const const_depth = 4
 // array_same_type are the array methods whose result has the receiver's type;
 // builtin declares most of them as returning plain `array`, or not at all.
 const array_same_type = ['clone', 'filter', 'reverse', 'sorted', 'sorted_with_compare', 'slice']
+
+// array_elem_methods are the array methods that return one element, which
+// builtin declares as returning `voidptr`.
+const array_elem_methods = ['first', 'last', 'pop', 'pop_left']
 
 // array_builtins are array methods the compiler provides; builtin declares
 // some of them, and a call of one it doesn't declare is `undeclared`.
@@ -164,9 +169,10 @@ fn (inf &Infer) no_method(t InferredType, name string, file string) ?string {
 		short := named.all_after_last('.')
 		qual := if named.contains('.') { named.all_before_last('.') } else { '' }
 		if decl := inf.find_type(short, qual, t, file) {
-			// V writes `str()` for any type that doesn't, and the methods of
-			// a `@[flag]` enum
-			if name == 'str' || (decl.id in inf.enum_ids && name in flag_enum_methods) {
+			// V writes `str()` for any type that doesn't, the methods of a
+			// `@[flag]` enum, and `type_name()` of a sum type or interface
+			if name == 'str' || (decl.id in inf.enum_ids && name in flag_enum_methods)
+				|| (decl.id in inf.dynamic_ids && name in ['type_name', 'type_idx']) {
 				if _ := inf.field_of(t, name, file, 0) {
 				} else {
 					return ''
@@ -200,7 +206,7 @@ fn (inf &Infer) embedded(decl TypeCand) []TypeCand {
 	mut out := []TypeCand{}
 	for e in inf.embeds_of[decl.id] or { return out } {
 		res := resolve_type_ref(e, inf.by_type_name, inf.site_of, inf.imports_of) or { continue }
-		for c in inf.by_type_name[e.to] or { continue } {
+		for c in inf.by_type_name[e.to.all_after_last('.')] or { continue } {
 			if c.id == res.id {
 				out << c
 				break
@@ -277,6 +283,13 @@ fn (inf &Infer) follow_steps(e Edge, depth int) ?InferredType {
 		if step.starts_with('m:') {
 			name := step[2..]
 			if t.text.starts_with('[') && name in array_same_type {
+				continue
+			}
+			if t.text.starts_with('[') && name in array_elem_methods {
+				t.text = elem_type(t.text)?
+				continue
+			}
+			if t.text.starts_with('map[') && name == 'clone' {
 				continue
 			}
 			if t.text.starts_with('map[') && name in ['keys', 'values'] {
@@ -461,7 +474,7 @@ fn (inf &Infer) pick_method(cands []CallCand, name string, owner string, qual st
 	if id := only_id(own_mod) {
 		return id
 	}
-	return only_id(reachable)
+	return only_id(if qual != '' { exact_calls(reachable, qual) } else { reachable })
 }
 
 // find_type is the declaration of the type named `short`, qualified by `qual`,
@@ -485,6 +498,9 @@ fn (inf &Infer) find_type(short string, qual string, t InferredType, file string
 			reachable << c
 		}
 	}
+	if qual != '' {
+		reachable = exact_types(reachable, qual)
+	}
 	for tier in [same_file, own_mod, reachable] {
 		if id := only_type_id(tier) {
 			for c in tier {
@@ -500,6 +516,14 @@ fn (inf &Infer) find_type(short string, qual string, t InferredType, file string
 // field_of is the type of field `name` of the struct `t` names.
 fn (inf &Infer) field_of(t InferredType, name string, file string, depth int) ?InferredType {
 	text := bare_type(t.text)
+	// a dynamic array is builtin's `array` (`a.flags`), and a map its `map`;
+	// a fixed array has no fields
+	if text.starts_with('[]') || text.starts_with('map[') {
+		return inf.field_of(InferredType{
+			text: if text.starts_with('[]') { 'array' } else { 'map' }
+			mod:  'builtin'
+		}, name, file, depth)
+	}
 	if !is_named_type(text) {
 		return none
 	}

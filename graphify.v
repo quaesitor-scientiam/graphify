@@ -416,6 +416,27 @@ fn import_reaches(mod_id string, imported string) bool {
 	return mod_id == imported || mod_id.ends_with('.' + imported)
 }
 
+// import_names reports whether an import resolved to `imported` names the
+// module `mod_id` exactly. resolve_import (backend_common.v) records the path
+// from vlib, or from the graph root, so `import wasm` is `vlib.wasm` and not
+// also `vlib.v.gen.wasm`, which import_reaches can't tell apart.
+fn import_names(mod_id string, imported string) bool {
+	return mod_id == imported || mod_id == 'vlib.' + imported
+}
+
+// exact_calls keeps the candidates `imported` names exactly (import_names),
+// when there are any and they leave out others.
+fn exact_calls(cands []CallCand, imported string) []CallCand {
+	exact := cands.filter(import_names(it.mod, imported))
+	return if exact.len > 0 { exact } else { cands }
+}
+
+// exact_types is exact_calls for type declarations.
+fn exact_types(cands []TypeCand, imported string) []TypeCand {
+	exact := cands.filter(import_names(it.mod, imported))
+	return if exact.len > 0 { exact } else { cands }
+}
+
 // test_private reports whether a declaration in `decl_file` is hidden from code
 // in `caller_file`: V compiles each `_test.v` file as its own program, so what
 // one declares is visible only inside it. Without this, an `enum Color` in
@@ -720,6 +741,18 @@ fn resolve_edges(mut g Graph) {
 			site_of.delete(id)
 		}
 	}
+	// An id repeated within one module names per-platform variants of one
+	// function (see above), and a call edge says which file it is in, so
+	// that variant's location is known: keyed by id and file (site_key).
+	for s in g.symbols {
+		if s.kind in [SymbolKind.function, .method] && id_count[s.id] > 1 && !unaddressable[s.id] {
+			site_of[site_key(s.id, s.file)] = DeclSite{
+				mod:     s.parent
+				file:    s.file
+				is_main: in_main_unit(s, mains)
+			}
+		}
+	}
 	mut sig_of := map[string]string{}
 	mut fn_names := map[string]string{}
 	mut field_type := map[string]string{}
@@ -728,6 +761,7 @@ fn resolve_edges(mut g Graph) {
 	mut field_ids := map[string]string{}
 	mut consts := map[string][]Symbol{}
 	mut enum_ids := map[string]bool{}
+	mut dynamic_ids := map[string]bool{}
 	for e in g.edges {
 		if e.kind == .embeds {
 			embeds_of[e.from] << e
@@ -753,9 +787,14 @@ fn resolve_edges(mut g Graph) {
 			}
 			.type_alias {
 				rhs := s.signature.all_after(' = ')
-				if !rhs.contains(' | ') {
+				if rhs.contains(' | ') {
+					dynamic_ids[s.id] = true
+				} else {
 					alias_of[s.id] = rhs
 				}
+			}
+			.interface_ {
+				dynamic_ids[s.id] = true
 			}
 			else {}
 		}
@@ -774,6 +813,7 @@ fn resolve_edges(mut g Graph) {
 		field_id:     field_ids
 		consts:       consts
 		enum_ids:     enum_ids
+		dynamic_ids:  dynamic_ids
 	}
 	mut resolved := []Edge{cap: g.edges.len}
 	// record_call keeps one edge per callee and receiver, so two raw edges
@@ -857,6 +897,27 @@ fn resolve_edges(mut g Graph) {
 	g.edges = resolved
 }
 
+// site_key is where site_of keeps the location of one variant of an id that
+// several files declare (see resolve_edges).
+fn site_key(id string, file string) string {
+	return '${id}\x00${file}'
+}
+
+// caller_site is where the declaration an edge comes from lives: its id's
+// only declaration, or, for an id with per-platform variants, the one in the
+// file the edge was found in.
+fn caller_site(e Edge, site_of map[string]DeclSite) ?DeclSite {
+	if site := site_of[e.from] {
+		return site
+	}
+	if e.file != '' {
+		if site := site_of[site_key(e.from, e.file)] {
+			return site
+		}
+	}
+	return none
+}
+
 // resolve_callee picks the one declaration a call edge refers to, or none when
 // the raw name stays ambiguous. Narrowing is progressive, strongest signal
 // first: a globally unique name wins outright; then candidates of the matching
@@ -927,7 +988,7 @@ fn resolve_callee(e Edge, by_name map[string][]CallCand, site_of map[string]Decl
 	}
 	// no known caller location (unknown or duplicated id) means no locality
 	// signal is trustworthy, so stop here rather than guess
-	caller := site_of[e.from] or { return none }
+	caller := caller_site(e, site_of) or { return none }
 	mut same_file := []CallCand{}
 	for c in narrowed {
 		if c.file == caller.file {
@@ -950,6 +1011,31 @@ fn resolve_callee(e Edge, by_name map[string][]CallCand, site_of map[string]Decl
 		}
 		if id := only_id(same_mod) {
 			return CallResolution{ id: id, inferred: true }
+		}
+	}
+	// A plain `error()` names a function of the caller's own module or, when
+	// there is none, of builtin: another module's function needs its prefix,
+	// and a selective import's names already carry one (see callee in
+	// backend_v.v), so `log.error` is no candidate here. In a standalone
+	// program the "own module" is every program in its directory, which only
+	// makes this skip more often.
+	if !e.is_method && !e.to.contains('.') && !e.to.contains('__static__') {
+		mut own := false
+		mut builtins := []CallCand{}
+		for c in narrowed {
+			if test_private(c.file, caller.file) {
+				continue
+			}
+			if c.mod == caller.mod {
+				own = true
+			} else if import_reaches(c.mod, 'builtin') {
+				builtins << c
+			}
+		}
+		if !own {
+			if id := only_id(builtins) {
+				return CallResolution{ id: id, inferred: true }
+			}
 		}
 	}
 	// Last, V's own visibility rule: a file can only call what it imports,
@@ -993,7 +1079,7 @@ fn resolve_by_receiver_type(e Edge, cands []CallCand, site_of map[string]DeclSit
 	tshort := e.recv_type.all_after_last('.')
 	qual := e.recv_type.all_before_last('.')
 	suffix := '.${tshort}.${e.to}'
-	caller := site_of[e.from] or { DeclSite{} }
+	caller := caller_site(e, site_of) or { DeclSite{} }
 	file := if e.file != '' { e.file } else { caller.file }
 	mut same_file := []CallCand{}
 	mut own_mod := []CallCand{}
@@ -1063,15 +1149,33 @@ fn resolve_qualified_callee(e Edge, by_name map[string][]CallCand, site_of map[s
 		// `main` is shared by every standalone program, so the own-module
 		// match there is held to the caller's own file
 		own := prefix == scope.declared && c.mod == scope.mod && (!scope.is_main || c.file == file)
-		if (own || (imported != '' && import_reaches(c.mod, imported))) && !test_private(c.file, file) {
+		if own {
+			if !test_private(c.file, file) {
+				fits << c
+			}
+		} else if imported != '' && import_reaches(c.mod, imported) && importable(c.id, c.file, file, site_of) {
 			fits << c
 		}
 	}
-	id := only_id(fits)?
+	id := only_id(if imported != '' { exact_calls(fits, imported) } else { fits })?
 	return CallResolution{
 		id:       id
 		inferred: false
 	}
+}
+
+// importable reports whether the declaration `id` in `decl_file` can be
+// reached through an import from `caller_file`: not when it is private to a
+// test, nor when it is part of a standalone program, which no import names
+// (`import veb` matches the trailing segments of `examples.veb` too).
+fn importable(id string, decl_file string, caller_file string, site_of map[string]DeclSite) bool {
+	if test_private(decl_file, caller_file) {
+		return false
+	}
+	if site := site_of[id] {
+		return !site.is_main
+	}
+	return true
 }
 
 // resolve_type_ref picks the one declaration a raw type name (on an `embeds`
@@ -1082,16 +1186,33 @@ fn resolve_qualified_callee(e Edge, by_name map[string][]CallCand, site_of map[s
 // shortcut, which are calls-specific: a type name carries no notion of
 // "method vs function", and there is no receiver to type without inference.
 fn resolve_type_ref(e Edge, by_type_name map[string][]TypeCand, site_of map[string]DeclSite, imports_of map[string][]string) ?CallResolution {
-	cands := by_type_name[e.to] or { return none }
+	cands := by_type_name[e.to.all_after_last('.')] or { return none }
 	if cands.len == 0 {
 		return none
+	}
+	if e.to.contains('.') {
+		// named through its module (embed_name in backend_v.v): that
+		// module's type, never a local one of the same name
+		qual := e.to.all_before_last('.')
+		file := if e.file != '' { e.file } else { (caller_site(e, site_of) or { DeclSite{} }).file }
+		mut in_mod := []TypeCand{}
+		for c in cands {
+			if import_reaches(c.mod, qual) && importable(c.id, c.file, file, site_of) {
+				in_mod << c
+			}
+		}
+		id := only_type_id(exact_types(in_mod, qual))?
+		return CallResolution{
+			id:       id
+			inferred: false
+		}
 	}
 	if id := only_type_id(cands) {
 		return CallResolution{ id: id, inferred: false }
 	}
 	// no known site for the referencing declaration means no locality signal
 	// is trustworthy, so stop here rather than guess
-	caller := site_of[e.from] or { return none }
+	caller := caller_site(e, site_of) or { return none }
 	mut same_file := []TypeCand{}
 	for c in cands {
 		if c.file == caller.file {
