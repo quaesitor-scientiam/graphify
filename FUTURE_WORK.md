@@ -81,12 +81,24 @@ itself. On the V compiler's tree (a78037685a): unresolved references 1,283 ->
 880, with 180 retargeted; unresolved calls 1,568 -> 1,516, with 80
 retargeted.
 
-What remains is mostly generics (`T.str()`, and `json2.decode[T]()`'s
-result, whose type argument the recipe doesn't keep), receivers whose type V
-itself infers (a `match` arm's variable, a smartcast, an `unsafe {}` block's
-value), a sum type's shared field, function values the walk can't see are
-variables (`$for f in T.fields`), and calls whose receiver the recipe
-doesn't cover (a multi-line chain).
+**Generic call results (October 2026).** `json.decode[Config](s)!` returns
+`T`; the recipe for it now carries the type arguments written in the call
+(`p:` steps), and a free function's type parameters are read from its header
+line (V3's parser drops them, and they go in the symbol's `recipe`), so `T`
+becomes `Config`, and in `fold[T, R]` the second argument stands for `R`. An
+argument that can't be named (`&T`, `[]T`) keeps its place, so the others
+still line up. Receivers of a generic type, `Queue[T].pop()` on
+`Queue[int]`, aren't covered yet. On the V compiler's tree (the same commit
+as above): unresolved calls 1,516 -> 1,441 (0.56%), 64 more resolved, 1
+retargeted from a same-named method in an unrelated module to the
+`json2.Any` it returns, and 11 `str()`/`type_name()` calls marked undeclared
+(`d.str()` on a struct without a `str` method).
+
+What remains is mostly receivers whose type V itself infers (a `match` arm's
+variable, a smartcast, an `unsafe {}` block's value), generic receivers
+(`Queue[int].pop()`), a sum type's shared field, function values the walk
+can't see are variables (`$for f in T.fields`), and calls whose receiver the
+recipe doesn't cover (a multi-line chain).
 
 The raw edge is retained and `explain` reports ambiguous callers rather than
 inventing links. A future opt-in deep mode could run the checker over a whole

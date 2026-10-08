@@ -137,6 +137,27 @@ fn extract_v3(path string, src string, rel string, real_path string) FileResult 
 	}
 }
 
+// generic_params reads the type parameters of the free function `name`
+// declared on `line`, `fn fold[T, R](...)` -> [T, R]. V3's parser doesn't keep
+// them, but the header line does; a constraint (`T Number`) is dropped.
+fn (f &V3File) generic_params(line int, name string) []string {
+	if line < 1 || line > f.lines.len {
+		return []string{}
+	}
+	text := f.lines[line - 1]
+	at := text.index('fn ${name}[') or { return []string{} }
+	rest := text[at + 3 + name.len + 1..]
+	end := rest.index(']') or { return []string{} }
+	mut out := []string{}
+	for p in rest[..end].split(',') {
+		word := p.trim_space().all_before(' ')
+		if word != '' {
+			out << word
+		}
+	}
+	return out
+}
+
 // header_end_line is the line of the `{` that opens the body of the function
 // declared at `offset`, as V 0.5.2 recorded a function's end_line: the last
 // line of its header. It skips brackets and anonymous struct types, so a `{`
@@ -732,6 +753,7 @@ fn (mut f V3File) extract_fn(id flat.NodeId, mut syms []Symbol, mut edges []Edge
 		is_pub:    f.line_is_pub(line)
 		parent:    f.mod_id
 		doc:       doc_from(f.lines, line)
+		recipe:    if is_method { '' } else { f.generic_params(line, name).join(',') }
 	})
 	mut rseen := map[string]bool{}
 	if is_method {
@@ -1295,6 +1317,40 @@ fn (f &V3File) struct_init_type(id flat.NodeId) ?string {
 	return none
 }
 
+// type_arg names a type argument of a generic call (`Config` in
+// `json.decode[Config](s)`, `json.Any`) as a recipe step needs it: a primitive
+// as it is, anything else qualified with its module. An index that isn't a
+// type, `a[i](x)` or `[]T`, has no such name.
+fn (f &V3File) type_arg(id flat.NodeId) ?string {
+	n := f.node(id)
+	mut name := ''
+	if n.kind == .ident {
+		name = n.value
+	} else if n.kind == .selector {
+		ks := f.kids(id)
+		if ks.len != 1 || f.node(ks[0]).kind != .ident {
+			return none
+		}
+		name = '${f.node(ks[0]).value}.${n.value}'
+	} else {
+		return none
+	}
+	if name == '' {
+		return none
+	}
+	if name in primitive_types {
+		return name
+	}
+	if !name.all_after_last('.')[0].is_capital() {
+		return none
+	}
+	return f.recv_type(name)
+}
+
+// primitive_types are the built-in types, which have no declaration to name.
+const primitive_types = ['bool', 'string', 'rune', 'byte', 'voidptr', 'charptr', 'i8', 'i16',
+	'i32', 'i64', 'u8', 'u16', 'u32', 'u64', 'int', 'f32', 'f64', 'usize', 'isize']
+
 // recipe says how to find the type of the expression `id` from what the file
 // states, as steps that resolve_edges follows through the whole graph (see
 // infer.v): a start, `t:<type>` for a type written here (in this file's
@@ -1408,7 +1464,21 @@ fn (f &V3File) recipe(id flat.NodeId, ctx V3CallCtx) string {
 				return ''
 			}
 			if !is_method {
-				return 'c:' + name
+				mut rec := 'c:' + name
+				// `f[Config](x)`: the type arguments, `p:` steps in order,
+				// that follow_steps substitutes into the return type
+				if f.node(kids[0]).kind == .index {
+					ik := f.kids(kids[0])
+					if ik.len > 1 {
+						// an argument that can't be named (`&T`, `[]T`) keeps its
+						// place as an empty step, so the others still line up
+						for ta in ik[1..] {
+							arg := f.type_arg(ta) or { '' }
+							rec += recipe_sep + 'p:' + arg
+						}
+					}
+				}
+				return rec
 			}
 			r := f.recipe(target, ctx)
 			if r != '' {

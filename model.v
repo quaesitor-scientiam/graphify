@@ -61,7 +61,9 @@ pub mut:
 	doc       string // leading doc comment, if any
 	// recipe is a const's or global's type recipe (see recipe in
 	// backend_v.v), for inferring the type of a call's receiver that names
-	// it. Extraction-only, like Edge.recv_recipe: not written to graph.json.
+	// it; for a free function, its comma-separated type parameters, which a
+	// generic call's type arguments are matched to. Extraction-only, like
+	// Edge.recv_recipe: not written to graph.json.
 	recipe string @[json: '-']
 }
 

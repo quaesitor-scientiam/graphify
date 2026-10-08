@@ -762,6 +762,7 @@ fn resolve_edges(mut g Graph) {
 	mut consts := map[string][]Symbol{}
 	mut enum_ids := map[string]bool{}
 	mut dynamic_ids := map[string]bool{}
+	mut generics_of := map[string][]string{}
 	for e in g.edges {
 		if e.kind == .embeds {
 			embeds_of[e.from] << e
@@ -772,6 +773,9 @@ fn resolve_edges(mut g Graph) {
 			.function, .method {
 				sig_of[s.id] = s.signature
 				fn_names[s.id] = s.name
+				if s.kind == .function && s.recipe != '' {
+					generics_of[s.id] = s.recipe.split(',')
+				}
 			}
 			.field {
 				field_type['${s.parent}\x00${s.name}'] = s.signature.all_after(' ')
@@ -814,6 +818,7 @@ fn resolve_edges(mut g Graph) {
 		consts:       consts
 		enum_ids:     enum_ids
 		dynamic_ids:  dynamic_ids
+		generics_of:  generics_of
 	}
 	mut resolved := []Edge{cap: g.edges.len}
 	// record_call keeps one edge per callee and receiver, so two raw edges

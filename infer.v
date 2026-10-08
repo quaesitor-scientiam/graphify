@@ -31,6 +31,7 @@ struct Infer {
 	consts       map[string][]Symbol // name -> the consts and globals with a recipe
 	enum_ids     map[string]bool     // ids of enums
 	dynamic_ids  map[string]bool     // ids of sum types and interfaces
+	generics_of  map[string][]string // free function id -> its type parameters
 mut:
 	memo map[string]InferredType
 }
@@ -272,10 +273,28 @@ fn (inf &Infer) follow_steps(e Edge, depth int) ?InferredType {
 			id = (resolve_callee(call, inf.by_name, inf.site_of, inf.imports_of)?).id
 		}
 		t = inf.returns(id)?
+		// the type arguments of a generic call (`p:` steps) stand for the
+		// callee's type parameters, in order, in its return type
+		mut targs := []string{}
+		for step in steps[1..] {
+			if !step.starts_with('p:') {
+				break
+			}
+			targs << step[2..]
+		}
+		params := inf.generics_of[id] or { []string{} }
+		for i, param in params {
+			if i < targs.len && targs[i] != '' {
+				t.text = subst_word(t.text, param, targs[i])
+			}
+		}
 	} else {
 		return none
 	}
 	for step in steps[1..] {
+		if step.starts_with('p:') {
+			continue
+		}
 		t.text = bare_type(t.text)
 		if t.text == '' {
 			return none
@@ -352,6 +371,32 @@ fn (inf &Infer) find_const(name string, file string) ?Symbol {
 		}
 	}
 	return none
+}
+
+// subst_word replaces each `word` in a type text that stands alone, not as
+// part of a longer name (`T` in `[]T` or `!T`, not in `Tree` or `x.T`).
+fn subst_word(text string, word string, repl string) string {
+	mut out := ''
+	mut i := 0
+	for i < text.len {
+		end := i + word.len
+		if end <= text.len && text[i..end] == word {
+			before := if i > 0 { text[i - 1] } else { u8(` `) }
+			after := if end < text.len { text[end] } else { u8(` `) }
+			if !is_name_byte(before) && before != `.` && !is_name_byte(after) && after != `.` {
+				out += repl
+				i = end
+				continue
+			}
+		}
+		out += text[i..i + 1]
+		i++
+	}
+	return out
+}
+
+fn is_name_byte(c u8) bool {
+	return c.is_letter() || c.is_digit() || c == `_`
 }
 
 // returns is the return type of the function or method with id `id`, in the

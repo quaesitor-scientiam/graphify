@@ -4214,3 +4214,113 @@ fn load(a map[string]json.Any) gfx.Image {
 	assert g.edges.any(it.kind == .calls && it.from == 'vlib.db.open'
 		&& it.to == 'vlib.db.mysql.connect')
 }
+
+fn test_a_generic_call_returns_its_type_argument() {
+	// every method name is declared twice, in two imported modules, so the
+	// call's own file and module don't settle it: only the type does
+	g := graph_of({
+		'vlib/json/json.v':   'module json
+
+pub struct Any {}
+
+pub fn (a Any) as_map() map[string]Any {
+	return {}
+}
+
+pub struct Other {}
+
+pub fn (o Other) as_map() int {
+	return 0
+}
+
+pub fn (o Other) load() {}
+
+pub fn (o Other) describe() {}
+
+pub fn decode[T](s string) !T {
+	return T{}
+}
+
+pub fn element[T](xs []T) !T {
+	return xs[0]
+}
+
+pub fn fold[T, R](xs []T, init R) R {
+	return init
+}
+'
+		'vlib/models/models.v': 'module models
+
+pub struct Config {}
+
+pub fn (c Config) load() {}
+
+pub fn (c Config) describe() {}
+'
+		'app/main.v':         'module main
+
+import json
+import models
+
+fn run(s string) {
+	json.decode[models.Config](s)!.load()
+	json.decode[json.Any](s)!.as_map()
+	xs := [models.Config{}]
+	json.element[models.Config](xs)!.describe()
+}
+
+fn run_fold(xs []models.Config) {
+	json.fold[models.Config, json.Any](xs, json.Any{}).as_map()
+}
+
+fn run_fold_ptr(xs []&models.Config) {
+	// the unnamed `&models.Config` leaves the position of `R` intact
+	json.fold[&models.Config, json.Any](xs, json.Any{}).as_map()
+}
+'
+	})
+	calls := g.edges.filter(it.kind == .calls && it.from == 'app.run')
+	assert calls.any(it.to == 'vlib.models.Config.load')
+	assert calls.any(it.to == 'vlib.json.Any.as_map')
+	assert calls.any(it.to == 'vlib.models.Config.describe')
+	// `R` is the second type argument, not the first
+	fold := g.edges.filter(it.kind == .calls && it.from == 'app.run_fold')
+	assert fold.any(it.to == 'vlib.json.Any.as_map')
+	fold_ptr := g.edges.filter(it.kind == .calls && it.from == 'app.run_fold_ptr')
+	assert fold_ptr.any(it.to == 'vlib.json.Any.as_map')
+	// without type arguments the result is still `T`, so `as_map` (declared
+	// twice, so no unique name) stays unresolved
+	g2 := graph_of({
+		'vlib/json/json.v': 'module json
+
+pub struct Any {}
+
+pub fn (a Any) as_map() map[string]Any {
+	return {}
+}
+
+pub struct Other {}
+
+pub fn (o Other) as_map() int {
+	return 0
+}
+
+pub fn decode[T](s string) !T {
+	return T{}
+}
+'
+		'app/main.v': 'module main
+
+import json
+
+fn run(s string) {
+	json.decode(s)!.as_map()
+}
+'
+	})
+	untyped := g2.edges.filter(it.kind == .calls && it.from == 'app.run' && it.to.ends_with('as_map'))
+	assert untyped.len == 1
+	// still the raw name: neither declaration is picked
+	assert untyped[0].to == 'as_map'
+}
+
