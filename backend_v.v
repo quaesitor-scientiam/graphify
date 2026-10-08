@@ -342,17 +342,34 @@ fn base_name(t string) string {
 	return out
 }
 
-// embed_name names an embedded type as an `embeds` edge records it: its
+// type_ref names a type as an `embeds` or `references` edge records it: its
 // bare name, `Base`, or with the path of the module it comes from,
-// `veb.Context` -> `veb.Context` and `json.Any` -> `x.json2.Any`, so that
+// `veb.Context` -> `veb.Context`, `[]json.Any` -> `x.json2.Any`, and `Image`
+// from `import sokol.gfx { Image }` -> `sokol.gfx.Image`, so that
 // resolve_type_ref doesn't take a local type of the same name for it.
-fn (f &V3File) embed_name(t string) string {
+fn (f &V3File) type_ref(t string) string {
 	base := base_name(t)
 	name := strip_generic_args(anon_type(t))
-	if name.len > base.len && name.ends_with('.' + base) {
-		if path := f.imports[name[..name.len - base.len - 1]] {
+	if base != '' && name.ends_with('.' + base) {
+		head := name[..name.len - base.len - 1]
+		mut i := head.len
+		for i > 0 && (head[i - 1].is_alnum() || head[i - 1] == `_` || head[i - 1] == `.`) {
+			i--
+		}
+		qual := head[i..]
+		// as written, `json.Any`, or as type_text renders it, `x.json2.Any`
+		if path := f.imports[qual] {
 			return '${path}.${base}'
 		}
+		for _, path in f.imports {
+			if path == qual {
+				return '${path}.${base}'
+			}
+		}
+		return base
+	}
+	if path := f.selected[base] {
+		return '${path}.${base}'
 	}
 	return base
 }
@@ -394,7 +411,9 @@ fn (mut f V3File) extract(root flat.NodeId) ([]Symbol, []Edge) {
 		file:      f.rel
 		line:      mod_line
 	}
-	for id in top {
+	// an import inside `$if mysql ? { import db.mysql }` counts too, as every
+	// branch of a `$if` does (extract_v3)
+	for id in f.top_level_decls(top) {
 		n := f.node(id)
 		if n.kind != .import_decl {
 			continue
@@ -716,13 +735,13 @@ fn (mut f V3File) extract_fn(id flat.NodeId, mut syms []Symbol, mut edges []Edge
 	})
 	mut rseen := map[string]bool{}
 	if is_method {
-		add_ref(fid, base_name(recv_typ), f.rel, mut edges, mut rseen)
+		add_ref(fid, f.type_ref(recv_typ), f.rel, mut edges, mut rseen)
 	}
 	for i := start; i < params.len; i++ {
-		add_ref(fid, base_name(f.node(params[i]).typ), f.rel, mut edges, mut rseen)
+		add_ref(fid, f.type_ref(f.node(params[i]).typ), f.rel, mut edges, mut rseen)
 	}
 	if n.typ != '' && n.typ != 'void' {
-		add_ref(fid, base_name(n.typ), f.rel, mut edges, mut rseen)
+		add_ref(fid, f.type_ref(n.typ), f.rel, mut edges, mut rseen)
 	}
 	mut locals := map[string]string{}
 	mut vars := map[string]string{}
@@ -789,11 +808,11 @@ fn (mut f V3File) extract_struct(id flat.NodeId, mut syms []Symbol, mut edges []
 			// written, `Base`, `veb.Middleware[Context]`
 			edges << Edge{
 				from: sid
-				to:   f.embed_name(fd.typ)
+				to:   f.type_ref(fd.typ)
 				kind: .embeds
 				file: f.rel
 			}
-			add_ref(sid, base, f.rel, mut edges, mut rseen)
+			add_ref(sid, f.type_ref(fd.typ), f.rel, mut edges, mut rseen)
 			continue
 		}
 		fline := f.line_of(fd.pos.offset)
@@ -810,7 +829,7 @@ fn (mut f V3File) extract_struct(id flat.NodeId, mut syms []Symbol, mut edges []
 			is_pub:    f.field_is_pub(line, fline, n.value.starts_with('C.'))
 			parent:    sid
 		})
-		add_ref(sid, base, f.rel, mut edges, mut rseen)
+		add_ref(sid, f.type_ref(fd.typ), f.rel, mut edges, mut rseen)
 	}
 }
 
@@ -883,13 +902,13 @@ fn (mut f V3File) extract_interface(id flat.NodeId, mut syms []Symbol, mut edges
 				pn := f.node(pk)
 				if pn.kind == .param {
 					parts << '${pn.value} ${f.type_text(pn.typ)}'
-					add_ref(mid, base_name(pn.typ), f.rel, mut edges, mut mseen)
+					add_ref(mid, f.type_ref(pn.typ), f.rel, mut edges, mut mseen)
 				}
 			}
 			mut sig := 'fn (${short}) ${m.value}(${parts.join(', ')})'
 			if m.typ != '' && m.typ != 'void' {
 				sig += ' ${f.type_text(m.typ)}'
-				add_ref(mid, base_name(m.typ), f.rel, mut edges, mut mseen)
+				add_ref(mid, f.type_ref(m.typ), f.rel, mut edges, mut mseen)
 			}
 			f.add_symbol(mut syms, mut edges, Symbol{
 				id:        mid
@@ -911,11 +930,11 @@ fn (mut f V3File) extract_interface(id flat.NodeId, mut syms []Symbol, mut edges
 		if m.typ == '' && base.len > 0 && base[0].is_capital() {
 			edges << Edge{
 				from: iid
-				to:   f.embed_name(m.value)
+				to:   f.type_ref(m.value)
 				kind: .embeds
 				file: f.rel
 			}
-			add_ref(iid, base, f.rel, mut edges, mut rseen)
+			add_ref(iid, f.type_ref(m.value), f.rel, mut edges, mut rseen)
 			continue
 		}
 		if m.typ != '' {
@@ -930,7 +949,7 @@ fn (mut f V3File) extract_interface(id flat.NodeId, mut syms []Symbol, mut edges
 				is_pub:    is_pub
 				parent:    iid
 			})
-			add_ref(iid, base_name(m.typ), f.rel, mut edges, mut rseen)
+			add_ref(iid, f.type_ref(m.typ), f.rel, mut edges, mut rseen)
 		}
 	}
 }
@@ -994,7 +1013,7 @@ fn (mut f V3File) extract_globals(id flat.NodeId, mut syms []Symbol, mut edges [
 		})
 		if typ != '' {
 			mut rseen := map[string]bool{}
-			add_ref('${f.mod_id}.${g.value}', base_name(g.typ), f.rel, mut edges, mut rseen)
+			add_ref('${f.mod_id}.${g.value}', f.type_ref(g.typ), f.rel, mut edges, mut rseen)
 		}
 	}
 }
@@ -1038,7 +1057,7 @@ fn (mut f V3File) extract_type(id flat.NodeId, mut syms []Symbol, mut edges []Ed
 	})
 	mut rseen := map[string]bool{}
 	for t in parts {
-		add_ref(tid, base_name(t), f.rel, mut edges, mut rseen)
+		add_ref(tid, f.type_ref(t), f.rel, mut edges, mut rseen)
 	}
 }
 
