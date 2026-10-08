@@ -35,9 +35,11 @@ pub enum EdgeKind {
 // shared the name and one was picked by a locality/visibility heuristic, or
 // by the receiver's type as worked out through the graph (see infer.v).
 // `undeclared` marks an unresolved `calls` edge that has no declaration to
-// resolve to: a call of a function value (a variable, parameter or field of
-// function type), or a method V provides without declaring it
-// (`thread.wait()`, `array.filter()`). Its `to` stays the raw name.
+// resolve to: a call of a function value held in a variable or parameter,
+// or a method V provides without declaring it (`thread.wait()`,
+// `array.filter()`, `str()` on a type that doesn't declare one, a `@[flag]`
+// enum's `has()`). Its `to` stays the raw name. A call of a function-typed
+// field resolves to the field instead.
 pub enum EdgeProvenance {
 	extracted
 	inferred
@@ -57,6 +59,10 @@ pub mut:
 	is_pub    bool
 	parent    string // id of containing symbol, '' for top-level
 	doc       string // leading doc comment, if any
+	// recipe is a const's or global's type recipe (see recipe in
+	// backend_v.v), for inferring the type of a call's receiver that names
+	// it. Extraction-only, like Edge.recv_recipe: not written to graph.json.
+	recipe string @[json: '-']
 }
 
 // Edge is one relationship between two symbols (by id).

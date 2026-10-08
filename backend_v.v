@@ -421,6 +421,7 @@ fn (mut f V3File) extract(root flat.NodeId) ([]Symbol, []Edge) {
 			.enum_decl { f.extract_enum(id, mut syms, mut edges) }
 			.interface_decl { f.extract_interface(id, mut syms, mut edges) }
 			.const_decl { f.extract_consts(id, mut syms, mut edges) }
+			.global_decl { f.extract_globals(id, mut syms, mut edges) }
 			.type_decl { f.extract_type(id, mut syms, mut edges) }
 			else {}
 		}
@@ -929,6 +930,7 @@ fn (mut f V3File) extract_consts(id flat.NodeId, mut syms []Symbol, mut edges []
 			continue
 		}
 		name := decl_name(cf.value)
+		value := f.kids(k)
 		f.add_symbol(mut syms, mut edges, Symbol{
 			id:        '${f.mod_id}.${name}'
 			name:      name
@@ -940,7 +942,45 @@ fn (mut f V3File) extract_consts(id flat.NodeId, mut syms []Symbol, mut edges []
 			is_pub:    is_pub
 			parent:    f.mod_id
 			doc:       doc_from(f.lines, decl_line)
+			// the type follows from the value, `const names = ['a']`
+			recipe: if value.len > 0 { f.recipe(value[0], V3CallCtx{}) } else { '' }
 		})
+	}
+}
+
+// extract_globals records each `__global` variable, with its type when the
+// declaration writes one and the recipe of its value otherwise.
+fn (mut f V3File) extract_globals(id flat.NodeId, mut syms []Symbol, mut edges []Edge) {
+	for k in f.kids(id) {
+		g := f.node(k)
+		if g.kind != .field_decl || g.value == '' {
+			continue
+		}
+		value := f.kids(k)
+		typ := if g.typ != '' { f.type_text(g.typ) } else { '' }
+		line := f.line_of(g.pos.offset)
+		f.add_symbol(mut syms, mut edges, Symbol{
+			id:        '${f.mod_id}.${g.value}'
+			name:      g.value
+			kind:      .global
+			signature: '__global ${g.value}' + if typ != '' { ' ${typ}' } else { '' }
+			file:      f.rel
+			line:      line
+			end_line:  f.line_of(g.pos.end)
+			parent:    f.mod_id
+			doc:       doc_from(f.lines, line)
+			recipe:    if typ != '' {
+				't:' + typ
+			} else if value.len > 0 {
+				f.recipe(value[0], V3CallCtx{})
+			} else {
+				''
+			}
+		})
+		if typ != '' {
+			mut rseen := map[string]bool{}
+			add_ref('${f.mod_id}.${g.value}', base_name(g.typ), f.rel, mut edges, mut rseen)
+		}
 	}
 }
 
@@ -1217,7 +1257,9 @@ fn (f &V3File) struct_init_type(id flat.NodeId) ?string {
 // call, named as record_call names it; then any of `m:<name>` (the return type
 // of that method), `f:<name>` (that field's type), `[]` (an element), `k` (a
 // map's key, or an array's index), `a` (an array of it) and `#<i>` (that value
-// of a multi-value return), joined by recipe_sep. It is '' when the type
+// of a multi-value return), joined by recipe_sep. A const or global starts
+// it as `g:<name>`, or `g:<module>.<name>` from another module, and is
+// followed through its own recipe (Symbol.recipe). It is '' when the type
 // can't be worked out this way.
 fn (f &V3File) recipe(id flat.NodeId, ctx V3CallCtx) string {
 	if int(id) < 0 {
@@ -1242,7 +1284,11 @@ fn (f &V3File) recipe(id flat.NodeId, ctx V3CallCtx) string {
 			return 't:rune'
 		}
 		.ident {
-			return ctx.vars[n.value] or { '' }
+			if n.value in ctx.vars {
+				return ctx.vars[n.value]
+			}
+			// not a variable in scope: a const or global of this module
+			return 'g:' + n.value
 		}
 		.paren, .or_expr {
 			return if kids.len > 0 { f.recipe(kids[0], ctx) } else { '' }
@@ -1295,9 +1341,12 @@ fn (f &V3File) recipe(id flat.NodeId, ctx V3CallCtx) string {
 			}
 			if kids.len == 1 {
 				t := f.node(kids[0])
-				if t.kind == .ident && (t.value in f.imports || t.value in ['C', 'JS']) {
-					// a module's const, whose type the graph doesn't record
+				if t.kind == .ident && t.value in ['C', 'JS'] {
 					return ''
+				}
+				if t.kind == .ident && t.value in f.imports && t.value !in ctx.vars {
+					// another module's const or global, `os.args`
+					return 'g:' + f.imports[t.value] + '.' + n.value
 				}
 				r := f.recipe(kids[0], ctx)
 				if r != '' {

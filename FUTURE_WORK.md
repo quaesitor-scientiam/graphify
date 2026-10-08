@@ -36,17 +36,22 @@ undeclared.
 
 `Graph.index()` leaves undeclared calls unresolved, so query, path, explain
 and communities don't link them to a same-named declaration by unique name
-(109 did so on that tree). That also drops the right ones: about 40 of the 62
-that matched a field were a function-typed field of the caller's own type,
-such as `s.on_running()` in `net.http.Server.listen_and_serve`. infer.v knows
-the field when it marks the call `undeclared` (`field_of`); recording its id,
-as a `references` edge or a field on the call, would keep those links but
-changes graph.json.
+(109 did so on that tree).
 
-What remains is mostly a module's const or global as a receiver (the graph
-records no type for one), generics, receivers whose type V itself infers,
-and calls whose receiver the recipe doesn't cover (a `match` arm's
-variable, a multi-line chain).
+**Consts, globals and function fields (October 2026).** A const records the
+recipe of its value and a `__global` its type (globals are now symbols), so a
+receiver that names one, `preface.bytes()` or `os.args.clone()`, is followed
+through it. A call of a function-typed field, `s.on_running()`, resolves to
+the field's declaration with provenance `inferred`, rather than being
+undeclared. `str()` on a type that doesn't declare one, and a `@[flag]`
+enum's `has()`/`set()`/..., are methods V writes itself and are marked
+undeclared. On the V compiler's tree (245448b415): 2,748 calls unresolved
+(1.1%), 2,159 undeclared; every changed resolution in a sample was a
+correction (`a.flags.set(.noscan_data)` had resolved to `array.set`).
+
+What remains is mostly generics (`T.str()`), receivers whose type V itself
+infers (a `match` arm's variable, a smartcast), a sum type's shared field,
+and calls whose receiver the recipe doesn't cover (a multi-line chain).
 
 The raw edge is retained and `explain` reports ambiguous callers rather than
 inventing links. A future opt-in deep mode could run the checker over a whole
