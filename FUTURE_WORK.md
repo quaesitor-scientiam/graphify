@@ -49,9 +49,31 @@ undeclared. On the V compiler's tree (245448b415): 2,748 calls unresolved
 (1.1%), 2,159 undeclared; every changed resolution in a sample was a
 correction (`a.flags.set(.noscan_data)` had resolved to `array.set`).
 
-What remains is mostly generics (`T.str()`), receivers whose type V itself
-infers (a `match` arm's variable, a smartcast), a sum type's shared field,
-and calls whose receiver the recipe doesn't cover (a multi-line chain).
+**Builtin calls, guard errors and qualified embeds (October 2026).** A plain
+`error()` resolves by V's own rule: the caller's module's function, else
+builtin's, since another module's needs its prefix (`log.error`); before,
+an imported module's same-named function made it ambiguous. A function
+with a variant per platform (`_windows.c.v`, `_linux.c.v`) is placed by the
+file a call is in, where its shared id had left it with no location at all.
+`err` in the `else` of `if x := f()` is `IError`, as in `or {}`. An embedded
+`veb.Context` keeps its module on the `embeds` edge, so it no longer
+resolves to the local `Context` that embeds it (51 structs had embedded
+themselves); a module named through an import is the one `resolve_import`
+found (`import wasm` is `vlib.wasm`, not `vlib.v.gen.wasm`), and never a
+standalone program's directory (`examples/veb`). A dynamic array's fields
+are `array`'s (`xs.flags.has()`), `first()`/`last()`/`pop()` give an
+element rather than builtin's `voidptr`, and `type_name()` on a sum type or
+interface is undeclared. On the V compiler's tree (245448b415): 1,561 calls
+unresolved (0.61%), 2,237 undeclared; each changed resolution in a sample
+was a correction (`db.DB.select()` through an embedded `sqlite.DB` had
+resolved to the calling method itself).
+
+What remains is mostly generics (`T.str()`, and `json2.decode[T]()`'s
+result, whose type argument the recipe doesn't keep), receivers whose type V
+itself infers (a `match` arm's variable, a smartcast, an `unsafe {}` block's
+value), a sum type's shared field, function values the walk can't see are
+variables (`$for f in T.fields`), and calls whose receiver the recipe
+doesn't cover (a multi-line chain).
 
 The raw edge is retained and `explain` reports ambiguous callers rather than
 inventing links. A future opt-in deep mode could run the checker over a whole

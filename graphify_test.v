@@ -3915,3 +3915,220 @@ fn run(h lib.Holder) {
 	globals := g.symbols.filter(it.kind == .global)
 	assert globals.len == 1 && globals[0].id == 'app.counter'
 }
+
+fn test_err_in_an_if_guard_else_is_the_error() {
+	g := graph_of({
+		'vlib/builtin/err.v': 'module builtin
+
+pub interface IError {
+	msg() string
+}
+'
+		'lib/lib.v':          'module lib
+
+pub struct Doc {
+	msg string
+}
+
+pub fn (d Doc) msg() string {
+	return d.msg
+}
+
+fn find(x int) !int {
+	return x
+}
+
+fn run() {
+	if n := find(1) {
+		println(n)
+	} else {
+		println(err.msg())
+	}
+}
+'
+	})
+	calls := g.edges.filter(it.kind == .calls && it.from == 'lib.run')
+	assert calls.any(it.to == 'vlib.builtin.IError.msg')
+	assert !calls.any(it.to == 'lib.Doc.msg')
+}
+
+fn test_a_plain_call_is_its_own_module_or_builtin() {
+	// `error()` from a file that imports log is still builtin's: log's needs
+	// its prefix
+	files := {
+		'vlib/builtin/b.v':   'module builtin
+
+pub fn error(s string) int {
+	return 0
+}
+'
+		'vlib/builtin/js/b.v': 'module builtin
+
+pub fn error(s string) int {
+	return 1
+}
+'
+		'vlib/log/log.v':      'module log
+
+pub fn error(s string) {
+}
+'
+		'lib/a_windows.c.v':   'module lib
+
+import log
+
+fn helper() {
+	error("x")
+	log.error("y")
+}
+'
+		'lib/a_linux.c.v':     'module lib
+
+fn helper() {
+	error("x")
+}
+'
+		'own/own.v':           'module own
+
+fn error(s string) int {
+	return 2
+}
+
+fn run() {
+	error("z")
+}
+'
+	}
+	g := graph_of(files)
+	// `lib.helper` has a variant per platform; each call's own file places it
+	helper := g.edges.filter(it.kind == .calls && it.from == 'lib.helper')
+	assert helper.any(it.to == 'vlib.builtin.error')
+	assert helper.any(it.to == 'vlib.log.error')
+	assert !helper.any(it.to == 'error')
+	run := g.edges.filter(it.kind == .calls && it.from == 'own.run')
+	assert run.len == 1 && run[0].to == 'own.error'
+}
+
+fn test_an_embed_through_a_module_is_that_modules_type() {
+	g := graph_of({
+		'vlib/veb/context.v':      'module veb
+
+pub struct Response {}
+
+pub fn (mut r Response) set_status(code int) {
+}
+
+pub struct Context {
+pub mut:
+	res Response
+}
+'
+		'vlib/wasm/module.v':      'module wasm
+
+pub struct Module {}
+
+pub fn (mut m Module) new_function(name string) int {
+	return 0
+}
+'
+		'vlib/v/gen/wasm/enc.v':   'module wasm
+
+pub struct Module {}
+
+pub fn (mut m Module) new_function(name string) int {
+	return 1
+}
+'
+		'examples/veb/example.v':  'module main
+
+pub struct Context {}
+
+fn main() {}
+'
+		'examples/app/main.v':     'module main
+
+import veb
+import wasm
+
+pub struct Context {
+	veb.Context
+}
+
+struct Math {
+	wasm.Module
+}
+
+fn (mut ctx Context) handle(mut m Math) {
+	ctx.res.set_status(404)
+	m.new_function("add")
+}
+
+fn main() {}
+'
+	})
+	embeds := g.edges.filter(it.kind == .embeds && it.from == 'examples.app.Context')
+	// not the struct itself, nor the standalone program in examples/veb
+	assert embeds.len == 1 && embeds[0].to == 'vlib.veb.Context'
+	// `import wasm` is vlib/wasm, not vlib/v/gen/wasm
+	assert g.edges.any(it.kind == .embeds && it.from == 'examples.app.Math'
+		&& it.to == 'vlib.wasm.Module')
+	calls := g.edges.filter(it.kind == .calls && it.from == 'examples.app.Context.handle')
+	assert calls.any(it.to == 'vlib.veb.Response.set_status')
+	assert calls.any(it.to == 'vlib.wasm.Module.new_function')
+}
+
+fn test_array_fields_elements_and_generated_methods() {
+	g := graph_of({
+		'vlib/builtin/b.v': 'module builtin
+
+@[flag]
+pub enum ArrayFlags {
+	noslices
+	noshrink
+}
+
+pub struct array {
+pub mut:
+	flags ArrayFlags
+}
+
+pub fn (a array) last() voidptr {
+	return unsafe { nil }
+}
+
+pub fn (s string) split(d string) []string {
+	return []
+}
+
+pub fn (s string) trim(c string) string {
+	return s
+}
+'
+		'lib/lib.v':        'module lib
+
+pub type Value = int | string
+
+pub struct Buf {}
+
+pub fn (b Buf) trim(c string) Buf {
+	return b
+}
+
+fn run(xs []int, s string, v Value) {
+	if xs.flags.has(.noslices) {
+	}
+	println(s.split(",").last().trim(" "))
+	println(v.type_name())
+}
+'
+	})
+	calls := g.edges.filter(it.kind == .calls && it.from == 'lib.run')
+	// `last()` is declared as returning voidptr, but is one element
+	assert calls.any(it.to == 'vlib.builtin.string.trim')
+	// methods V generates: a flag enum's on an array's field, and type_name()
+	for name in ['has', 'type_name'] {
+		e := calls.filter(it.to == name)
+		assert e.len == 1, name
+		assert e[0].provenance == .undeclared, name
+	}
+}

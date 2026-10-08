@@ -342,6 +342,21 @@ fn base_name(t string) string {
 	return out
 }
 
+// embed_name names an embedded type as an `embeds` edge records it: its
+// bare name, `Base`, or with the path of the module it comes from,
+// `veb.Context` -> `veb.Context` and `json.Any` -> `x.json2.Any`, so that
+// resolve_type_ref doesn't take a local type of the same name for it.
+fn (f &V3File) embed_name(t string) string {
+	base := base_name(t)
+	name := strip_generic_args(anon_type(t))
+	if name.len > base.len && name.ends_with('.' + base) {
+		if path := f.imports[name[..name.len - base.len - 1]] {
+			return '${path}.${base}'
+		}
+	}
+	return base
+}
+
 // recv_type renders a receiver type as walk_call stamps it: an unqualified type
 // gets this module's id, a qualified one keeps its module.
 fn (f &V3File) recv_type(t string) string {
@@ -774,7 +789,7 @@ fn (mut f V3File) extract_struct(id flat.NodeId, mut syms []Symbol, mut edges []
 			// written, `Base`, `veb.Middleware[Context]`
 			edges << Edge{
 				from: sid
-				to:   base
+				to:   f.embed_name(fd.typ)
 				kind: .embeds
 				file: f.rel
 			}
@@ -896,7 +911,7 @@ fn (mut f V3File) extract_interface(id flat.NodeId, mut syms []Symbol, mut edges
 		if m.typ == '' && base.len > 0 && base[0].is_capital() {
 			edges << Edge{
 				from: iid
-				to:   base
+				to:   f.embed_name(m.value)
 				kind: .embeds
 				file: f.rel
 			}
@@ -1154,6 +1169,17 @@ fn (mut f V3File) walk(id flat.NodeId, ctx V3CallCtx, mut edges []Edge, mut seen
 					recipes << if r == '' { '' } else { r + recipe_sep + '[]' }
 				}
 				f.walk_list(kids, ctx.with_vars(names, recipes), mut edges, mut seen)
+				return ctx
+			}
+		}
+		.if_expr {
+			// `if x := f() { ... } else { ... }`: `x` is declared for the
+			// first branch, and the error is `err` in the rest
+			if kids.len >= 2 && f.node(kids[0]).kind == .decl_assign {
+				guard := f.walk(kids[0], ctx, mut edges, mut seen)
+				f.walk(kids[1], guard, mut edges, mut seen)
+				f.walk_list(kids[2..], ctx.with_vars(['err'], ['t:IError']), mut edges, mut
+					seen)
 				return ctx
 			}
 		}
