@@ -316,7 +316,12 @@ fn (inf &Infer) follow_steps(e Edge, depth int) ?InferredType {
 				t.text = '[]' + if name == 'keys' { k } else { v }
 				continue
 			}
-			t = inf.returns(inf.method_on(t, name, e.file, 0)?)?
+			found := inf.method_on(t, name, e.file, 0)?
+			mut ret := inf.returns(found)?
+			// `Queue[int].pop()` returns the `T` of `Queue[T]`, here `int`
+			owner := found.all_before_last('.').all_after_last('.').all_before('[')
+			ret.text = owner_args(ret.text, t, owner, inf.generics_of[found] or { []string{} })
+			t = ret
 		} else if step.starts_with('f:') {
 			t = inf.field_of(t, step[2..], e.file, 0)?
 		} else if step == '[]' {
@@ -371,6 +376,96 @@ fn (inf &Infer) find_const(name string, file string) ?Symbol {
 		}
 	}
 	return none
+}
+
+// split_type_args are the arguments in a generic type's brackets, `Queue[[]string]`
+// -> [[]string]: a nested bracket stays with the argument it is in. Empty for a
+// type without brackets, and for an array or map, whose bracket isn't a
+// generic one.
+fn split_type_args(t string) []string {
+	mut text := t.trim_space().trim_left('&')
+	if text.starts_with('[') || text.starts_with('map[') || text.starts_with('chan ') {
+		return []string{}
+	}
+	open := text.index('[') or { return []string{} }
+	close := text.last_index(']') or { return []string{} }
+	if close <= open + 1 {
+		return []string{}
+	}
+	inner := text[open + 1..close]
+	mut out := []string{}
+	mut depth := 0
+	mut cur := ''
+	for i in 0 .. inner.len {
+		c := inner[i]
+		if c == `[` {
+			depth++
+		} else if c == `]` {
+			depth--
+		}
+		if c == `,` && depth == 0 {
+			out << cur.trim_space()
+			cur = ''
+			continue
+		}
+		cur += inner[i..i + 1]
+	}
+	out << cur.trim_space()
+	return out
+}
+
+// qualify_type_names names the unqualified types in a type text as declared in
+// module `mod`, so that a type argument taken from one module still means the
+// same type where it is substituted into another module's declaration: `[]Config`
+// in `main` becomes `[]main.Config`. A name already qualified stays as written.
+fn qualify_type_names(t string, mod string) string {
+	if mod == '' {
+		return t
+	}
+	mut out := ''
+	mut i := 0
+	for i < t.len {
+		if t[i].is_letter() || t[i] == `_` {
+			mut j := i
+			for j < t.len && (t[j].is_letter() || t[j].is_digit() || t[j] == `_` || t[j] == `.`) {
+				j++
+			}
+			word := t[i..j]
+			if word[0].is_capital() && !word.contains('.') {
+				out += '${mod}.${word}'
+			} else {
+				out += word
+			}
+			i = j
+			continue
+		}
+		out += t[i..i + 1]
+		i++
+	}
+	return out
+}
+
+// owner_args substitutes the type arguments a generic receiver was written with
+// (`Queue[int]`) for the type parameters its declaration names (`Queue[T]`), in
+// the text a member of it returns or holds, `T` in `!T` or `[]T`. It does
+// nothing unless `owner`, the type that declares the member, is the receiver's
+// own type and the counts agree.
+fn owner_args(text string, recv InferredType, owner string, params []string) string {
+	args := split_type_args(recv.text)
+	if params.len == 0 || params.len != args.len || owner != bare_name(recv.text) {
+		return text
+	}
+	mut out := text
+	for i, param in params {
+		out = subst_word(out, param, qualify_type_names(args[i], recv.mod))
+	}
+	return out
+}
+
+// bare_name is the last name of a type text, without its module, `Queue` for
+// `datatypes.Queue[int]` and `&Queue[T]`.
+fn bare_name(t string) string {
+	return strip_generic_args(bare_type(t)).all_after_last('.')
 }
 
 // subst_word replaces each `word` in a type text that stands alone, not as
@@ -581,8 +676,9 @@ fn (inf &Infer) field_of(t InferredType, name string, file string, depth int) ?I
 	decl := inf.find_type(short, qual, t, file)?
 	key := '${decl.id}\x00${name}'
 	if ft := inf.field_type[key] {
+		// `s.items` of a `Stack[int]` is `[]int`, where the field is `[]T`
 		return InferredType{
-			text:     ft
+			text:     owner_args(ft, t, short, inf.generics_of[decl.id] or { []string{} })
 			mod:      decl.mod
 			file:     decl.file
 			field_id: inf.field_id[key] or { '' }

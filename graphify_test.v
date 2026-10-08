@@ -4324,3 +4324,63 @@ fn run(s string) {
 	assert untyped[0].to == 'as_map'
 }
 
+
+fn test_a_generic_receiver_substitutes_its_type_arguments() {
+	// `load`, `describe` and `as_map` are each declared on two types, so the
+	// receiver's type alone settles which one a call means
+	g := graph_of({
+		'vlib/json/json.v':    'module json
+
+pub struct Any {}
+
+pub fn (a Any) as_map() map[string]Any {
+	return {}
+}
+
+pub struct Other {}
+
+pub fn (o Other) load() {}
+
+pub fn (o Other) describe() {}
+
+pub fn (o Other) as_map() int {
+	return 0
+}
+'
+		'vlib/models/models.v': 'module models
+
+pub struct Config {}
+
+pub fn (c Config) load() {}
+
+pub fn (c Config) describe() {}
+
+pub struct Queue[T] {
+pub mut:
+	items []T
+}
+
+pub fn (q &Queue[T]) pop() !T {
+	return q.items[0]
+}
+'
+		'app/main.v':          'module main
+
+import json
+import models
+
+fn run() {
+	q := models.Queue[models.Config]{}
+	q.pop()!.load()
+	q.items[0].describe()
+	r := models.Queue[json.Any]{}
+	r.pop()!.as_map()
+}
+'
+	})
+	calls := g.edges.filter(it.kind == .calls && it.from == 'app.run')
+	assert calls.any(it.to == 'vlib.models.Config.load')
+	assert calls.any(it.to == 'vlib.models.Config.describe')
+	assert calls.any(it.to == 'vlib.json.Any.as_map')
+	assert !calls.any(it.to == 'vlib.json.Other.as_map')
+}
