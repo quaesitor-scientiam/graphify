@@ -321,7 +321,10 @@ an id repeated across ≥2 distinct `_test.v` files — same classification
 would accept as distinct; a same-declaration repeat inside one ordinary
 module (a per-platform variant like `os.setenv` in both environment.c.v and
 environment.js.v) is untouched, since V would reject a genuine
-redeclaration there. Post-fix on the same repo: 13.54% of symbols still
+redeclaration there; `Index` shows such an id's C-backend declaration
+(`.v`/`.c.v`) ahead of a `.wasm.v`/`.native.v` one, and a `.js.v` one last
+(`shown_before` in graph_ops.v) — 238 ids on the V compiler's tree used to
+show the JS or WASM copy. Post-fix on the same repo: 13.54% of symbols still
 collapse, entirely the `mod_`/`import_`/`constant`/`field` kinds this pass
 deliberately doesn't touch (matching `resolve_edges`' own scope) plus
 legitimate platform variants — of the 7,646 rows that were genuine

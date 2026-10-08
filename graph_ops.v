@@ -8,7 +8,7 @@ import os
 pub struct Index {
 pub mut:
 	by_id   map[string]Symbol
-	by_name map[string][]string // short name -> ids
+	by_name map[string][]string // short name -> distinct ids
 	adj     map[string][]string // undirected neighbor ids
 	edges   []Edge              // edges with `to` resolved to an id where possible
 }
@@ -17,8 +17,17 @@ pub mut:
 pub fn (g Graph) index() Index {
 	mut idx := Index{}
 	for s in g.symbols {
-		idx.by_id[s.id] = s
-		idx.by_name[s.name] << s.id
+		// Declarations that share an id are one logical declaration, such as a
+		// function declared once per platform (`os.read_file` in os.c.v and
+		// os_js.js.v, see disambiguate_ids); keep the one shown_before prefers,
+		// which explain/get_body/query then show. by_name lists the id once, so
+		// resolve doesn't take the copies for rival declarations.
+		if s.id !in idx.by_id {
+			idx.by_id[s.id] = s
+			idx.by_name[s.name] << s.id
+		} else if shown_before(s, idx.by_id[s.id]) {
+			idx.by_id[s.id] = s
+		}
 	}
 	for e in g.edges {
 		to_id := idx.resolve(e.to)
@@ -35,6 +44,28 @@ pub fn (g Graph) index() Index {
 		idx.adj[to_id] << e.from
 	}
 	return idx
+}
+
+// shown_before reports whether declaration `a`, met after `b` in g.symbols,
+// should represent their shared id in its place: a file for the C backend
+// (plain `.v` or `.c.v`) before one for another backend, and the JS backend's
+// `.js.v` last, since it is the copy furthest from what ordinary V code calls.
+// Between files of the same backend the later one wins, as it did before
+// backends were ranked; g.symbols follows graph.json, which the same-graph CI
+// job keeps identical across hosts.
+fn shown_before(a Symbol, b Symbol) bool {
+	return backend_rank(a.file) <= backend_rank(b.file)
+}
+
+// backend_rank orders a file by the backend its suffix compiles it for.
+fn backend_rank(file string) int {
+	if file.ends_with('.js.v') {
+		return 2
+	}
+	if file.ends_with('.wasm.v') || file.ends_with('.native.v') {
+		return 1
+	}
+	return 0
 }
 
 // resolve maps a raw edge target (an id or a bare name) to a symbol id, or ''

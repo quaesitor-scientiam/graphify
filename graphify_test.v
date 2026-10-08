@@ -3682,3 +3682,108 @@ fn test_stale_note() {
 	os.rm(os.join_path(out, 'manifest.json')) or {}
 	assert stale_note(graph, repo, exe) == ''
 }
+
+fn test_platform_variants_show_the_native_declaration() {
+	// One function declared per backend shares one id (disambiguate_ids leaves
+	// it alone). The walk visits a.c.v before a.js.v, so an index that kept the
+	// last declaration showed the JS backend's copy for a call from plain V.
+	root := write_tree('platform_variants', {
+		'm/a.c.v':  'module m
+
+pub fn read_it() string {
+	return "native"
+}
+'
+		'm/a.js.v': 'module m
+
+pub fn read_it() string {
+	return "js"
+}
+'
+		'm/use.v':  'module m
+
+pub fn caller() string {
+	return read_it()
+}
+'
+	})
+	defer {
+		os.rmdir_all(root) or {}
+	}
+	g := build_graph(Options{ root: root })
+	assert g.symbols.filter(it.id == 'm.read_it').len == 2
+	explained := g.explain('read_it')
+	assert explained.contains('(m/a.c.v:3)'), explained
+	assert !explained.contains('a.js.v'), explained
+	body := g.get_body('read_it')
+	assert body.starts_with('// m/a.c.v:3-'), body
+	assert body.contains('"native"'), body
+	assert g.explain('caller').contains('calls         : read_it (m/a.c.v:3)')
+	assert g.query('read_it', 2000, false).contains('// m/a.c.v:3')
+}
+
+fn test_index_representative_ranks_backends() {
+	// Backend first (plain/.c.v, then .wasm.v/.native.v, then .js.v), in any
+	// order; between files of one backend, the later one, as before.
+	decl := fn (file string) Symbol {
+		return Symbol{
+			id:   'os.f'
+			name: 'f'
+			kind: .function
+			file: file
+		}
+	}
+	js, wasm, c, plain := decl('os/f.js.v'), decl('os/f.wasm.v'), decl('os/f.c.v'), decl('os/f_nix.v')
+	for syms in [[js, wasm, c], [c, wasm, js], [wasm, c, js], [js, c, wasm]] {
+		assert Graph{
+			symbols: syms
+		}.index().by_id['os.f'].file == 'os/f.c.v'
+	}
+	assert Graph{
+		symbols: [js, wasm]
+	}.index().by_id['os.f'].file == 'os/f.wasm.v'
+	assert Graph{
+		symbols: [c, plain, js]
+	}.index().by_id['os.f'].file == 'os/f_nix.v'
+}
+
+fn test_index_lists_a_shared_id_once_by_name() {
+	// Two declarations of one id are not two candidates: a bare-name edge to
+	// them resolves, and explain doesn't say the name has 2 declarations.
+	g := Graph{
+		symbols: [
+			Symbol{
+				id:   'os.setenv'
+				name: 'setenv'
+				kind: .function
+				file: 'os/environment.c.v'
+				line: 1
+			},
+			Symbol{
+				id:   'os.setenv'
+				name: 'setenv'
+				kind: .function
+				file: 'os/environment.js.v'
+				line: 1
+			},
+			Symbol{
+				id:   'os.caller'
+				name: 'caller'
+				kind: .function
+				file: 'os/use.v'
+				line: 1
+			},
+		]
+		edges:   [Edge{
+			from: 'os.caller'
+			to:   'setenv'
+			kind: .calls
+		}]
+	}
+	idx := g.index()
+	assert idx.by_name['setenv'] == ['os.setenv']
+	assert idx.edges.any(it.from == 'os.caller' && it.to == 'os.setenv')
+	explained := g.explain('setenv')
+	assert explained.contains('called by     : caller (os/use.v:1)'), explained
+	assert !explained.contains('possibly called by'), explained
+}
