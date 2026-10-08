@@ -165,15 +165,33 @@ fn build_one(log_path string, v_exe string, out string, args []string) ! {
 		return error('building ${os.file_name(out)} failed')
 	}
 	if os.exists(out) {
-		old := out + '.old'
-		os.rm(old) or {}
+		// Windows lets a running program be renamed but not deleted, so a
+		// copy set aside by an earlier build may still be in use: take a name
+		// that is free, and clear away every copy no longer running
+		remove_old_copies(out)
+		mut old := out + '.old'
+		if os.exists(old) {
+			old = '${out}.old-${time.now().unix_milli()}'
+		}
 		os.rename(out, old) or {
 			os.rm(tmp) or {}
 			return error('cannot replace ${out}: ${err}')
 		}
-		os.rm(old) or {} // fails harmlessly while a Windows process still runs it
+		os.rm(old) or {}
 	}
 	os.rename(tmp, out)!
+}
+
+// remove_old_copies deletes the copies of `out` that earlier builds set
+// aside, `<out>.old` and `<out>.old-<time>`; one still running stays.
+fn remove_old_copies(out string) {
+	bin_dir := os.dir(out)
+	prefix := os.file_name(out) + '.old'
+	for name in os.ls(bin_dir) or { return } {
+		if name == prefix || name.starts_with(prefix + '-') {
+			os.rm(os.join_path(bin_dir, name)) or {}
+		}
+	}
 }
 
 // rebuild_if_stale rebuilds graphify's binaries when bin/.build-stamp no
@@ -189,17 +207,31 @@ fn rebuild_if_stale(log_path string, root string, exe string) !bool {
 	log_line(log_path, 'graphify is out of date; rebuilding...')
 	os.chdir(root)!
 	ext := $if windows { '.exe' } $else { '' }
+	// the CLI is what extracts; without it there is nothing to run
 	build_one(log_path, v_exe, exe, ['cmd/cli'])!
+	// the others only serve the graph: a failure is logged, the extract goes
+	// ahead, and the stamp stays old so the next run tries them again
+	mut all_built := true
 	mcp := os.join_path(root, 'bin', 'graphify-mcp' + ext)
 	if os.exists(mcp) {
-		build_one(log_path, v_exe, mcp, ['cmd/mcp'])!
+		build_one(log_path, v_exe, mcp, ['cmd/mcp']) or {
+			log_line(log_path, 'WARNING: ${err}')
+			all_built = false
+		}
 	}
 	hook := os.join_path(root, 'bin', 'graphify-hook' + ext)
 	if os.exists(hook) {
-		build_one(log_path, v_exe, hook, ['build', 'cmd/hooks/graphify_hook.vsh'])!
+		build_one(log_path, v_exe, hook, ['build', 'cmd/hooks/graphify_hook.vsh']) or {
+			log_line(log_path, 'WARNING: ${err}')
+			all_built = false
+		}
 	}
-	os.write_file(stamp_path, stamp)!
-	log_line(log_path, 'rebuilt graphify')
+	if all_built {
+		os.write_file(stamp_path, stamp)!
+		log_line(log_path, 'rebuilt graphify')
+	} else {
+		log_line(log_path, 'rebuilt graphify, except as warned; the next run tries again')
+	}
 	return true
 }
 
