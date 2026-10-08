@@ -458,7 +458,7 @@ fn visible_from(mod string, caller DeclSite, imports []string) bool {
 			return true
 		}
 	}
-	return mod == caller.mod && !caller.is_main
+	return mod == caller.mod && (!caller.is_main || caller.solo)
 }
 
 fn disambiguate_ids(mut g Graph) {
@@ -586,6 +586,9 @@ struct DeclSite {
 	mod     string
 	file    string
 	is_main bool // in a standalone program, see main_unit_files
+	// solo is set when the module's only `fn main` is this one's: the module
+	// is one program, so its files are one another's module (see resolve_edges)
+	solo bool
 }
 
 // TypeCand is one declaration that a raw type name (on an `embeds` or
@@ -631,6 +634,14 @@ struct CallResolution {
 fn resolve_edges(mut g Graph) {
 	mut by_name := map[string][]CallCand{}
 	mut by_type_name := map[string][]TypeCand{}
+	// a module with exactly one `fn main` is one program, whose files see each
+	// other as one module; a module with several has a program per `main`
+	mut main_count := map[string]int{}
+	for s in g.symbols {
+		if s.kind == .function && s.name == 'main' && s.parent != '' {
+			main_count[s.parent]++
+		}
+	}
 	mut site_of := map[string]DeclSite{}
 	mut id_count := map[string]int{}
 	mains := main_unit_files(g)
@@ -685,6 +696,7 @@ fn resolve_edges(mut g Graph) {
 				mod:     s.parent
 				file:    s.file
 				is_main: in_main_unit(s, mains)
+				solo:    main_count[s.parent] == 1
 			}
 		}
 		// id_count/id_main/id_files feed the build-unit-aware duplicate check
@@ -750,6 +762,7 @@ fn resolve_edges(mut g Graph) {
 				mod:     s.parent
 				file:    s.file
 				is_main: in_main_unit(s, mains)
+				solo:    main_count[s.parent] == 1
 			}
 		}
 	}
@@ -1012,7 +1025,7 @@ fn resolve_callee(e Edge, by_name map[string][]CallCand, site_of map[string]Decl
 	// module of every standalone program, so a repo can contain thousands of
 	// mutually unrelated `main` files; matching on it links programs that have
 	// nothing to do with each other.
-	if caller.mod != '' && !caller.is_main {
+	if caller.mod != '' && (!caller.is_main || caller.solo) {
 		mut same_mod := []CallCand{}
 		for c in narrowed {
 			if c.mod == caller.mod && !test_private(c.file, caller.file) {
@@ -1232,7 +1245,7 @@ fn resolve_type_ref(e Edge, by_type_name map[string][]TypeCand, site_of map[stri
 	if id := only_type_id(same_file) {
 		return CallResolution{ id: id, inferred: true }
 	}
-	if caller.mod != '' && !caller.is_main {
+	if caller.mod != '' && (!caller.is_main || caller.solo) {
 		mut same_mod := []TypeCand{}
 		for c in cands {
 			if c.mod == caller.mod && !test_private(c.file, caller.file) {

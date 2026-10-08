@@ -131,11 +131,21 @@ guesses by name: `raw.bytestr()` on a `[]u8` had resolved to `Response.bytestr`,
 and a call in a platform variant of `close_conn` to a `free` on an unrelated
 Windows type.
 
+**Files of one program (October 2026).** A directory of `module main` files
+with exactly one `fn main` is one program, which V compiles together, so its
+files see each other's functions as they see a module's. Previously a `main`
+caller could only see its own file, so a helper in a sibling file stayed
+unresolved. A directory with several `fn main`s is several programs, which
+still see only their own file (the examples directory has one program per
+file). On the V compiler's tree: unresolved calls 1,046 -> 913 (0.36%), 141
+more resolved and 9 retargeted to the same program's declaration rather than
+an imported one with the same name (`vpm`'s `rmdir_all` for `os.rmdir_all`).
+None dropped.
+
 What remains is a long tail: values V infers in other ways (a comptime
 `for f in T.fields` variable, a receiver from a call with a computed argument),
-a sum type's shared field, function values the walk can't see are variables
-(`$for f in T.fields`), and calls whose receiver the recipe doesn't cover (a
-multi-line chain).
+a sum type's shared field, function values the walk can't see are variables,
+and calls whose receiver the recipe doesn't cover (a multi-line chain).
 
 The raw edge is retained and `explain` reports ambiguous callers rather than
 inventing links. A future opt-in deep mode could run the checker over a whole
