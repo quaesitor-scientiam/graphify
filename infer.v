@@ -164,6 +164,10 @@ fn (inf &Infer) no_method(t InferredType, name string, file string) ?string {
 	if name == 'wait' && (text.starts_with('thread') || text.starts_with('[]thread')) {
 		return ''
 	}
+	// `str()` on a primitive the builtin doesn't declare one for (`u128`)
+	if name == 'str' && text in primitive_types {
+		return ''
+	}
 	if text.starts_with('[') && (name in array_builtins || name == 'str') {
 		return ''
 	}

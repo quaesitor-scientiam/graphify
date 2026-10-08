@@ -142,6 +142,18 @@ more resolved and 9 retargeted to the same program's declaration rather than
 an imported one with the same name (`vpm`'s `rmdir_all` for `os.rmdir_all`).
 None dropped.
 
+Shifts and bit operators keep their left operand's type, so `(u128(1) << 64).str()`
+resolves to `u128.str`, and `str()` on a primitive that has no declaration (`u128`
+in builds that lack one) is undeclared. On the V compiler's tree: unresolved calls
+913 -> 900 (0.35%).
+
+Two families are harder than the rest. A declaration that exists once per platform
+(`open_tool_cache_entry_dir` in `toolcache_nix.c.v` and `_windows.c.v`) can't be
+given one call edge that is right on every OS, and the graph must be identical on
+every OS, so its callers stay unresolved even when their receiver's type is known.
+And a C function's result (`C.PQerrorMessage(...)`) has the C type, which the
+graph doesn't name.
+
 What remains is a long tail: values V infers in other ways (a comptime
 `for f in T.fields` variable, a receiver from a call with a computed argument),
 a sum type's shared field, function values the walk can't see are variables,

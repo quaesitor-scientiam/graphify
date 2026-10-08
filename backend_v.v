@@ -1471,7 +1471,7 @@ fn (f &V3File) type_arg(id flat.NodeId) ?string {
 
 // primitive_types are the built-in types, which have no declaration to name.
 const primitive_types = ['bool', 'string', 'rune', 'byte', 'voidptr', 'charptr', 'i8', 'i16',
-	'i32', 'i64', 'u8', 'u16', 'u32', 'u64', 'int', 'f32', 'f64', 'usize', 'isize']
+	'i32', 'i64', 'i128', 'u8', 'u16', 'u32', 'u64', 'u128', 'int', 'f32', 'f64', 'usize', 'isize']
 
 // recipe says how to find the type of the expression `id` from what the file
 // states, as steps that resolve_edges follows through the whole graph (see
@@ -1639,7 +1639,8 @@ fn (f &V3File) recipe(id flat.NodeId, ctx V3CallCtx) string {
 			if n.op in [.eq, .ne, .lt, .gt, .le, .ge, .logical_and, .logical_or] {
 				return 't:bool'
 			}
-			if n.op in [.plus, .minus, .mul, .div, .mod] && kids.len > 0 {
+			if n.op in [.plus, .minus, .mul, .div, .mod, .amp, .pipe, .left_shift, .right_shift]
+				&& kids.len > 0 {
 				return f.recipe(kids[0], ctx)
 			}
 		}

@@ -4537,3 +4537,20 @@ fn main() {
 	// `other`) is not visible from `a.v`
 	assert !g.edges.any(it.kind == .calls && it.from == 'two.main' && it.to == 'two.helper_two')
 }
+
+fn test_a_primitive_without_a_str_is_undeclared_and_shifts_keep_its_type() {
+	g := graph_of({
+		'lib/lib.v': 'module lib
+
+pub fn run() string {
+	a := u128(0).str()
+	b := (u128(1) << 64).str()
+	return a + b
+}
+'
+	})
+	calls := g.edges.filter(it.kind == .calls && it.from == 'lib.run')
+	// V writes `str()` for a u128, which the builtin doesn't declare
+	assert calls.len == 1 && calls[0].to == 'str'
+	assert calls[0].provenance == .undeclared
+}
