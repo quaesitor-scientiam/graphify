@@ -4497,3 +4497,43 @@ fn run(xs []Thing) int {
 	str := calls.filter(it.to == 'str')
 	assert str.len == 1 && str[0].provenance == .undeclared
 }
+
+fn test_files_of_one_program_see_each_other_but_separate_programs_do_not() {
+	g := graph_of({
+		'prog/a.v':   'module main
+
+fn main() {
+	helper_one()
+}
+'
+		'prog/b.v':   'module main
+
+fn helper_one() {
+}
+'
+		'two/a.v':    'module main
+
+fn main() {
+	helper_two()
+}
+'
+		'other/c.v':  'module main
+
+fn helper_two() {
+}
+'
+		'two/b.v':    'module main
+
+fn helper_two() {
+}
+
+fn main() {
+}
+'
+	})
+	// one `fn main` in `prog`: its other files are the same program
+	assert g.edges.any(it.kind == .calls && it.from == 'prog.main' && it.to == 'prog.helper_one')
+	// two mains in `two`: two programs, so `helper_two` (also declared in
+	// `other`) is not visible from `a.v`
+	assert !g.edges.any(it.kind == .calls && it.from == 'two.main' && it.to == 'two.helper_two')
+}
