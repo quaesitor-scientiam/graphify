@@ -120,10 +120,22 @@ method (`Any.i64()` calling itself, where its `Number` branch calls `Number.i64`
 and `condition.contains` on a string resolved to two unrelated `contains` methods.
 Undeclared rose by 54, all `has()` on a `@[flag]` enum, which V generates.
 
-What remains is mostly receivers whose type V itself infers (an `unsafe {}`
-block's value, a `match` on a value rather than a type), a sum type's shared field,
-function values the walk can't see are variables (`$for f in T.fields`), and calls
-whose receiver the recipe doesn't cover (a multi-line chain).
+**Unsafe blocks and untyped map literals (October 2026).** An `unsafe { x }`
+block has the type of its last expression, as `if` and `match` already did, so
+`b := unsafe { xs[0] }` is the element type. A map literal written without a
+type, `{ 'name': 'Joe' }`, has `map[K]V` when its keys and its values are each
+one kind of literal (string, int, bool or float). On the V compiler's tree:
+unresolved calls 1,293 -> 1,046 (0.41%), 240 more resolved, 34 retargeted, 23
+more undeclared (`str()` on a map, which V writes). Four links removed were
+guesses by name: `raw.bytestr()` on a `[]u8` had resolved to `Response.bytestr`,
+and a call in a platform variant of `close_conn` to a `free` on an unrelated
+Windows type.
+
+What remains is a long tail: values V infers in other ways (a comptime
+`for f in T.fields` variable, a receiver from a call with a computed argument),
+a sum type's shared field, function values the walk can't see are variables
+(`$for f in T.fields`), and calls whose receiver the recipe doesn't cover (a
+multi-line chain).
 
 The raw edge is retained and `explain` reports ambiguous callers rather than
 inventing links. A future opt-in deep mode could run the checker over a whole
