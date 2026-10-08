@@ -87,18 +87,29 @@ retargeted.
 line (V3's parser drops them, and they go in the symbol's `recipe`), so `T`
 becomes `Config`, and in `fold[T, R]` the second argument stands for `R`. An
 argument that can't be named (`&T`, `[]T`) keeps its place, so the others
-still line up. Receivers of a generic type, `Queue[T].pop()` on
-`Queue[int]`, aren't covered yet. On the V compiler's tree (the same commit
+still line up. Receivers of a generic type are covered in the next entry. On the V compiler's tree (the same commit
 as above): unresolved calls 1,516 -> 1,441 (0.56%), 64 more resolved, 1
 retargeted from a same-named method in an unrelated module to the
 `json2.Any` it returns, and 11 `str()`/`type_name()` calls marked undeclared
 (`d.str()` on a struct without a `str` method).
 
+**Generic receivers (October 2026).** A method or field of a generic type
+takes its type arguments from the receiver's type: `q.pop()!` on a
+`Queue[models.Config]` returns `models.Config`, and `q.items[0]` is a
+`models.Config` where the field is `[]T`. A generic struct's type parameters
+come from its header line (`struct Queue[T]`), and a method's from its
+receiver (`&Queue[T]`), both kept on the symbol's recipe as for functions. The
+arguments are qualified with the module they were written in before they are
+substituted, so a type named in one module still means that type in another.
+On the V compiler's tree: unresolved calls 1,441 -> 1,431 (0.56%), 19 more
+resolved and 7 retargeted (`Foo[int].value` and `Cell[T].v` fields, a call
+on `[]string` returned by `Queue[[]string].pop()`). Two earlier links, to an
+unrelated `Test.v` method, now point at the `Cell.v` field they call.
+
 What remains is mostly receivers whose type V itself infers (a `match` arm's
-variable, a smartcast, an `unsafe {}` block's value), generic receivers
-(`Queue[int].pop()`), a sum type's shared field, function values the walk
-can't see are variables (`$for f in T.fields`), and calls whose receiver the
-recipe doesn't cover (a multi-line chain).
+variable, a smartcast, an `unsafe {}` block's value), a sum type's shared
+field, function values the walk can't see are variables (`$for f in T.fields`),
+and calls whose receiver the recipe doesn't cover (a multi-line chain).
 
 The raw edge is retained and `explain` reports ambiguous callers rather than
 inventing links. A future opt-in deep mode could run the checker over a whole

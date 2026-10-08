@@ -770,10 +770,15 @@ fn resolve_edges(mut g Graph) {
 	}
 	for s in g.symbols {
 		match s.kind {
+			.struct_ {
+				if s.recipe != '' {
+					generics_of[s.id] = s.recipe.split(',')
+				}
+			}
 			.function, .method {
 				sig_of[s.id] = s.signature
 				fn_names[s.id] = s.name
-				if s.kind == .function && s.recipe != '' {
+				if s.recipe != '' {
 					generics_of[s.id] = s.recipe.split(',')
 				}
 			}

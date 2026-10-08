@@ -140,13 +140,13 @@ fn extract_v3(path string, src string, rel string, real_path string) FileResult 
 // generic_params reads the type parameters of the free function `name`
 // declared on `line`, `fn fold[T, R](...)` -> [T, R]. V3's parser doesn't keep
 // them, but the header line does; a constraint (`T Number`) is dropped.
-fn (f &V3File) generic_params(line int, name string) []string {
+fn (f &V3File) generic_params(line int, head string) []string {
 	if line < 1 || line > f.lines.len {
 		return []string{}
 	}
 	text := f.lines[line - 1]
-	at := text.index('fn ${name}[') or { return []string{} }
-	rest := text[at + 3 + name.len + 1..]
+	at := text.index('${head}[') or { return []string{} }
+	rest := text[at + head.len + 1..]
 	end := rest.index(']') or { return []string{} }
 	mut out := []string{}
 	for p in rest[..end].split(',') {
@@ -753,7 +753,7 @@ fn (mut f V3File) extract_fn(id flat.NodeId, mut syms []Symbol, mut edges []Edge
 		is_pub:    f.line_is_pub(line)
 		parent:    f.mod_id
 		doc:       doc_from(f.lines, line)
-		recipe:    if is_method { '' } else { f.generic_params(line, name).join(',') }
+		recipe:    if is_method { split_type_args(recv_typ).join(',') } else { f.generic_params(line, 'fn ${name}').join(',') }
 	})
 	mut rseen := map[string]bool{}
 	if is_method {
@@ -817,6 +817,7 @@ fn (mut f V3File) extract_struct(id flat.NodeId, mut syms []Symbol, mut edges []
 		is_pub:    is_pub
 		parent:    f.mod_id
 		doc:       doc_from(f.lines, line)
+		recipe:    f.generic_params(line, 'struct ${short}').join(',')
 	})
 	mut rseen := map[string]bool{}
 	for k in f.kids(id) {
