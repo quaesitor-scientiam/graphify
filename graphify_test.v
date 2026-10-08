@@ -4460,3 +4460,40 @@ pub fn (sh Shape) describe() int {
 	describe := g.edges.filter(it.kind == .calls && it.from == 'lib.Shape.describe')
 	assert describe.any(it.to == 'lib.Circle.area')
 }
+
+fn test_an_unsafe_block_and_an_untyped_map_literal_have_types() {
+	g := graph_of({
+		'lib/lib.v': 'module lib
+
+pub struct Thing {
+	name string
+}
+
+pub fn (t Thing) describe() int {
+	return 1
+}
+
+pub struct Other {}
+
+pub fn (o Other) describe() int {
+	return 2
+}
+
+fn run(xs []Thing) int {
+	b := unsafe { xs[0] }
+	m := {
+		\'name\': \'Joe\'
+	}
+	s := m.str()
+	return b.describe() + s.len
+}
+'
+	})
+	calls := g.edges.filter(it.kind == .calls && it.from == 'lib.run')
+	// the block's value is the element, a Thing
+	assert calls.any(it.to == 'lib.Thing.describe')
+	assert !calls.any(it.to == 'lib.Other.describe')
+	// a map's `str()` is one V writes, so no declaration to resolve to
+	str := calls.filter(it.to == 'str')
+	assert str.len == 1 && str[0].provenance == .undeclared
+}

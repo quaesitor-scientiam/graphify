@@ -1526,10 +1526,24 @@ fn (f &V3File) recipe(id flat.NodeId, ctx V3CallCtx) string {
 				}
 			}
 		}
-		.struct_init, .map_init, .cast_expr, .as_expr {
+		.struct_init, .cast_expr, .as_expr {
 			if n.value != '' {
 				return 't:' + f.type_text(n.value)
 			}
+		}
+		.map_init {
+			if n.value != '' {
+				return 't:' + f.type_text(n.value)
+			}
+			// `{ 'name': 'Joe' }` with no type written: its keys and values
+			// are literals of one kind each
+			if t := literal_map_type(f, kids) {
+				return 't:' + t
+			}
+		}
+		.block {
+			// `unsafe { x }`: the value of its last expression
+			return f.last_value(id, ctx)
 		}
 		.array_init {
 			t := if n.typ != '' { n.typ } else { n.value }
@@ -1635,6 +1649,38 @@ fn (f &V3File) recipe(id flat.NodeId, ctx V3CallCtx) string {
 }
 
 // last_value is the recipe of the value a block or match branch ends with.
+// literal_map_type is the type of a map literal written without one, when
+// its keys are all one kind of literal and so are its values: `map[string]string`
+// for `{ 'name': 'Joe' }`.
+fn literal_map_type(f &V3File, kids []flat.NodeId) ?string {
+	if kids.len == 0 || kids.len % 2 != 0 {
+		return none
+	}
+	mut key := ''
+	mut val := ''
+	for i := 0; i < kids.len; i += 2 {
+		k := literal_type_name(f.node(kids[i]).kind)
+		v := literal_type_name(f.node(kids[i + 1]).kind)
+		if k == '' || v == '' || (key != '' && k != key) || (val != '' && v != val) {
+			return none
+		}
+		key = k
+		val = v
+	}
+	return 'map[${key}]${val}'
+}
+
+// literal_type_name is the type of a literal expression of this kind, or ''.
+fn literal_type_name(k flat.NodeKind) string {
+	return match k {
+		.string_literal, .string_interp { 'string' }
+		.int_literal { 'int' }
+		.bool_literal { 'bool' }
+		.float_literal { 'f64' }
+		else { '' }
+	}
+}
+
 fn (f &V3File) last_value(id flat.NodeId, ctx V3CallCtx) string {
 	kids := f.kids(id)
 	if kids.len == 0 {
