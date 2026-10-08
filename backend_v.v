@@ -1125,11 +1125,66 @@ struct V3CallCtx {
 mut:
 	locals map[string]string
 	vars   map[string]string
+	// fallbacks is the declared type of each variable narrowed by a type
+	// check (see narrowed), where its narrowed type lacks a method
+	fallbacks map[string]string
+}
+
+// TypeCheck is a variable narrowed to a type by `name is typ`, as written.
+struct TypeCheck {
+	name string
+	typ  string
+}
+
+// narrowed_by is `ctx` with each variable in `checks` narrowed to its type.
+fn (ctx V3CallCtx) narrowed_by(checks []TypeCheck) V3CallCtx {
+	mut out := ctx
+	for c in checks {
+		out = out.narrowed(c.name, 't:' + c.typ)
+	}
+	return out
+}
+
+// narrowed is `ctx` with the variable `name` taken to have the type `recipe`
+// (see recipe). A narrowed receiver is no longer the receiver's own type, so a
+// call on it goes by its recipe.
+fn (ctx V3CallCtx) narrowed(name string, recipe string) V3CallCtx {
+	// the declared type, which a method the narrowed type lacks is looked up on
+	// (`x is Prim && x.name()` where `name` is on the sum type)
+	declared := if name in ctx.fallbacks {
+		ctx.fallbacks[name]
+	} else if name in ctx.vars {
+		ctx.vars[name]
+	} else if name in ctx.locals {
+		't:' + ctx.locals[name]
+	} else if name == ctx.recv_name && ctx.recv_type != '' {
+		't:' + ctx.recv_type
+	} else {
+		''
+	}
+	mut fallbacks := ctx.fallbacks.clone()
+	fallbacks[name] = declared
+	mut out := V3CallCtx{
+		...ctx.with_vars([name], [recipe])
+		fallbacks: fallbacks
+	}
+	if name == ctx.recv_name {
+		out = V3CallCtx{
+			...out
+			recv_name: ''
+			recv_type: ''
+		}
+	}
+	return out
 }
 
 // recipe_sep separates the steps of a type recipe. It is a control character
 // that never occurs in V source and that the batch protocol passes through.
 const recipe_sep = '\x05'
+
+// recipe_alt separates a receiver's narrowed type recipe from the declared
+// type recipe to fall back on, for a method the narrowed type doesn't have.
+const recipe_alt = '\x06'
 
 // methods_with_it are the array methods whose argument is an expression over
 // each element, named `it`.
@@ -1140,14 +1195,17 @@ const methods_with_it = ['filter', 'map', 'any', 'all', 'count']
 fn (ctx V3CallCtx) with_vars(names []string, recipes []string) V3CallCtx {
 	mut vars := ctx.vars.clone()
 	mut locals := ctx.locals.clone()
+	mut fallbacks := ctx.fallbacks.clone()
 	for i, name in names {
 		locals.delete(name)
+		fallbacks.delete(name)
 		vars[name] = recipes[i]
 	}
 	return V3CallCtx{
 		...ctx
-		locals: locals
-		vars:   vars
+		locals:    locals
+		vars:      vars
+		fallbacks: fallbacks
 	}
 }
 
@@ -1222,6 +1280,42 @@ fn (mut f V3File) walk(id flat.NodeId, ctx V3CallCtx, mut edges []Edge, mut seen
 				f.walk(kids[1], guard, mut edges, mut seen)
 				f.walk_list(kids[2..], ctx.with_vars(['err'], ['t:IError']), mut edges, mut
 					seen)
+				return ctx
+			}
+			// `if x is T { ... }`: `x` is a T in the block, and the else
+			// branches keep the type it had
+			if kids.len >= 2 {
+				f.walk(kids[0], ctx, mut edges, mut seen)
+				f.walk(kids[1], ctx.narrowed_by(f.type_checks(kids[0])), mut edges, mut seen)
+				f.walk_list(kids[2..], ctx, mut edges, mut seen)
+				return ctx
+			}
+		}
+		.infix {
+			// `x is T && x.f()`: the right side sees `x` as a T
+			if n.op == .logical_and && kids.len == 2 {
+				f.walk(kids[0], ctx, mut edges, mut seen)
+				f.walk(kids[1], ctx.narrowed_by(f.type_checks(kids[0])), mut edges, mut seen)
+				return ctx
+			}
+		}
+		.match_stmt {
+			// `match x { T { ... } }`: `x` is a T in a branch with one type
+			// pattern; a branch of values or `else` keeps its type
+			if kids.len >= 1 {
+				subject := f.node(kids[0])
+				f.walk(kids[0], ctx, mut edges, mut seen)
+				for k in kids[1..] {
+					branch := f.kids(k)
+					mut body := ctx
+					if subject.kind == .ident && f.node(k).value == '1' && branch.len >= 2 {
+						pat := f.node(branch[0])
+						if pat.kind == .ident && pat.value.len > 0 && pat.value[0].is_capital() {
+							body = ctx.narrowed(subject.value, 't:' + f.type_text(pat.value))
+						}
+					}
+					f.walk_list(branch, body, mut edges, mut seen)
+				}
 				return ctx
 			}
 		}
@@ -1300,6 +1394,33 @@ fn (f &V3File) declare(n &flat.Node, kids []flat.NodeId, ctx V3CallCtx) V3CallCt
 		}
 	}
 	return out
+}
+
+// type_checks are the `x is T` checks that hold where `cond` is true: the
+// check itself, or the checks on both sides of an `&&`.
+fn (f &V3File) type_checks(cond flat.NodeId) []TypeCheck {
+	if int(cond) < 0 {
+		return []TypeCheck{}
+	}
+	n := f.node(cond)
+	kids := f.kids(cond)
+	if n.kind == .is_expr && kids.len == 1 && n.value != '' && n.op != .not {
+		if f.node(kids[0]).kind == .ident {
+			return [TypeCheck{
+				name: f.node(kids[0]).value
+				typ:  n.value
+			}]
+		}
+	}
+	if n.kind == .infix && n.op == .logical_and && kids.len == 2 {
+		mut out := f.type_checks(kids[0])
+		out << f.type_checks(kids[1])
+		return out
+	}
+	if n.kind == .paren && kids.len == 1 {
+		return f.type_checks(kids[0])
+	}
+	return []TypeCheck{}
 }
 
 // struct_init_type is the type of a struct literal written directly, `Foo{}`
@@ -1600,6 +1721,10 @@ fn (mut f V3File) record_call(callee_id flat.NodeId, ctx V3CallCtx, mut edges []
 		}
 		if rt == '' {
 			recipe = f.recipe(target_id, ctx)
+			// a narrowed variable also carries its declared type (see narrowed)
+			if target.kind == .ident && target.value in ctx.fallbacks && recipe != '' {
+				recipe += recipe_alt + ctx.fallbacks[target.value]
+			}
 		}
 	}
 	if name == '' || name.starts_with('$') || name.starts_with('__v_') {
