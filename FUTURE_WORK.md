@@ -106,10 +106,24 @@ resolved and 7 retargeted (`Foo[int].value` and `Cell[T].v` fields, a call
 on `[]string` returned by `Queue[[]string].pop()`). Two earlier links, to an
 unrelated `Test.v` method, now point at the `Cell.v` field they call.
 
-What remains is mostly receivers whose type V itself infers (a `match` arm's
-variable, a smartcast, an `unsafe {}` block's value), a sum type's shared
-field, function values the walk can't see are variables (`$for f in T.fields`),
-and calls whose receiver the recipe doesn't cover (a multi-line chain).
+**Smartcasts and match branches (October 2026).** Inside `if x is T { ... }`
+and to the right of `x is T && ...`, `x` is a `T`; inside a `match x { T { ... } }`
+branch with one type pattern, too. A narrowed receiver whose type lacks the method
+falls back to its declared type, as V does (`x.name()` on a `Shape`, where `name` is
+declared on the sum type): the call's recipe carries both, separated by `recipe_alt`,
+and infer_call tries the declared one second. The walk also stops a narrowed
+receiver from being resolved against its sum type, which had sent `e.method()` in a
+`match e { Variant { ... } }` method of the sum type to the sum type's own method.
+On the V compiler's tree: unresolved calls 1,431 -> 1,293 (0.51%), 116 more
+resolved, 29 retargeted. Eight links removed were wrong: a call to a sum type's own
+method (`Any.i64()` calling itself, where its `Number` branch calls `Number.i64`),
+and `condition.contains` on a string resolved to two unrelated `contains` methods.
+Undeclared rose by 54, all `has()` on a `@[flag]` enum, which V generates.
+
+What remains is mostly receivers whose type V itself infers (an `unsafe {}`
+block's value, a `match` on a value rather than a type), a sum type's shared field,
+function values the walk can't see are variables (`$for f in T.fields`), and calls
+whose receiver the recipe doesn't cover (a multi-line chain).
 
 The raw edge is retained and `explain` reports ambiguous callers rather than
 inventing links. A future opt-in deep mode could run the checker over a whole

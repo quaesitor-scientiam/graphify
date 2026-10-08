@@ -4384,3 +4384,79 @@ fn run() {
 	assert calls.any(it.to == 'vlib.json.Any.as_map')
 	assert !calls.any(it.to == 'vlib.json.Other.as_map')
 }
+
+fn test_a_smartcast_or_match_branch_types_its_variable() {
+	// `area` is declared on both variants, so only the narrowed type settles
+	// a call on the sum type's value
+	g := graph_of({
+		'lib/shapes.v': 'module shapes
+
+pub struct Circle {
+	r int
+}
+
+pub fn (c Circle) area() int {
+	return c.r
+}
+
+pub struct Square {
+	s int
+}
+
+pub fn (s Square) area() int {
+	return s.s
+}
+
+pub fn (s Square) name() string {
+	return "square"
+}
+
+pub fn (sh Shape) name() string {
+	return ""
+}
+
+pub type Shape = Circle | Square
+
+pub fn total(sh Shape) int {
+	mut n := 0
+	match sh {
+		Circle {
+			n += sh.area()
+		}
+		Square {
+			n += sh.area()
+		}
+		else {}
+	}
+	if sh is Circle && sh.area() > 0 {
+		n += 1
+	}
+	// `name` is on the sum type, not on Circle: the declared type answers
+	if sh is Circle && sh.name() == "" {
+		n += 2
+	}
+	return n
+}
+
+pub fn (sh Shape) describe() int {
+	match sh {
+		Circle {
+			return sh.area()
+		}
+		else {
+			return 0
+		}
+	}
+}
+'
+	})
+	total := g.edges.filter(it.kind == .calls && it.from == 'lib.total')
+	assert total.any(it.to == 'lib.Circle.area')
+	assert total.any(it.to == 'lib.Square.area')
+	assert !total.any(it.to == 'area')
+	// the receiver `sh` is narrowed to a Circle, not the sum type
+	assert total.any(it.to == 'lib.Shape.name')
+	assert !total.any(it.to == 'lib.Square.name')
+	describe := g.edges.filter(it.kind == .calls && it.from == 'lib.Shape.describe')
+	assert describe.any(it.to == 'lib.Circle.area')
+}

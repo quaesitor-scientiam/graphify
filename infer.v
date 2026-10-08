@@ -82,7 +82,12 @@ fn (mut inf Infer) infer_call(e Edge) ?CallResolution {
 	}
 	if e.is_method {
 		if t := inf.receiver(e) {
-			found := inf.method_on(t, e.to, e.file, 0) or { '' }
+			mut found := inf.method_on(t, e.to, e.file, 0) or { '' }
+			if found == '' {
+				if alt := inf.fallback_receiver(e) {
+					found = inf.method_on(alt, e.to, e.file, 0) or { '' }
+				}
+			}
 			if found == '' {
 				// before any name match: `b.cb()` on a function-typed field is
 				// no call of some function that happens to be named `cb`
@@ -228,13 +233,22 @@ fn (c TypeCand) as_type() InferredType {
 
 // follow evaluates the edge's recipe, or none where a step can't be taken.
 fn (mut inf Infer) follow(e Edge) ?InferredType {
-	key := '${e.file}\x00${e.from}\x00${e.recv_recipe}'
+	// the narrowed type comes first; the declared one is for fallback_receiver
+	primary := e.recv_recipe.all_before(recipe_alt)
+	key := '${e.file}\x00${e.from}\x00${primary}'
 	if t := inf.memo[key] {
 		return if t.text == '' { none } else { t }
 	}
-	t := inf.follow_steps(e, 0) or { InferredType{} }
+	t := inf.follow_steps(Edge{ ...e, recv_recipe: primary }, 0) or { InferredType{} }
 	inf.memo[key] = t
 	return if t.text == '' { none } else { t }
+}
+
+// fallback_receiver is the declared type of a receiver the walk narrowed by a
+// type check, for a method its narrowed type doesn't have, or none.
+fn (mut inf Infer) fallback_receiver(e Edge) ?InferredType {
+	idx := e.recv_recipe.index(recipe_alt) or { return none }
+	return inf.follow(Edge{ ...e, recv_recipe: e.recv_recipe[idx + 1..] })
 }
 
 fn (inf &Infer) follow_steps(e Edge, depth int) ?InferredType {
