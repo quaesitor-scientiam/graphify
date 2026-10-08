@@ -68,6 +68,19 @@ unresolved (0.61%), 2,237 undeclared; each changed resolution in a sample
 was a correction (`db.DB.select()` through an embedded `sqlite.DB` had
 resolved to the calling method itself).
 
+**Qualified type references and conditional imports (October 2026).** A
+`references` edge kept only a type's last name, so `img gfx.Image` in module
+`gg`, which declares an `Image` of its own, pointed at `gg.Image`, and 66
+declarations referenced themselves through a same-named type from another
+module (50 of them structs embedding `veb.Context`). References now carry
+the module as the embeds do (`type_ref` in backend_v.v), written, aliased or
+selectively imported. An `import` inside `$if mysql ? { ... }` now counts
+like any other, as every branch of a `$if` does: calls such as
+`sgl.v2f()` in a wrapper of the same name had resolved to the wrapper
+itself. On the V compiler's tree (a78037685a): unresolved references 1,283 ->
+880, with 180 retargeted; unresolved calls 1,568 -> 1,516, with 80
+retargeted.
+
 What remains is mostly generics (`T.str()`, and `json2.decode[T]()`'s
 result, whose type argument the recipe doesn't keep), receivers whose type V
 itself infers (a `match` arm's variable, a smartcast, an `unsafe {}` block's

@@ -4132,3 +4132,85 @@ fn run(xs []int, s string, v Value) {
 		assert e[0].provenance == .undeclared, name
 	}
 }
+
+fn test_a_type_named_through_its_module_is_that_modules_type() {
+	g := graph_of({
+		'vlib/sokol/gfx/gfx.v': 'module gfx
+
+pub struct Image {}
+
+pub struct Pass {}
+'
+		'vlib/x/json2/any.v':   'module json2
+
+pub struct Any {}
+'
+		'vlib/db/mysql/db.v':   'module mysql
+
+pub struct DB {}
+
+pub fn connect() DB {
+	return DB{}
+}
+'
+		'vlib/db/driver.v':     'module db
+
+\$if mysql ? {
+	import db.mysql
+}
+
+pub struct DB {}
+
+struct MysqlDriver {
+	conn mysql.DB
+}
+
+fn open() {
+	mysql.connect()
+}
+'
+		'vlib/gg/gg.v':         'module gg
+
+import sokol.gfx
+import sokol.gfx { Pass }
+import x.json2 as json
+
+pub struct Image {}
+
+pub struct Any {}
+
+pub struct Pass {}
+
+pub struct Slot {
+	img   gfx.Image
+	imgs  []gfx.Image
+	pass  Pass
+	local Image
+}
+
+pub type Doc = []json.Any | int
+
+fn load(a map[string]json.Any) gfx.Image {
+	return gfx.Image{}
+}
+'
+	})
+	refs := fn [g] (from string) []string {
+		return g.edges.filter(it.kind == .references && it.from == from).map(it.to)
+	}
+	slot := refs('vlib.gg.Slot')
+	// `gfx.Image` is sokol's, though gg declares an Image of its own, and
+	// `Pass` comes from the selective import
+	assert 'vlib.sokol.gfx.Image' in slot
+	assert 'vlib.sokol.gfx.Pass' in slot
+	assert 'vlib.gg.Image' in slot // the field written `Image`
+	assert 'vlib.gg.Pass' !in slot
+	// through an alias, written (`json.Any`) or rendered (`x.json2.Any`)
+	assert refs('vlib.gg.load') == ['vlib.x.json2.Any', 'vlib.sokol.gfx.Image']
+	assert 'vlib.x.json2.Any' in refs('vlib.gg.Doc')
+	assert 'vlib.gg.Any' !in refs('vlib.gg.Doc')
+	// an import inside a `$if` names its module as any other does
+	assert refs('vlib.db.MysqlDriver') == ['vlib.db.mysql.DB']
+	assert g.edges.any(it.kind == .calls && it.from == 'vlib.db.open'
+		&& it.to == 'vlib.db.mysql.connect')
+}
