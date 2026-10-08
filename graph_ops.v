@@ -8,7 +8,7 @@ import os
 pub struct Index {
 pub mut:
 	by_id   map[string]Symbol
-	by_name map[string][]string // short name -> ids
+	by_name map[string][]string // short name -> distinct ids
 	adj     map[string][]string // undirected neighbor ids
 	edges   []Edge              // edges with `to` resolved to an id where possible
 }
@@ -20,11 +20,14 @@ pub fn (g Graph) index() Index {
 		// Declarations that share an id are one logical declaration, such as a
 		// function declared once per platform (`os.read_file` in os.c.v and
 		// os_js.js.v, see disambiguate_ids); keep the one shown_before prefers,
-		// which explain/get_body/query then show.
-		if s.id !in idx.by_id || shown_before(s, idx.by_id[s.id]) {
+		// which explain/get_body/query then show. by_name lists the id once, so
+		// resolve doesn't take the copies for rival declarations.
+		if s.id !in idx.by_id {
+			idx.by_id[s.id] = s
+			idx.by_name[s.name] << s.id
+		} else if shown_before(s, idx.by_id[s.id]) {
 			idx.by_id[s.id] = s
 		}
-		idx.by_name[s.name] << s.id
 	}
 	for e in g.edges {
 		to_id := idx.resolve(e.to)

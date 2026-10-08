@@ -3746,3 +3746,44 @@ fn test_index_representative_ranks_backends() {
 		symbols: [c, plain, js]
 	}.index().by_id['os.f'].file == 'os/f_nix.v'
 }
+
+fn test_index_lists_a_shared_id_once_by_name() {
+	// Two declarations of one id are not two candidates: a bare-name edge to
+	// them resolves, and explain doesn't say the name has 2 declarations.
+	g := Graph{
+		symbols: [
+			Symbol{
+				id:   'os.setenv'
+				name: 'setenv'
+				kind: .function
+				file: 'os/environment.c.v'
+				line: 1
+			},
+			Symbol{
+				id:   'os.setenv'
+				name: 'setenv'
+				kind: .function
+				file: 'os/environment.js.v'
+				line: 1
+			},
+			Symbol{
+				id:   'os.caller'
+				name: 'caller'
+				kind: .function
+				file: 'os/use.v'
+				line: 1
+			},
+		]
+		edges:   [Edge{
+			from: 'os.caller'
+			to:   'setenv'
+			kind: .calls
+		}]
+	}
+	idx := g.index()
+	assert idx.by_name['setenv'] == ['os.setenv']
+	assert idx.edges.any(it.from == 'os.caller' && it.to == 'os.setenv')
+	explained := g.explain('setenv')
+	assert explained.contains('called by     : caller (os/use.v:1)'), explained
+	assert !explained.contains('possibly called by'), explained
+}
