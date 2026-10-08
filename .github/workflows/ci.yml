@@ -103,17 +103,26 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # `shell: bash` on Windows runs whichever bash.exe comes first on PATH,
-      # and on some runner images that is WSL's stub in WindowsApps, which
-      # fails with no Linux distribution installed. Put Git Bash first.
-      - name: Use Git Bash for bash steps (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: Add-Content $env:GITHUB_PATH "C:\Program Files\Git\bin"
-
       # Outside the workspace, as in build-and-smoke-test, and at the pinned
       # commit, so every runner extracts the same tree.
+      #
+      # Each step has a Windows copy and a copy for the other OSes. The Windows
+      # copies run in PowerShell: `shell: bash` there takes the first bash.exe
+      # on PATH, and after `v symlink` (Build V) the bash in the Extract step
+      # was WSL's stub in WindowsApps, which fails with no Linux distribution
+      # installed. A step's shell cannot use `runner` or `matrix`, hence two
+      # copies.
+      - name: Fetch V at the pinned commit (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          git init -q "$env:RUNNER_TEMP\v"
+          cd "$env:RUNNER_TEMP\v"
+          git fetch -q --depth 1 https://github.com/vlang/v ${{ needs.pin-vlang.outputs.sha }}
+          git checkout -q FETCH_HEAD
+
       - name: Fetch V at the pinned commit
+        if: runner.os != 'Windows'
         shell: bash
         run: |
           git init -q "$RUNNER_TEMP/v"
@@ -139,7 +148,16 @@ jobs:
 
       # From a clean checkout of the same commit: building V leaves generated
       # files beside its sources, and they may differ between platforms.
+      - name: Extract the pinned vlang tree (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          git -C "$env:RUNNER_TEMP\v" worktree add -q "$env:RUNNER_TEMP\vlang" HEAD
+          .\bin\graphify.exe extract "$env:RUNNER_TEMP\vlang" --out "$env:RUNNER_TEMP\graph-out"
+          Get-Content "$env:RUNNER_TEMP\graph-out\GRAPH_REPORT.md"
+
       - name: Extract the pinned vlang tree
+        if: runner.os != 'Windows'
         shell: bash
         run: |
           git -C "$RUNNER_TEMP/v" worktree add -q "$RUNNER_TEMP/vlang" HEAD
