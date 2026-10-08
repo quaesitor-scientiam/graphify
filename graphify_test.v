@@ -3614,17 +3614,21 @@ fn run(b lib.Box) {
 '
 	})
 	run := g.edges.filter(it.kind == .calls && it.from == 'app.run')
-	for name in ['cb', 'hook', 'wait', 'g'] {
+	for name in ['wait', 'g'] {
 		e := run.filter(it.to == name)
 		assert e.len == 1, name
 		assert e[0].provenance == .undeclared, name
 	}
+	// a function-typed field, written out or through a `type`, is the
+	// declaration such a call has, never a function of the same name
+	assert run.any(it.to == 'lib.Box.cb')
+	assert run.any(it.to == 'lib.Box.hook')
+	assert !run.any(it.to == 'lib.cb' || it.to == 'lib.hook')
 	// `f(1)` calls the parameter, not some function named `f`
 	apply := g.edges.filter(it.kind == .calls && it.from == 'lib.apply')
 	assert apply.len == 1 && apply[0].to == 'f' && apply[0].provenance == .undeclared
-	assert !run.any(it.to == 'lib.cb' || it.to == 'lib.hook')
 	report := g.report()
-	assert report.contains('undeclared 5')
+	assert report.contains('undeclared 3')
 	// and `explain` doesn't count them as possible callers of `lib.cb`
 	assert !g.explain('lib.cb').contains('possibly called by')
 }
@@ -3652,14 +3656,19 @@ fn run(j Job, conv fn (int) int) int {
 '
 	})
 	raw := g.edges.filter(it.kind == .calls && it.from == 'app.run')
-	assert raw.len == 2 && raw.all(it.provenance == .undeclared)
+	assert raw.len == 2
+	// `conv(1)` calls the parameter: undeclared, and never linked by name
+	conv := raw.filter(it.to == 'conv')
+	assert conv.len == 1 && conv[0].provenance == .undeclared
 	idx := g.index()
-	assert !idx.edges.any(it.from == 'app.run' && it.kind == .calls)
+	assert !idx.edges.any(it.from == 'app.run' && it.to == 'lib.conv')
 	assert !g.explain('lib.conv').contains('app.run')
-	assert !g.explain('app.Job.on_done').contains('app.run')
 	assert g.shortest_path('app.run', 'lib.conv').len == 0
 	// still counted as undeclared, not unresolved
-	assert g.report().contains('undeclared 2')
+	assert g.report().contains('undeclared 1')
+	// `j.on_done()` calls the function-typed field, which is its declaration
+	assert raw.any(it.to == 'app.Job.on_done' && it.provenance == .inferred)
+	assert g.explain('app.Job.on_done').contains('run')
 }
 
 fn test_stale_note() {
@@ -3819,4 +3828,90 @@ fn test_index_lists_a_shared_id_once_by_name() {
 	explained := g.explain('setenv')
 	assert explained.contains('called by     : caller (os/use.v:1)'), explained
 	assert !explained.contains('possibly called by'), explained
+}
+
+fn test_receivers_named_by_consts_globals_and_function_fields() {
+	g := graph_of({
+		'vlib/builtin/str.v': 'module builtin
+
+pub fn (s string) bytes() []u8 {
+	return []
+}
+
+pub fn (a array) clone() array {
+	return a
+}
+'
+		'lib/lib.v':          'module lib
+
+pub struct Response {}
+
+pub fn (r Response) bytes() []u8 {
+	return []
+}
+
+pub fn (r Response) clone() Response {
+	return r
+}
+
+pub const args = ["a"]
+
+pub struct Server {
+pub:
+	on_run fn () = unsafe { nil }
+}
+
+pub fn on_run() {
+}
+
+@[flag]
+pub enum Flags {
+	a
+	b
+}
+
+pub struct Holder {
+pub:
+	flags Flags
+}
+
+pub fn (h Holder) set() {
+}
+'
+		'app/main.v':         'module main
+
+import lib
+
+const preface = "PRI * HTTP/2.0"
+const local_server = lib.Server{}
+
+__global counter = lib.Response{}
+
+fn run(h lib.Holder) {
+	preface.bytes()
+	lib.args.clone()
+	counter.clone()
+	local_server.on_run()
+	h.flags.set(.a)
+	h.flags.str()
+}
+'
+	})
+	calls := g.edges.filter(it.kind == .calls && it.from == 'app.run')
+	tos := calls.map(it.to)
+	assert 'vlib.builtin.string.bytes' in tos // a const's value
+	assert 'lib.Response.bytes' !in tos
+	assert 'vlib.builtin.array.clone' in tos // another module's const
+	assert 'lib.Response.clone' in tos // a global
+	// a call through a function-typed field resolves to the field
+	assert 'lib.Server.on_run' in tos
+	assert 'lib.on_run' !in tos
+	// methods V writes for a flag enum, and str(), have no declaration
+	for name in ['set', 'str'] {
+		e := calls.filter(it.to == name)
+		assert e.len == 1 && e[0].provenance == .undeclared, name
+	}
+	assert 'lib.Holder.set' !in tos
+	globals := g.symbols.filter(it.kind == .global)
+	assert globals.len == 1 && globals[0].id == 'app.counter'
 }

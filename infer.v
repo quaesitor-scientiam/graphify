@@ -9,10 +9,10 @@ module graphify
 // the method of that name on the type it arrives at.
 //
 // It works only from declarations, never from the checker, so it stops where
-// V would need inference of its own, such as a generic or a module's const,
-// and leaves the call to resolve_callee's usual narrowing. A call it can
-// show has no declaration at all, a function-typed field or a method V
-// provides itself, it marks `undeclared` instead.
+// V would need inference of its own, such as a generic, and leaves the call
+// to resolve_callee's usual narrowing. A const or global is followed through
+// the recipe of its value. A call of a function-typed field resolves to the
+// field, and one of a method V provides itself is marked `undeclared`.
 
 // Infer holds what following a recipe needs to look up, built once per graph
 // by resolve_edges.
@@ -27,6 +27,9 @@ struct Infer {
 	field_type   map[string]string // '<struct id>\x00<field>' -> its type
 	alias_of     map[string]string // alias id -> the type it names (not a sum type)
 	embeds_of    map[string][]Edge // struct or interface id -> its raw `embeds` edges
+	field_id     map[string]string // '<struct id>\x00<field>' -> the field's symbol id
+	consts       map[string][]Symbol // name -> the consts and globals with a recipe
+	enum_ids     map[string]bool     // ids of enums
 mut:
 	memo map[string]InferredType
 }
@@ -39,7 +42,12 @@ mut:
 	text string
 	mod  string
 	file string
+	// field_id is the field's symbol id when the type is a field's (field_of)
+	field_id string
 }
+
+// const_depth bounds following one const's recipe into another's.
+const const_depth = 4
 
 // array_same_type are the array methods whose result has the receiver's type;
 // builtin declares most of them as returning plain `array`, or not at all.
@@ -50,6 +58,11 @@ const array_same_type = ['clone', 'filter', 'reverse', 'sorted', 'sorted_with_co
 const array_builtins = ['filter', 'map', 'any', 'all', 'count', 'sort', 'sorted', 'sort_with_compare',
 	'sorted_with_compare', 'contains', 'index', 'last_index', 'wait', 'first', 'last', 'pop',
 	'reverse', 'clone']
+
+// flag_enum_methods are the methods V provides for a `@[flag]` enum, as
+// cgen's is_flag_enum_method lists them.
+const flag_enum_methods = ['has', 'all', 'set', 'clear', 'toggle', 'set_all', 'clear_all',
+	'is_empty']
 
 // embed_depth bounds following embedded types, which could name each other.
 const embed_depth = 4
@@ -64,11 +77,21 @@ fn (mut inf Infer) infer_call(e Edge) ?CallResolution {
 	if e.is_method {
 		if t := inf.receiver(e) {
 			found := inf.method_on(t, e.to, e.file, 0) or { '' }
-			if found == '' && inf.undeclared_method(t, e.to, e.file) {
+			if found == '' {
 				// before any name match: `b.cb()` on a function-typed field is
 				// no call of some function that happens to be named `cb`
-				return CallResolution{
-					undeclared: true
+				if field := inf.no_method(t, e.to, e.file) {
+					if field != '' {
+						// it calls whatever the field holds; the field is
+						// the declaration there is
+						return CallResolution{
+							id:       field
+							inferred: true
+						}
+					}
+					return CallResolution{
+						undeclared: true
+					}
 				}
 			}
 			if found != '' {
@@ -121,31 +144,55 @@ fn (mut inf Infer) receiver(e Edge) ?InferredType {
 	return none
 }
 
-// undeclared_method reports whether calling `name` on `t` reaches no
-// declaration by design: a field of function type, `thread.wait()`, or an
-// array method the compiler provides. Call it only once method_on found none.
-fn (inf &Infer) undeclared_method(t InferredType, name string, file string) bool {
+// no_method explains a call of `name` on `t` that matched no method: the id
+// of the function-typed field it calls, or '' for a method V provides without
+// declaring it (`thread.wait()`, a compiler-provided array method). none
+// leaves the call to name matching. Call it only once method_on found none.
+fn (inf &Infer) no_method(t InferredType, name string, file string) ?string {
 	text := bare_type(t.text)
 	if name == 'wait' && (text.starts_with('thread') || text.starts_with('[]thread')) {
-		return true
+		return ''
 	}
-	if text.starts_with('[') && name in array_builtins {
-		return true
+	if text.starts_with('[') && (name in array_builtins || name == 'str') {
+		return ''
 	}
-	ft := inf.field_of(t, name, file, 0) or { return false }
+	if text.starts_with('map[') && name == 'str' {
+		return ''
+	}
+	if is_named_type(text) {
+		named := strip_generic_args(text)
+		short := named.all_after_last('.')
+		qual := if named.contains('.') { named.all_before_last('.') } else { '' }
+		if decl := inf.find_type(short, qual, t, file) {
+			// V writes `str()` for any type that doesn't, and the methods of
+			// a `@[flag]` enum
+			if name == 'str' || (decl.id in inf.enum_ids && name in flag_enum_methods) {
+				if _ := inf.field_of(t, name, file, 0) {
+				} else {
+					return ''
+				}
+			}
+		}
+	}
+	ft := inf.field_of(t, name, file, 0)?
+	if ft.field_id == '' {
+		return none
+	}
 	ftext := bare_type(ft.text)
 	if ftext.starts_with('fn ') || ftext.starts_with('fn(') {
-		return true
+		return ft.field_id
 	}
 	// a field whose type is a named function type, `cb Callback`
 	if is_named_type(ftext) {
 		named := strip_generic_args(ftext)
 		qual := if named.contains('.') { named.all_before_last('.') } else { '' }
-		decl := inf.find_type(named.all_after_last('.'), qual, ft, file) or { return false }
-		target := inf.alias_of[decl.id] or { return false }
-		return target.starts_with('fn ') || target.starts_with('fn(')
+		decl := inf.find_type(named.all_after_last('.'), qual, ft, file)?
+		target := inf.alias_of[decl.id] or { return none }
+		if target.starts_with('fn ') || target.starts_with('fn(') {
+			return ft.field_id
+		}
 	}
-	return false
+	return none
 }
 
 // embedded is the declarations of the types `decl` embeds.
@@ -178,12 +225,12 @@ fn (mut inf Infer) follow(e Edge) ?InferredType {
 	if t := inf.memo[key] {
 		return if t.text == '' { none } else { t }
 	}
-	t := inf.follow_steps(e) or { InferredType{} }
+	t := inf.follow_steps(e, 0) or { InferredType{} }
 	inf.memo[key] = t
 	return if t.text == '' { none } else { t }
 }
 
-fn (inf &Infer) follow_steps(e Edge) ?InferredType {
+fn (inf &Infer) follow_steps(e Edge, depth int) ?InferredType {
 	steps := e.recv_recipe.split(recipe_sep)
 	mut t := InferredType{}
 	start := steps[0]
@@ -194,6 +241,17 @@ fn (inf &Infer) follow_steps(e Edge) ?InferredType {
 			mod:  scope.mod
 			file: e.file
 		}
+	} else if start.starts_with('g:') {
+		c := inf.find_const(start[2..], e.file)?
+		if depth >= const_depth {
+			return none
+		}
+		// the const's own recipe, in the scope of the file declaring it
+		t = inf.follow_steps(Edge{
+			from:        c.id
+			file:        c.file
+			recv_recipe: c.recipe
+		}, depth + 1)?
 	} else if start.starts_with('c:') {
 		call := Edge{
 			from: e.from
@@ -251,6 +309,36 @@ fn (inf &Infer) follow_steps(e Edge) ?InferredType {
 		return none
 	}
 	return t
+}
+
+// find_const is the const or global that `name` names from `file`: one of
+// its module's (in a standalone program, of its own file), or of builtin;
+// with a module path, `os.args`, one of that module's.
+fn (inf &Infer) find_const(name string, file string) ?Symbol {
+	short := name.all_after_last('.')
+	qual := if name.contains('.') { name.all_before_last('.') } else { '' }
+	cands := inf.consts[short] or { return none }
+	scope := inf.scope_of[file] or { FileScope{} }
+	mut own := []Symbol{}
+	mut reachable := []Symbol{}
+	for c in cands {
+		if test_private(c.file, file) {
+			continue
+		}
+		if qual == '' && c.parent == scope.mod && (!scope.is_main || c.file == file) {
+			own << c
+		}
+		if (qual != '' && import_reaches(c.parent, qual))
+			|| (qual == '' && import_reaches(c.parent, 'builtin')) {
+			reachable << c
+		}
+	}
+	for tier in [own, reachable] {
+		if tier.len > 0 && tier.all(it.id == tier[0].id) {
+			return tier[0]
+		}
+	}
+	return none
 }
 
 // returns is the return type of the function or method with id `id`, in the
@@ -422,11 +510,13 @@ fn (inf &Infer) field_of(t InferredType, name string, file string, depth int) ?I
 		return none
 	}
 	decl := inf.find_type(short, qual, t, file)?
-	if ft := inf.field_type['${decl.id}\x00${name}'] {
+	key := '${decl.id}\x00${name}'
+	if ft := inf.field_type[key] {
 		return InferredType{
-			text: ft
-			mod:  decl.mod
-			file: decl.file
+			text:     ft
+			mod:      decl.mod
+			file:     decl.file
+			field_id: inf.field_id[key] or { '' }
 		}
 	}
 	if depth >= embed_depth {

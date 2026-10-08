@@ -33,10 +33,9 @@ pub fn (g Graph) index() Index {
 		if e.provenance == .undeclared {
 			// no declaration to resolve to (see EdgeProvenance): a unique
 			// name match would pin the call on an unrelated declaration, the
-			// way a test's `conv` parameter matched `encoding.iconv.conv`. A
-			// call of a function-typed field can name the right field, but
-			// graph.json keeps no receiver type to tell it from another
-			// field of that name, so none is guessed.
+			// way a test's `conv` parameter matched `encoding.iconv.conv`. (A
+			// call of a function-typed field is resolved to the field by
+			// resolve_edges, so it isn't one of these.)
 			continue
 		}
 		to_id := idx.resolve(e.to)
