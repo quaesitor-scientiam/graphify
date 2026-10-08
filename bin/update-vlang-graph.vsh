@@ -1,11 +1,12 @@
 #!/usr/bin/env -S v -raw-vsh-tmp-prefix tmp
 
-// Pulls the target repo, rebuilds graphify when it is out of date, and
-// re-extracts when anything changed. Wired into a daily scheduler (Windows
-// Task Scheduler / macOS launchd / Linux cron); can also be run by hand.
+// Pulls graphify and the target repo, rebuilds graphify when it is out of
+// date, and re-extracts when anything changed. Wired into a daily scheduler
+// (Windows Task Scheduler / macOS launchd / Linux cron); can also be run by
+// hand.
 //
-//   v run bin/update-vlang-graph.vsh                    # pull; extract if anything changed
-//   v run bin/update-vlang-graph.vsh -NoPull            # skip the pull, always re-extract
+//   v run bin/update-vlang-graph.vsh                    # pull both; extract if anything changed
+//   v run bin/update-vlang-graph.vsh -NoPull            # pull neither, always re-extract
 //   v run bin/update-vlang-graph.vsh -Commit <sha>      # move up to that commit, not the newest
 //   v run bin/update-vlang-graph.vsh -NoBuild           # never rebuild graphify
 //
@@ -17,6 +18,12 @@
 //
 // -Commit makes two machines extract exactly the same source: it fast-forwards
 // the repo to that commit and never moves it back or off its branch.
+//
+// graphify's own checkout is fast-forwarded too, so a merged change reaches
+// every machine on its next run; it is left alone when it has local changes
+// or isn't on a branch, and a failed pull only logs a warning. A prebuilt
+// bin/update-vlang-graph(.exe) beside it, which the Windows task runs, is
+// rebuilt with the rest.
 
 import os
 import time
@@ -97,6 +104,30 @@ fn git(repo string, args ...string) os.Result {
 
 fn head_of(repo string) string {
 	return git(repo, 'rev-parse', 'HEAD').output.trim_space()
+}
+
+// pull_graphify fast-forwards graphify's own checkout. It doesn't touch one
+// with uncommitted changes or a detached HEAD, which someone is working in,
+// and a failure is a warning: the run goes on with the code it has.
+fn pull_graphify(log_path string, root string) {
+	if git(root, 'symbolic-ref', '-q', 'HEAD').exit_code != 0 {
+		log_line(log_path, 'graphify: not on a branch; not pulling it')
+		return
+	}
+	if git(root, 'status', '--porcelain', '--untracked-files=no').output.trim_space() != '' {
+		log_line(log_path, 'graphify: local changes; not pulling it')
+		return
+	}
+	before := head_of(root)
+	pull := git(root, 'pull', '--ff-only', '--quiet')
+	if pull.exit_code != 0 {
+		log_line(log_path, 'WARNING: graphify pull failed: ${pull.output.trim_space()}')
+		return
+	}
+	after := head_of(root)
+	if after != before {
+		log_line(log_path, 'graphify: updated ${before#[..10]} -> ${after#[..10]}.')
+	}
 }
 
 // move_to_commit fast-forwards `repo` to `commit`, fetching first. It refuses
@@ -194,6 +225,20 @@ fn remove_old_copies(out string) {
 	}
 }
 
+// remove_build_leftovers deletes the `.<name>.v3cc.*` directories that V's
+// compiler leaves beside a binary it built (each holds a ~2 MB C file). Only
+// ones older than an hour go, so a build still running keeps its own.
+fn remove_build_leftovers(bin_dir string) {
+	cutoff := time.now().unix() - 3600
+	for name in os.ls(bin_dir) or { return } {
+		path := os.join_path(bin_dir, name)
+		if name.starts_with('.') && name.contains('.v3cc.') && os.is_dir(path)
+			&& os.file_last_mod_unix(path) < cutoff {
+			os.rmdir_all(path) or {}
+		}
+	}
+}
+
 // rebuild_if_stale rebuilds graphify's binaries when bin/.build-stamp no
 // longer matches, and reports whether it did.
 fn rebuild_if_stale(log_path string, root string, exe string) !bool {
@@ -222,6 +267,15 @@ fn rebuild_if_stale(log_path string, root string, exe string) !bool {
 	hook := os.join_path(root, 'bin', 'graphify-hook' + ext)
 	if os.exists(hook) {
 		build_one(log_path, v_exe, hook, ['build', 'cmd/hooks/graphify_hook.vsh']) or {
+			log_line(log_path, 'WARNING: ${err}')
+			all_built = false
+		}
+	}
+	// this script, prebuilt for the Windows task; it is running, which the
+	// swap in build_one allows
+	updater := os.join_path(root, 'bin', 'update-vlang-graph' + ext)
+	if os.exists(updater) {
+		build_one(log_path, v_exe, updater, ['build', 'bin/update-vlang-graph.vsh']) or {
 			log_line(log_path, 'WARNING: ${err}')
 			all_built = false
 		}
@@ -262,6 +316,12 @@ fn main() {
 	log_path := os.join_path(store, 'update.log')
 
 	log_line(log_path, '--- vlang graph update start ---')
+	remove_build_leftovers(os.join_path(root, 'bin'))
+
+	// graphify first: a change to it must be built before it extracts
+	if !opts.no_pull {
+		pull_graphify(log_path, root)
+	}
 
 	// pull first: the pull can bring V parser changes the rebuild must see
 	mut changed := opts.no_pull

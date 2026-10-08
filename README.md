@@ -562,14 +562,14 @@ using the wrong paths.
 
 ### `bin/update-vlang-graph.vsh` — scheduled graph refresh
 
-Pulls the target repo, rebuilds graphify if it is out of date, and
-re-extracts if either changed anything. Wired into a scheduler — Windows Task
+Pulls graphify and the target repo, rebuilds graphify if it is out of date,
+and re-extracts if anything changed. Wired into a scheduler — Windows Task
 Scheduler, macOS `launchd`, or Linux `cron`, see **Scheduling** below; can
 also be run by hand.
 
 ```
-v run bin/update-vlang-graph.vsh                  # pull; extract if anything changed
-v run bin/update-vlang-graph.vsh -NoPull          # skip the pull, always re-extract
+v run bin/update-vlang-graph.vsh                  # pull both; extract if anything changed
+v run bin/update-vlang-graph.vsh -NoPull          # pull neither, always re-extract
 v run bin/update-vlang-graph.vsh -Commit <sha>    # move up to that commit, not the newest
 v run bin/update-vlang-graph.vsh -NoBuild         # never rebuild graphify
 ```
@@ -584,6 +584,14 @@ Each binary is built under a temporary name and swapped in, so an MCP server
 that is running it doesn't block the build on Windows. When the `v` on `PATH`
 is the vlang checkout being extracted, a pull that changes `vlib` triggers the
 rebuild by itself.
+
+graphify's own checkout is fast-forwarded first, so a change merged to
+master reaches every machine on its next scheduled run. A checkout with
+uncommitted changes, or not on a branch, is left as it is, and a failed pull
+of it only logs a warning. The prebuilt `bin/update-vlang-graph.exe` the
+Windows task runs is rebuilt along with the other binaries, and the
+`.<name>.v3cc.*` directories V's compiler leaves in `bin/` are removed once
+they're an hour old.
 
 `-Commit` lets two machines extract exactly the same source: it fetches and
 fast-forwards the repo to that commit, and refuses to move it back or off its
@@ -683,8 +691,9 @@ hours).
     extract on the spot (see the hook build note above for the stale-binary
     side of the same problem).
   - **The exe is a snapshot.** It bakes in the checkout path (`@VMODROOT`),
-    which is how it finds `graphify.config.json` and `bin\graphify.exe`. Rebuild
-    it after changing the script, and after moving the checkout.
+    which is how it finds `graphify.config.json` and `bin\graphify.exe`. Each
+    run rebuilds it when graphify has changed, so build it by hand only the
+    first time and after moving the checkout.
   - **The `pwsh` wrapper is what hides the window.** Task Scheduler's *Hidden*
     option only hides the task from its list; a console program that an
     interactive-logon task launches directly still opens a window. A child of
@@ -707,8 +716,7 @@ hours).
 On every platform the job rebuilds `bin/graphify` itself when graphify or V's
 `vlib` has changed (see above). The first extract after a rebuild is a full
 re-parse, because the incremental cache is tied to the binary that wrote it.
-The Windows task's own `update-vlang-graph.exe` is not rebuilt; rebuild it
-after changing the script.
+The Windows task's own `update-vlang-graph.exe` is rebuilt with them.
 
 ## Claude Code wiring
 
