@@ -21,6 +21,15 @@ pub fn (g Graph) index() Index {
 		idx.by_name[s.name] << s.id
 	}
 	for e in g.edges {
+		if e.provenance == .undeclared {
+			// no declaration to resolve to (see EdgeProvenance): a unique
+			// name match would pin the call on an unrelated declaration, the
+			// way a test's `conv` parameter matched `encoding.iconv.conv`. A
+			// call of a function-typed field can name the right field, but
+			// graph.json keeps no receiver type to tell it from another
+			// field of that name, so none is guessed.
+			continue
+		}
 		to_id := idx.resolve(e.to)
 		if to_id == '' || e.from !in idx.by_id {
 			continue // skip edges to externals/unknowns

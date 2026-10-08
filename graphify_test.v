@@ -3629,6 +3629,39 @@ fn run(b lib.Box) {
 	assert !g.explain('lib.cb').contains('possibly called by')
 }
 
+fn test_index_leaves_undeclared_calls_unresolved() {
+	// `conv` and `on_done` are each declared exactly once, so a bare-name
+	// match would resolve the undeclared calls to them
+	g := graph_of({
+		'lib/lib.v':  'module lib
+
+pub fn conv(x int) int {
+	return x
+}
+'
+		'app/main.v': 'module main
+
+struct Job {
+	on_done fn ()
+}
+
+fn run(j Job, conv fn (int) int) int {
+	j.on_done()
+	return conv(1)
+}
+'
+	})
+	raw := g.edges.filter(it.kind == .calls && it.from == 'app.run')
+	assert raw.len == 2 && raw.all(it.provenance == .undeclared)
+	idx := g.index()
+	assert !idx.edges.any(it.from == 'app.run' && it.kind == .calls)
+	assert !g.explain('lib.conv').contains('app.run')
+	assert !g.explain('app.Job.on_done').contains('app.run')
+	assert g.shortest_path('app.run', 'lib.conv').len == 0
+	// still counted as undeclared, not unresolved
+	assert g.report().contains('undeclared 2')
+}
+
 fn test_stale_note() {
 	dir := os.join_path(os.temp_dir(), 'graphify_stale_${os.getpid()}')
 	os.rmdir_all(dir) or {}

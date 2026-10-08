@@ -34,6 +34,15 @@ unresolved, and `explain` no longer lists it as a possible caller of a
 same-named function. On the same tree: 3,775 calls unresolved (1.5%), 1,631
 undeclared.
 
+`Graph.index()` leaves undeclared calls unresolved, so query, path, explain
+and communities don't link them to a same-named declaration by unique name
+(109 did so on that tree). That also drops the right ones: about 40 of the 62
+that matched a field were a function-typed field of the caller's own type,
+such as `s.on_running()` in `net.http.Server.listen_and_serve`. infer.v knows
+the field when it marks the call `undeclared` (`field_of`); recording its id,
+as a `references` edge or a field on the call, would keep those links but
+changes graph.json.
+
 What remains is mostly a module's const or global as a receiver (the graph
 records no type for one), generics, receivers whose type V itself infers,
 and calls whose receiver the recipe doesn't cover (a `match` arm's
