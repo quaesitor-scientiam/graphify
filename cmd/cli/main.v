@@ -365,10 +365,18 @@ fn load(args []string) graphify.Graph {
 		graphify.load_graph(file) or { fail('cannot read ${file}: ${err}') }
 	} else {
 		eprintln('note: ${file} not found, building graph from "." (run `graphify extract` to persist)')
-		graphify.build_graph(graphify.Options{ root: '.' })
+		return graphify.build_graph(graphify.Options{ root: '.' })
 	}
+	mut shared := false
 	if sd := str_flag(args, '--source-dir') {
 		g.root = sd
+		shared = true
+	}
+	// a graph shared from another machine was built by another graphify, so
+	// only its commit is worth comparing
+	note := graphify.stale_note(file, g.root, if shared { '' } else { os.executable() })
+	if note != '' {
+		eprintln('note: ${note}')
 	}
 	return g
 }

@@ -8,7 +8,12 @@ module main
 //   v run cmd/mcp [graphify-out/graph.json]
 //
 // Tools: query_graph, get_node, get_neighbors, shortest_path.
+//
+// It reloads the graph when graph.json changes on disk (an extract publishes
+// it atomically), and a tool result starts with a note when the graph looks
+// out of date (graphify.stale_note).
 import os
+import time
 import x.json2
 import graphify
 
@@ -18,17 +23,19 @@ fn main() {
 	} else {
 		os.join_path(graphify.out_dir_name, 'graph.json')
 	}
-	mut g := graphify.load_graph(graph_path) or {
-		eprintln('graphify-mcp: cannot load ${graph_path}: ${err}')
-		exit(1)
-	}
 	// optional 2nd arg / GRAPHIFY_SOURCE_DIR: override the extraction root so a
 	// graph shared from another machine resolves get_body against local source.
 	src_dir := if os.args.len > 2 { os.args[2] } else { os.getenv('GRAPHIFY_SOURCE_DIR') }
-	if src_dir != '' {
-		g.root = src_dir
+	mut g := load(graph_path, src_dir) or {
+		eprintln('graphify-mcp: cannot load ${graph_path}: ${err}')
+		exit(1)
 	}
-	eprintln('graphify-mcp: loaded ${g.symbols.len} symbols from ${graph_path}')
+	// mtime has one-second resolution, so the size is compared as well
+	mut stamp := file_stamp(graph_path)
+	// a shared graph was built by another machine's graphify: compare commits only
+	cli := if src_dir != '' { '' } else { graphify.cli_beside() }
+	mut note := graphify.stale_note(graph_path, g.root, cli)
+	mut note_at := time.now().unix()
 
 	for {
 		raw := os.get_raw_line()
@@ -39,7 +46,23 @@ fn main() {
 		if line == '' {
 			continue
 		}
-		resp := handle(line, g)
+		if line.contains('"tools/call"') {
+			// a re-extract replaced graph.json: serve the new graph
+			now_stamp := file_stamp(graph_path)
+			if now_stamp != stamp {
+				if fresh := load(graph_path, src_dir) {
+					g = fresh
+					stamp = now_stamp
+					note_at = 0
+				}
+			}
+			// the checkout moves on its own; look again at most once a minute
+			if time.now().unix() - note_at >= 60 {
+				note = graphify.stale_note(graph_path, g.root, cli)
+				note_at = time.now().unix()
+			}
+		}
+		resp := handle(line, g, note)
 		if resp != '' {
 			println(resp)
 			flush_stdout()
@@ -49,7 +72,21 @@ fn main() {
 
 // handle parses one JSON-RPC request and returns the response line, or '' for
 // notifications (no id) and unparseable input.
-fn handle(line string, g graphify.Graph) string {
+fn file_stamp(path string) string {
+	return '${os.file_last_mod_unix(path)}:${os.file_size(path)}'
+}
+
+// load reads the graph, with its root replaced by `src_dir` when one is given.
+fn load(graph_path string, src_dir string) !graphify.Graph {
+	mut g := graphify.load_graph(graph_path)!
+	if src_dir != '' {
+		g.root = src_dir
+	}
+	eprintln('graphify-mcp: loaded ${g.symbols.len} symbols from ${graph_path}')
+	return g
+}
+
+fn handle(line string, g graphify.Graph, note string) string {
 	any := json2.decode[json2.Any](line) or { return rpc_error(json2.null, -32700, 'parse error') }
 	req := any.as_map()
 	method := req['method'] or { return '' }.str()
@@ -74,7 +111,7 @@ fn handle(line string, g graphify.Graph) string {
 			params := (req['params'] or { json2.null }).as_map()
 			name := (params['name'] or { json2.null }).str()
 			args := (params['arguments'] or { json2.null }).as_map()
-			return rpc_result(id, call_tool(name, args, g))
+			return rpc_result(id, call_tool(name, args, g, note))
 		}
 		'ping' {
 			return rpc_result(id, jobj(map[string]json2.Any{}))
@@ -85,7 +122,9 @@ fn handle(line string, g graphify.Graph) string {
 	}
 }
 
-fn call_tool(name string, args map[string]json2.Any, g graphify.Graph) json2.Any {
+// call_tool runs one tool; `note`, when set, says the graph may be stale and
+// goes first in the result.
+fn call_tool(name string, args map[string]json2.Any, g graphify.Graph, note string) json2.Any {
 	mut str_args := map[string]string{}
 	for k, v in args {
 		if v is string {
@@ -131,6 +170,9 @@ fn call_tool(name string, args map[string]json2.Any, g graphify.Graph) json2.Any
 		else {
 			'unknown tool: ${name}'
 		}
+	}
+	if note != '' {
+		return tool_result('(note: ${note})\n\n${text}', false)
 	}
 	return tool_result(text, false)
 }

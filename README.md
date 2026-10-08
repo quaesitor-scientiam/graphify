@@ -434,9 +434,10 @@ println(g.query('auth flow', 2000, false))
 ## MCP server (for Claude Code and Codex)
 
 `cmd/mcp` is a JSON-RPC-over-stdio MCP server that loads a persisted
-`graph.json` once and exposes graph traversal as tools, so the model queries
-the graph instead of reading source files. The same server works with both
-Claude Code and Codex:
+`graph.json` and exposes graph traversal as tools, so the model queries
+the graph instead of reading source files. It reloads the graph when an
+extract replaces `graph.json`, so re-extracting needs no client restart. The
+same server works with both Claude Code and Codex:
 
 | Tool | Purpose |
 | --- | --- |
@@ -518,7 +519,15 @@ codex mcp add graphify -- /path/to/graphify/bin/graphify-mcp /path/to/graph_data
 ```
 
 Restart the client after registering or switching the graph so it reloads the
-MCP server configuration. Smoke-test the protocol independently of either
+MCP server configuration (a re-extract of the same graph doesn't need one).
+
+**Stale-graph notes.** Both the CLI (on stderr) and the MCP server (at the top
+of a tool result) say when the graph may be out of date, from the
+`manifest.json` beside it: when the source checkout has moved past the commit
+the graph was extracted from (`... is at 89371e2b13 (3 commits ahead)`), or
+when the graphify that would extract it again isn't the build that did. A
+graph read with `--source-dir` / `GRAPHIFY_SOURCE_DIR`, shared from another
+machine, is compared by commit only. Uncommitted edits aren't reported. Smoke-test the protocol independently of either
 client with:
 
 ```
@@ -792,6 +801,7 @@ Known gaps and evidence-gated future work are recorded in
 - [x] **The extractor runs on V3 (2026-10-07).** The extractor used V's V1 frontend (`v.ast`), which upstream V removed; graphify built only through the V 0.5.2 compatibility compiler (`-old-compiler`), which couldn't parse newer syntax (220 files of the V compiler repo flagged) and saw only the host's `$if` branches. It now reads V3's flat AST (`backend_v.v`) and builds with plain `v`; the V 0.5.2 extractor is gone. On the V compiler repo: 214,790 resolved calls to 209,991, 5 files flagged to 220, extraction 2.6 s to 2.9 s, and the same graph on every OS. Ids, signatures and lines keep the old conventions, so existing graphs and queries carry over; a re-extract re-parses every file once, since the cache is tied to the binary. What changed is in [FUTURE_WORK.md §6](FUTURE_WORK.md#6-porting-the-extractor-to-v3-done-october-2026): imports are resolved to the module they mean, imports the parser implies are recorded as `import m (implied)`, and 232 ids went away (187 imports renamed by resolution, the rest V 0.5.2 artifacts such as `vlib.builtin.int literal.str`) while 2,250 came in, mostly other platforms' code.
 - [x] **Receiver types inferred through the graph (2026-10-07).** A method call such as `name.contains('.')` matched dozens of declarations by name, and the locality heuristics often picked the wrong one (`v.types.Scope.contains` for a string). Each call whose receiver type the code doesn't write now records how to work it out: from a call's result, a field, an index, a loop variable, a literal or `it`. `resolve_edges` follows that through the return and field types in the whole graph (`infer.v`). On the V compiler's tree, unresolved calls fell from 28,642 to 7,733 (11.5% to 3.1%) and 1,974 earlier guesses were corrected; extraction time is unchanged and peak memory rose from 1.3 to 1.5 GB. What's left is mostly interface methods (`err.msg()`), function values and `thread.wait()`; see [FUTURE_WORK.md §1](FUTURE_WORK.md).
 - [x] **Interface methods, embedded members, and undeclared calls (2026-10-07).** An interface's methods and fields are now symbols, so `err.msg()` resolves to `builtin.IError.msg` and a call on any interface-typed value to that interface's method rather than to a guessed implementation; methods and fields promoted from an embedded struct or interface are found too. Calls that can have no declaration, of a function value (a variable, parameter or function-typed field), `thread.wait()` or an array method the compiler provides, get their own provenance, `undeclared`, rather than counting as unresolved or being matched to an unrelated function of the same name (`b.cb()` on a field had resolved to a function `cb`). On the V compiler's tree: unresolved calls 7,733 → 3,775 (1.5% of calls), 1,631 undeclared.
+- [x] **Stale-graph notes; the MCP server reloads the graph (2026-10-07).** The CLI and the MCP server compare the graph's manifest with the source checkout's commit and with the graphify build that would re-extract it, and say so when either has moved on. The MCP server used to load `graph.json` once, so every re-extract needed a client restart; it now reloads when the file changes. Together with `update-vlang-graph.vsh` rebuilding graphify itself, this closes [FUTURE_WORK.md §4](FUTURE_WORK.md)'s freshness check.
 - [x] Phase 5, **GraphML/Cypher export** — both formats emit one node per unique id (via `Index.by_id`, not the raw `Symbol` list) and only resolved edges, for the reasons the Usage section explains. A real bug was caught in the process, not just anticipated: a naive one-node-per-raw-`Symbol` version violated the Cypher export's own uniqueness constraint against this project's own files (they all declare `module graphify`), confirmed by actually running the export, not by inspection.
 - [x] Phase 5, **SVG export and `graph.html`** — both share one layout: communities (see above) arranged around an outer circle, each community's own members around a smaller circle centered on its spot, sized by degree and colored by community. Deterministic trigonometry, not a force-directed simulation — see Usage for why. `graph.html` adds a legend, hover-to-highlight-neighbors, and scroll-to-zoom/drag-to-pan — plain DOM/SVG, no framework. Capped at 300 symbols (proportional per-community, highest-degree first) with the cap always disclosed, never silent.
   Shipped once already believing it was verified, then genuinely wasn't: the first pass checked hover by dispatching a synthetic `mouseenter` in JS, which passed because it targets the element directly — it can't catch "the real click target is too small to hit," which is exactly what user feedback then reported. Re-verified with a real WebDriver session (`vebidor`, driving actual Edge) instead: a synthesized *pointer move*, not a dispatched event, landed dead-center on a node and measured its rendered size at ~4×4 CSS pixels. Fixed by decoupling the hover hit-target from the node's degree-sized visible dot (now independently sized, ~3× larger) and adding real zoom/pan, then re-confirmed the same honest way — synthesized pointer move on the new target, a dispatched wheel event, and a real drag — plus visual screenshots at each step.

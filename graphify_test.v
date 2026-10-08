@@ -3628,3 +3628,57 @@ fn run(b lib.Box) {
 	// and `explain` doesn't count them as possible callers of `lib.cb`
 	assert !g.explain('lib.cb').contains('possibly called by')
 }
+
+fn test_stale_note() {
+	dir := os.join_path(os.temp_dir(), 'graphify_stale_${os.getpid()}')
+	os.rmdir_all(dir) or {}
+	repo := os.join_path(dir, 'repo')
+	out := os.join_path(dir, 'out')
+	os.mkdir_all(repo) or { panic(err) }
+	os.mkdir_all(out) or { panic(err) }
+	defer {
+		os.rmdir_all(dir) or {}
+	}
+	git := fn [repo] (args ...string) string {
+		mut cmd := ['git', '-C', repo, '-c', 'user.name=t', '-c', 'user.email=t@t', '-c',
+			'commit.gpgsign=false']
+		cmd << args
+		return os.exec(cmd).output.trim_space()
+	}
+	git('init', '-q')
+	os.write_file(os.join_path(repo, 'a.v'), 'module a\n') or { panic(err) }
+	git('add', '.')
+	git('commit', '-q', '-m', 'one')
+	first := git('rev-parse', 'HEAD')
+	exe := os.join_path(dir, 'graphify-exe')
+	os.write_file(exe, 'build one') or { panic(err) }
+	graph := os.join_path(out, 'graph.json')
+	write := fn [out] (commit string, bin_hash string) {
+		os.write_file(os.join_path(out, 'manifest.json'), '{"source_commit": "${commit}", "binary_hash": "${bin_hash}"}') or {
+			panic(err)
+		}
+	}
+	write(first, file_hash(exe))
+	assert stale_note(graph, repo, exe) == ''
+
+	// the checkout moves on: two commits ahead of the graph
+	for msg in ['two', 'three'] {
+		os.write_file(os.join_path(repo, '${msg}.v'), 'module a\n') or { panic(err) }
+		git('add', '.')
+		git('commit', '-q', '-m', msg)
+	}
+	note := stale_note(graph, repo, exe)
+	assert note.contains('extracted from ${first[..10]}')
+	assert note.contains('(2 commits ahead)')
+	assert !note.contains('graphify build')
+
+	// a rebuilt graphify extracts differently
+	write(git('rev-parse', 'HEAD'), file_hash(exe))
+	os.write_file(exe, 'build two') or { panic(err) }
+	assert stale_note(graph, repo, exe).contains('different graphify build')
+	// unless the graph came from another machine, whose build always differs
+	assert stale_note(graph, repo, '') == ''
+	// no manifest, no opinion
+	os.rm(os.join_path(out, 'manifest.json')) or {}
+	assert stale_note(graph, repo, exe) == ''
+}

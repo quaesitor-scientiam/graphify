@@ -86,11 +86,20 @@ Structural queries work from `graph.json`, but the graph must be refreshed
 after source changes. `get_body` additionally needs access to the source
 checkout because it reads the captured line range from disk.
 
-Potential improvements include a lightweight freshness check or file watcher,
-clearer stale-graph diagnostics, and a more explicit source-root health check
-for shared graphs. Any automatic refresh should preserve the existing
-incremental cache and should not make ordinary read-only queries unexpectedly
-expensive.
+**Freshness check (October 2026).** `stale_note` (freshness.v) compares the
+manifest's `source_commit` with the checkout's commit and its `binary_hash`
+with the graphify CLI that would re-extract it; the CLI prints the note on
+stderr and the MCP server puts it at the top of a tool result, rechecking at
+most once a minute (one `git rev-parse` and one hash of the CLI). The MCP
+server also reloads `graph.json` when an extract replaces it, and
+`update-vlang-graph.vsh` rebuilds graphify when its code or V's `vlib`
+changed. Nothing re-extracts on its own: an automatic refresh would make a
+read-only query pay for an extract.
+
+Still open: uncommitted edits aren't detected (they're the normal state of a
+checkout being worked on, and hashing every file per query would cost more
+than the query), and there is no explicit check that a shared graph's
+`--source-dir` holds the same tree, beyond the commit comparison.
 
 ## 5. Large-graph visualization limits
 
