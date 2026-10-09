@@ -4648,6 +4648,56 @@ pub fn default_show() Show {
 	assert g.edges.any(it.kind == .calls && it.from == 'lib.default_show' && it.provenance == .undeclared), g.edges.map(it.from).str()
 }
 
+fn test_a_zero_on_an_enum_that_is_not_a_flag_enum_is_not_undeclared() {
+	g := graph_of({
+		'lib/lib.v': 'module lib
+
+pub enum Show {
+	a
+	b
+}
+
+pub fn default_show() Show {
+	return Show.zero()
+}
+'
+	})
+	// V makes `zero()` only for a @[flag] enum, so on this one the call is not V's
+	assert !g.edges.any(it.kind == .calls && it.from == 'lib.default_show' && it.provenance == .undeclared), g.edges.map(it.from).str()
+	assert g.edges.any(it.kind == .calls && it.from == 'lib.default_show' && it.to == 'Show__static__zero'), g.edges.map(it.from).str()
+}
+
+fn test_a_zero_takes_the_flag_of_the_enum_the_callers_file_declares() {
+	g := graph_of({
+		'lib/tests/flagged_test.v': 'module tests
+
+@[flag]
+enum Pick {
+	a
+	b
+}
+
+fn flagged_zero() Pick {
+	return Pick.zero()
+}
+'
+		'lib/tests/plain_test.v':   'module tests
+
+enum Pick {
+	x
+	y
+}
+
+fn plain_zero() Pick {
+	return Pick.zero()
+}
+'
+	})
+	// each _test.v file is its own program, so each caller sees the `Pick` its own file declares
+	assert g.edges.any(it.kind == .calls && it.from == 'lib.tests.flagged_zero' && it.provenance == .undeclared), g.edges.map(it.from).str()
+	assert !g.edges.any(it.kind == .calls && it.from == 'lib.tests.plain_zero' && it.provenance == .undeclared), g.edges.map(it.from).str()
+}
+
 fn test_a_per_platform_call_returns_the_type_its_variants_share() {
 	// `open_it` is declared once per platform in a standalone program, so its
 	// variants are renamed apart. They return the same type, so the receiver is typed.

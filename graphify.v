@@ -664,6 +664,10 @@ fn resolve_edges(mut g Graph) {
 	// enum_names holds each enum by module and name, to recognise V's own zero()
 	// on a flag enum (see below).
 	mut enum_names := map[string]bool{}
+	// flag_here says whether an enum is a @[flag] one, in its own file; flag_in_mod says
+	// whether every enum of that name in a module is (see is_flag_enum)
+	mut flag_here := map[string]bool{}
+	mut flag_in_mod := map[string]bool{}
 	// sym_ids holds every symbol id, to see whether an enum declares a method
 	mut sym_ids := map[string]bool{}
 	// a field's site is its struct, so a struct maps to its own module
@@ -672,6 +676,9 @@ fn resolve_edges(mut g Graph) {
 		sym_ids[s.id] = true
 		if s.kind == .enum_ {
 			enum_names[s.parent + '\x00' + s.name] = true
+			flagged := s.signature.starts_with('@[flag]')
+			flag_here[s.parent + '\x00' + s.name + '\x00' + s.file] = flagged
+			flag_in_mod[s.parent + '\x00' + s.name] = (flag_in_mod[s.parent + '\x00' + s.name] or { true }) && flagged
 		}
 		if s.kind == .struct_ {
 			struct_mod[s.id] = s.parent
@@ -1015,7 +1022,8 @@ fn resolve_edges(mut g Graph) {
 				mod := struct_mod[site.mod] or { site.mod }
 				typ := e.to.all_before('__static__')
 				method := e.to.all_after('__static__')
-				if enum_names[mod + '\x00' + typ] && '${mod}.${typ}.${method}' !in sym_ids {
+				if enum_names[mod + '\x00' + typ] && '${mod}.${typ}.${method}' !in sym_ids
+					&& (method != 'zero' || (flag_here[mod + '\x00' + typ + '\x00' + site.file] or { flag_in_mod[mod + '\x00' + typ] or { false } })) {
 					resolved << Edge{...e, provenance: .undeclared}
 					continue
 				}
