@@ -346,12 +346,22 @@ fn (inf &Infer) follow_steps(e Edge, depth int) ?InferredType {
 				t.text = '[]' + if name == 'keys' { k } else { v }
 				continue
 			}
-			found := inf.method_on(t, name, e.file, 0)?
-			mut ret := inf.returns(found)?
-			// `Queue[int].pop()` returns the `T` of `Queue[T]`, here `int`
-			owner := found.all_before_last('.').all_after_last('.').all_before('[')
-			ret.text = owner_args(ret.text, t, owner, inf.generics_of[found] or { []string{} })
-			t = ret
+			if found := inf.method_on(t, name, e.file, 0) {
+				mut ret := inf.returns(found)?
+				// `Queue[int].pop()` returns the `T` of `Queue[T]`, here `int`
+				owner := found.all_before_last('.').all_after_last('.').all_before('[')
+				ret.text = owner_args(ret.text, t, owner, inf.generics_of[found] or { []string{} })
+				t = ret
+			} else {
+				// V writes `str()` for a type that declares none, and it returns a string
+				if name != 'str' || (inf.no_method(t, name, e.file) or { 'none' }) != '' {
+					return none
+				}
+				t = InferredType{
+					text: 'string'
+					mod:  'builtin'
+				}
+			}
 		} else if step.starts_with('f:') {
 			// a selector on an enum names one of its members, a value of that type
 			if inf.is_enum(t, e.file) {
