@@ -2372,6 +2372,13 @@ fn (f &V3File) callee(callee_id flat.NodeId, ctx V3CallCtx) (string, bool, flat.
 		mod := f.imports[target.value] or { target.value }
 		return '${mod}.${c.value}', false, flat.NodeId(-1)
 	}
+	// a function of the module the file is in, called through the module's own name
+	// (`semver.from(s)` inside `module semver`): not a method on a global of that name,
+	// unless a local or a variable of the same name shadows it
+	if target.kind == .ident && target.value.len > 0 && target.value == f.mod_id.all_after_last('.')
+		&& target.value !in ctx.vars && target.value !in ctx.locals {
+		return '${f.mod_id}.${c.value}', false, flat.NodeId(-1)
+	}
 	if target.kind == .ident && target.value.len > 0 && target.value[0].is_capital()
 		&& target.value !in ctx.locals {
 		return '${target.value}__static__${c.value}', false, flat.NodeId(-1)

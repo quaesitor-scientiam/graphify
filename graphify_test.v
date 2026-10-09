@@ -4849,6 +4849,50 @@ fn digits(bs []u8) string {
 	assert calls.any(it.to == 'lib.builtin.[]u8.hex' && it.provenance == .inferred), g.edges.map(it.to).str()
 }
 
+// `semver.from(s)` inside `module semver` calls the module's own `from`, not a method on a global named `semver`, so the call and the `satisfies` on its result are the module's
+fn test_a_call_through_the_files_own_module_name_is_a_module_call() {
+	g := graph_of({
+		'lib/semver/semver.v': 'module semver
+
+pub struct Version {}
+
+pub fn from(s string) !Version {
+	return Version{}
+}
+
+pub fn (v Version) satisfies(r string) bool {
+	return true
+}
+'
+		'lib/other/other.v': 'module other
+
+pub fn from(s string) string {
+	return s
+}
+
+pub struct Other {}
+
+pub fn (o Other) satisfies(r string) bool {
+	return true
+}
+
+pub fn (o Other) from(s string) bool {
+	return true
+}
+'
+		'lib/semver/check_test.v': 'module semver
+
+fn check() bool {
+	v := semver.from(\'0.1.0\') or { return false }
+	return v.satisfies(\'x\')
+}
+'
+	})
+	calls := g.edges.filter(it.kind == .calls && it.from == 'lib.semver.check')
+	assert calls.any(it.to == 'lib.semver.from'), g.edges.map(it.to).str()
+	assert calls.any(it.to == 'lib.semver.Version.satisfies'), g.edges.map(it.to).str()
+}
+
 fn test_a_per_platform_call_returns_the_type_its_variants_share() {
 	// `open_it` is declared once per platform in a standalone program, so its
 	// variants are renamed apart. They return the same type, so the receiver is typed.
