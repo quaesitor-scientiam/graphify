@@ -163,7 +163,7 @@ A call on the result of a function declared once per platform is typed when ever
 
 A fixed-size array literal (`['Jan', 'Feb']!`) is a postfix node over an array literal, which the recipe code didn't read, so its elements had no type. Its recipe is now the literal's (`.postfix` in recipe). On the V compiler's tree that resolves a loop over `const month_names = [...]!` and 28 other calls.
 
-A call of a parameter of function type (`h fn () Doc`) has the function's return type (`fn_return`, in infer.v). A generic call's map or array type argument (`json.decode[map[string]json.Any](s)`) is named as written, so the type it returns is known. What's left among the receivers on the V compiler's tree is mostly generic: a return type that is a type parameter of a generic function (`extract[H]`), or of a method (`reflect[T]()`), whose own type parameters aren't stored, along with comptime `field` loops and a module the tree doesn't have (`markdown`).
+A call of a parameter of function type (`h fn () Doc`) has the function's return type (`fn_return`, in infer.v). A generic call's map or array type argument (`json.decode[map[string]json.Any](s)`) is named as written, so the type it returns is known. What's left among the receivers on the V compiler's tree is mostly generic: a return type that is a type parameter of a generic function (`extract[H]`), or of a method (`reflect[T]()`), whose own type parameters aren't stored, and a module the tree doesn't have (`markdown`). The variable of a `$for field in T.fields` loop is a builtin `FieldData` (`comptime_for` in the walk), so its `attrs` and `name` are typed.
 
 What remains is a long tail: values V infers in other ways (a comptime
 `for f in T.fields` variable, a receiver from a call with a computed argument),

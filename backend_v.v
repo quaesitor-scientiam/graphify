@@ -1275,6 +1275,14 @@ fn (mut f V3File) walk(id flat.NodeId, ctx V3CallCtx, mut edges []Edge, mut seen
 				}
 			}
 		}
+		.comptime_for {
+			// `$for field in T.fields`: each field is a builtin FieldData
+			parts := n.value.split('|')
+			if parts.len == 2 && parts[1] == 'fields' {
+				f.walk_list(kids, ctx.with_vars([parts[0]], ['t:builtin.FieldData']), mut edges, mut seen)
+				return ctx
+			}
+		}
 		.for_in_stmt {
 			if kids.len >= 3 {
 				// `for v in xs`, `for k, v in xs`: the second slot is empty
