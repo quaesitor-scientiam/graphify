@@ -4572,6 +4572,63 @@ fn open_dir() {
 	assert targets.sorted() == ['prog.open_dir@prog/dir_nix.c.v', 'prog.open_dir@prog/dir_windows.c.v'], targets.str()
 }
 
+fn test_calls_in_constant_global_and_field_initializers_come_from_their_declaration() {
+	g := graph_of({
+		'app/app.v': 'module app
+
+pub struct Holder {
+pub:
+	n int = make_n(3)
+}
+
+const answer = make_n(7)
+
+__global counter = make_n(9)
+
+fn make_n(x int) int {
+	return x
+}
+'
+	})
+	// each initializer is a caller of `make_n`, as a function body is
+	for from in ['app.Holder.n', 'app.answer', 'app.counter'] {
+		assert g.edges.any(it.kind == .calls && it.from == from && it.to == 'app.make_n'), from
+	}
+}
+
+fn test_a_constant_named_like_a_function_keeps_its_own_initializer_calls() {
+	// `test_it` is a function in one file and a constant in another, so the
+	// constant gets its own id, and its initializer's call is its own, not the
+	// function's.
+	files := {
+		'lib/a.v': 'module lib
+
+const test_it = make_n(4)
+'
+		'lib/b.v': 'module lib
+
+pub fn test_it() int {
+	return 1
+}
+
+fn make_n(x int) int {
+	return x
+}
+'
+	}
+	mut g := Graph{}
+	for rel, src in files {
+		syms, edges := extract_v_text(src, rel)
+		g.symbols << syms
+		g.edges << edges
+	}
+	disambiguate_ids(mut g)
+	separate_member_ids(mut g)
+	resolve_edges(mut g)
+	assert g.edges.any(it.kind == .calls && it.from == 'lib::const::test_it' && it.to == 'lib.make_n'), g.edges.map(it.from).str()
+	assert !g.edges.any(it.kind == .calls && it.from == 'lib.test_it'), g.edges.map(it.from).str()
+}
+
 fn test_a_primitive_without_a_str_is_undeclared_and_shifts_keep_its_type() {
 	g := graph_of({
 		'lib/lib.v': 'module lib

@@ -852,6 +852,7 @@ fn (mut f V3File) extract_struct(id flat.NodeId, mut syms []Symbol, mut edges []
 			is_pub:    f.field_is_pub(line, fline, n.value.starts_with('C.'))
 			parent:    sid
 		})
+		f.walk_initializer(.field, fname, fline, f.kids(k), mut edges)
 		add_ref(sid, f.type_ref(fd.typ), f.rel, mut edges, mut rseen)
 	}
 }
@@ -1002,6 +1003,7 @@ fn (mut f V3File) extract_consts(id flat.NodeId, mut syms []Symbol, mut edges []
 			// the type follows from the value, `const names = ['a']`
 			recipe: if value.len > 0 { f.recipe(value[0], V3CallCtx{}) } else { '' }
 		})
+		f.walk_initializer(.constant, name, f.line_of(cf.pos.offset), value, mut edges)
 	}
 }
 
@@ -1034,6 +1036,7 @@ fn (mut f V3File) extract_globals(id flat.NodeId, mut syms []Symbol, mut edges [
 				''
 			}
 		})
+		f.walk_initializer(.global, g.value, line, value, mut edges)
 		if typ != '' {
 			mut rseen := map[string]bool{}
 			add_ref('${f.mod_id}.${g.value}', f.type_ref(g.typ), f.rel, mut edges, mut rseen)
@@ -1207,6 +1210,26 @@ fn (ctx V3CallCtx) with_vars(names []string, recipes []string) V3CallCtx {
 		vars:      vars
 		fallbacks: fallbacks
 	}
+}
+
+// walk_initializer records the calls in a declaration's initializer as calls
+// from the declaration itself: a constant, a global or a struct field's
+// default value has no body to walk. The declaration is named by initializer_from
+// because its final id isn't known yet (see resolve_initializer_callers).
+fn (mut f V3File) walk_initializer(kind SymbolKind, name string, line int, ids []flat.NodeId, mut edges []Edge) {
+	mut seen := map[string]bool{}
+	f.walk_list(ids, V3CallCtx{
+		from: initializer_from(kind, f.rel, line, name)
+		file: f.rel
+	}, mut edges, mut seen)
+}
+
+// initializer_from is the caller of a call in a constant's, global's or struct
+// field's initializer, until resolve_initializer_callers gives it the
+// declaration's final id. The file, line, kind and name are what the symbol
+// keeps through the renames that set that id.
+fn initializer_from(kind SymbolKind, file string, line int, name string) string {
+	return 'init\x00${int(kind)}\x00${file}\x00${line}\x00${name}'
 }
 
 // walk_list walks sibling nodes in order. A `:=` types its variables for the
