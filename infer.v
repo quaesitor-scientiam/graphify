@@ -429,6 +429,9 @@ fn (inf &Infer) follow_steps(e Edge, depth int) ?InferredType {
 			}
 		} else if step == 'a' {
 			t.text = '[]' + t.text
+		} else if step.starts_with('mapof:') {
+			// a map from the key type the step names to this value type
+			t.text = 'map[' + step[6..] + ']' + t.text
 		} else if step.starts_with('#') {
 			t.text = tuple_part(t.text, step[1..].int())?
 		} else {
