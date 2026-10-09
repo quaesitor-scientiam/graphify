@@ -5146,6 +5146,39 @@ pub fn draw[T](value T) string {
 	assert !g.edges.any(it.kind == .calls && it.from == 'lib.draw' && it.to.contains('Shape')), g.edges.map(it.to).str()
 }
 
+fn test_a_const_whose_value_is_a_comptime_if_has_the_type_of_its_branches() {
+	// vlib/builtin's max_int is `$if ... { int(...) } $else { int(...) }`: both
+	// branches are an int, so the const is one, whichever branch V keeps
+	g := graph_of({
+		'vlib/builtin/int.v': 'module builtin
+
+pub fn (i int) str() string {
+	return \'\'
+}
+'
+		'node/node.v': 'module node
+
+pub struct Node {}
+
+pub fn (n Node) str() string {
+	return \'\'
+}
+'
+		'lib/lib.v': 'module lib
+
+import node
+
+pub const limit = $if x64 { int(1) } $else { int(2) }
+
+pub fn f() string {
+	_ = node.Node{}
+	return limit.str()
+}
+'
+	})
+	assert g.edges.any(it.kind == .calls && it.from == 'lib.f' && it.to == 'vlib.builtin.int.str'), g.edges.map(it.to).str()
+}
+
 fn test_a_primitive_without_a_str_is_undeclared_and_shifts_keep_its_type() {
 	g := graph_of({
 		'lib/lib.v': 'module lib

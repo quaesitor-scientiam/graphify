@@ -1792,6 +1792,19 @@ fn (f &V3File) recipe(id flat.NodeId, ctx V3CallCtx) string {
 				return 't:' + t
 			}
 		}
+		.comptime_if {
+			// `$if c { a } $else { b }` as a value, as vlib/builtin's max_int is: V keeps
+			// one branch, so the value has the type of both when they agree, else none
+			mut r := ''
+			for k in kids {
+				br := f.recipe(k, ctx)
+				if br == '' || (r != '' && br != r) {
+					return ''
+				}
+				r = br
+			}
+			return r
+		}
 		.block {
 			// `unsafe { x }`: the value of its last expression
 			return f.last_value(id, ctx)
