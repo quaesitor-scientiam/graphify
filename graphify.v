@@ -597,6 +597,8 @@ struct TypeCand {
 	id   string
 	mod  string
 	file string
+	// c is set for a C struct, `struct C.name` (see extract_struct)
+	c bool
 }
 
 // only_type_id is only_id's counterpart for TypeCand -- V has no lightweight
@@ -725,6 +727,7 @@ fn resolve_edges(mut g Graph) {
 				id:   s.id
 				mod:  s.parent
 				file: s.file
+				c:    s.signature.contains('struct C.')
 			}
 		}
 		// site_of answers "where does this edge's `from` live", so it only

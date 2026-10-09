@@ -813,11 +813,14 @@ fn (mut f V3File) extract_struct(id flat.NodeId, mut syms []Symbol, mut edges []
 	sid := '${f.mod_id}.${short}'
 	line := f.line_of(n.pos.offset)
 	is_pub := f.line_is_pub(line)
+	// a C struct, `struct C.name`, keeps its `C.` on the signature, which tells it from
+	// a V struct of the same name (see field_of)
+	c_prefix := if n.value.starts_with('C.') { 'C.' } else { '' }
 	f.add_symbol(mut syms, mut edges, Symbol{
 		id:        sid
 		name:      short
 		kind:      .struct_
-		signature: (if is_pub { 'pub ' } else { '' }) + 'struct ${short}'
+		signature: (if is_pub { 'pub ' } else { '' }) + 'struct ${c_prefix}${short}'
 		file:      f.rel
 		line:      line
 		end_line:  f.line_of(n.pos.end)
@@ -1686,6 +1689,37 @@ fn (f &V3File) struct_init_type(id flat.NodeId) ?string {
 	return none
 }
 
+// plain_callee reports whether a call names the function it calls: `f(...)`,
+// `m.f(...)`, or a generic `f[T](...)` whose every type argument is a type. A
+// variable called as a function, `g := ...; g()`, or a value called by index,
+// `fns['k'](...)`, is not one, since its recipe would name a function `g` or `fns`.
+fn (f &V3File) plain_callee(call flat.NodeId, ctx V3CallCtx) bool {
+	ks := f.kids(call)
+	if ks.len == 0 {
+		return false
+	}
+	c := f.node(ks[0])
+	if c.kind == .ident {
+		return c.value !in ctx.vars
+	}
+	if c.kind == .selector {
+		return true
+	}
+	if c.kind != .index {
+		return false
+	}
+	ik := f.kids(ks[0])
+	if ik.len < 2 || f.node(ik[0]).kind !in [.ident, .selector] {
+		return false
+	}
+	for ta in ik[1..] {
+		if (f.type_arg(ta) or { '' }) == '' {
+			return false
+		}
+	}
+	return true
+}
+
 // type_arg names a type argument of a generic call (`Config` in
 // `json.decode[Config](s)`, `json.Any`) as a recipe step needs it: a primitive
 // as it is, anything else qualified with its module. An index that isn't a
@@ -1848,6 +1882,15 @@ fn (f &V3File) recipe(id flat.NodeId, ctx V3CallCtx) string {
 			}
 		}
 		.spawn_expr {
+			// `spawn f(...)` is a thread of f's result, which its `wait()` gives back
+			// (the `th` step of follow_steps); a callee that isn't a plain `c:` one stays
+			// a bare thread
+			if kids.len == 1 && f.node(kids[0]).kind == .call && f.plain_callee(kids[0], ctx) {
+				steps := f.recipe(kids[0], ctx).split(recipe_sep)
+				if steps[0].starts_with('c:') && steps[1..].all(it.starts_with('p:')) {
+					return steps.join(recipe_sep) + recipe_sep + 'th'
+				}
+			}
 			return 't:thread'
 		}
 		.array_literal {
@@ -1964,6 +2007,14 @@ fn (f &V3File) recipe(id flat.NodeId, ctx V3CallCtx) string {
 			if n.op in [.plus, .minus, .mul, .div, .mod, .amp, .pipe, .xor, .left_shift, .right_shift]
 				&& kids.len > 0 {
 				return f.recipe(kids[0], ctx)
+			}
+			// `x >>> n` is the unsigned type of x, as wide as x (the `us` step, which
+			// leaves an untyped literal, `int`, unnamed)
+			if n.op == .right_shift_unsigned && kids.len > 0 {
+				r := f.recipe(kids[0], ctx)
+				if r != '' {
+					return r + recipe_sep + 'us'
+				}
 			}
 		}
 		else {}
