@@ -4740,6 +4740,39 @@ fn test_values() {
 	assert !calls.any(it.to == 'lib.alt.Bar.int' || it.to == 'int'), g.edges.map(it.to).str()
 }
 
+// a module declares `value` on `[]Any` and on `map[string]Any`, and a file that imports it
+// reaches them as `[]toml.Any` and `map[string]toml.Any`: the method is found by the module its types come from
+fn test_a_method_on_an_array_or_map_of_a_module_type_is_found_by_its_owner() {
+	g := graph_of({
+		'lib/toml/any.v': 'module toml
+
+pub struct Any {}
+
+pub fn (a []Any) value(key string) Any {
+	return Any{}
+}
+
+pub fn (m map[string]Any) value(key string) Any {
+	return Any{}
+}
+'
+		'lib/tests/t_test.v': 'module tests
+
+import lib.toml
+
+fn test_values() {
+	a := []toml.Any{}
+	a.value(\'x\')
+	m := map[string]toml.Any{}
+	m.value(\'x\')
+}
+'
+	})
+	calls := g.edges.filter(it.kind == .calls && it.from == 'lib.tests.test_values')
+	assert calls.any(it.to == 'lib.toml.[]Any.value' && it.provenance == .inferred), g.edges.map(it.to).str()
+	assert calls.any(it.to == 'lib.toml.map[string]Any.value' && it.provenance == .inferred), g.edges.map(it.to).str()
+}
+
 fn test_a_per_platform_call_returns_the_type_its_variants_share() {
 	// `open_it` is declared once per platform in a standalone program, so its
 	// variants are renamed apart. They return the same type, so the receiver is typed.

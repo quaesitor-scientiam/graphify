@@ -777,10 +777,16 @@ fn (inf &Infer) method_on(t InferredType, name string, file string, depth int) ?
 			if id := inf.pick_method(cands, name, text, '', t, file) {
 				return id
 			}
+			if id := inf.owner_method(cands, name, text, t) {
+				return id
+			}
 		}
 		return inf.pick_method(cands, name, 'array', '', InferredType{ mod: 'builtin' }, file)
 	}
 	if text.starts_with('map[') {
+		if id := inf.owner_method(cands, name, text, t) {
+			return id
+		}
 		return inf.pick_method(cands, name, 'map', '', InferredType{ mod: 'builtin' }, file)
 	}
 	if text.starts_with('chan ') {
@@ -860,6 +866,85 @@ fn (inf &Infer) pick_method(cands []CallCand, name string, owner string, qual st
 		return id
 	}
 	return only_id(if qual != '' { exact_calls(reachable, qual) } else { reachable })
+}
+
+// owner_method is the method `name` declared on the array or map type `text` names,
+// found by the module each type of it comes from (owner_name): a module's `[]Any`
+// method is the method of `[]toml.Any` in a file that imports toml. It is the same
+// type whether or not the file imports the module, so visibility doesn't narrow it.
+fn (inf &Infer) owner_method(cands []CallCand, name string, text string, t InferredType) ?string {
+	sc := inf.scope_of[t.file] or { FileScope{} }
+	imports := inf.imports_of[t.file] or { []string{} }
+	mut ids := []string{}
+	for c in cands {
+		if !c.is_method || test_private(c.file, t.file) {
+			continue
+		}
+		// the declaring module must be one the file can name: its own, builtin, or imported
+		// (a JS-backend declaration is none of these in a C build)
+		if c.mod != sc.mod && !import_reaches(c.mod, 'builtin') && !imports.any(import_reaches(c.mod, it)) {
+			continue
+		}
+		id := c.id.all_before('@')
+		if !id.starts_with(c.mod + '.') || !id.ends_with('.' + name) {
+			continue
+		}
+		decl_owner := id[c.mod.len + 1..id.len - name.len - 1]
+		if owner_matches(decl_owner, c.mod, text, sc) && id !in ids {
+			ids << id
+		}
+	}
+	if ids.len == 1 {
+		return ids[0]
+	}
+	return none
+}
+
+// type_tokens splits a type text into its names and its punctuation: `map[string]toml.Any`
+// is `map`, `[`, `string`, `]` and `toml.Any`.
+fn type_tokens(t string) []string {
+	mut out := []string{}
+	mut i := 0
+	for i < t.len {
+		mut j := i + 1
+		if t[i].is_letter() || t[i].is_digit() || t[i] == `_` || t[i] == `.` {
+			for j < t.len && (t[j].is_letter() || t[j].is_digit() || t[j] == `_` || t[j] == `.`) {
+				j++
+			}
+		}
+		out << t[i..j]
+		i = j
+	}
+	return out
+}
+
+// owner_matches reports whether `decl_owner`, the owner a method declares in module
+// `decl_mod` (`[]Any`), is the array or map type `text` (`[]toml.Any`) as a file with
+// scope `sc` writes it: each name is the declared one, written from the module it is
+// declared in or named through an import that reaches that module (import_reaches).
+fn owner_matches(decl_owner string, decl_mod string, text string, sc FileScope) bool {
+	decl := type_tokens(decl_owner)
+	written := type_tokens(text)
+	if decl.len != written.len {
+		return false
+	}
+	for i, d in decl {
+		w := written[i]
+		if d == w {
+			if d[0].is_capital() && decl_mod != sc.mod {
+				return false
+			}
+			continue
+		}
+		if w.contains('.') && !d.contains('.') && w.all_after_last('.') == d {
+			path := sc.prefixes[w.all_before_last('.')] or { w.all_before_last('.') }
+			if import_reaches(decl_mod, path) {
+				continue
+			}
+		}
+		return false
+	}
+	return true
 }
 
 // find_type is the declaration of the type named `short`, qualified by `qual`,
