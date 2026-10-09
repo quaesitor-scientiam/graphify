@@ -352,6 +352,9 @@ fn (inf &Infer) follow_steps(e Edge, depth int) ?InferredType {
 			t = inf.field_of(t, step[2..], e.file, 0)?
 		} else if step == '[]' {
 			t.text = elem_type(t.text)?
+		} else if step == 'R' {
+			// the return type of a function type, `fn (int) Doc`
+			t.text = fn_return(t.text)?
 		} else if step == 'k' {
 			if t.text.starts_with('map[') {
 				k, _ := map_parts(t.text)?
@@ -522,6 +525,17 @@ fn is_name_byte(c u8) bool {
 
 // returns is the return type of the function or method with id `id`, in the
 // scope it is declared in.
+// fn_return is the return type of a function type written as text, `fn () Doc`,
+// or none when it returns nothing.
+fn fn_return(t string) ?string {
+	close := t.last_index(')') or { return none }
+	ret := t[close + 1..].trim_space()
+	if ret == '' {
+		return none
+	}
+	return ret
+}
+
 // same_return is the return type shared by every id, or none when they differ.
 fn (inf &Infer) same_return(ids []string) ?InferredType {
 	first := inf.returns(ids[0])?

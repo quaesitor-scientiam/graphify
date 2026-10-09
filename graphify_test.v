@@ -4782,6 +4782,67 @@ pub fn loop() string {
 	assert g.edges.any(it.kind == .calls && it.from == 'vlib.net.loop' && it.to == 'vlib.builtin.string.to_lower'), g.edges.map(it.to).str()
 }
 
+fn test_a_call_of_a_function_parameter_has_its_return_type() {
+	g := graph_of({
+		'm/f.v': 'module m
+
+pub struct Doc {
+	s string
+}
+
+pub struct Other {}
+
+pub fn (d Doc) contains(x string) bool {
+	return d.s == x
+}
+
+pub fn (o Other) contains(x string) bool {
+	return x == \'\'
+}
+
+pub fn via_param(h fn () Doc) bool {
+	d := h()
+	return d.contains(\'a\')
+}
+'
+	})
+	assert g.edges.any(it.kind == .calls && it.from == 'm.via_param' && it.to == 'm.Doc.contains'), g.edges.map(it.to).str()
+}
+
+fn test_a_generic_call_with_a_map_type_argument_types_its_elements() {
+	g := graph_of({
+		'lib/lib.v': 'module lib
+
+pub struct Any {}
+
+pub fn (a Any) str() string {
+	return \'\'
+}
+
+pub struct Other {}
+
+pub fn (o Other) str() string {
+	return \'\'
+}
+
+pub fn decode[T](s string) !T {
+	return error(s)
+}
+'
+		'app/app.v': 'module app
+
+import lib
+
+pub fn field(json_text string, key string) string {
+	parsed := lib.decode[map[string]lib.Any](json_text) or { return \'\' }
+	value := parsed[key] or { return \'\' }
+	return value.str()
+}
+'
+	})
+	assert g.edges.any(it.kind == .calls && it.from == 'app.field' && it.to == 'lib.Any.str'), g.edges.map(it.to).str()
+}
+
 fn test_a_primitive_without_a_str_is_undeclared_and_shifts_keep_its_type() {
 	g := graph_of({
 		'lib/lib.v': 'module lib
