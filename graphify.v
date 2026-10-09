@@ -631,7 +631,32 @@ struct CallResolution {
 // resolve_callee), and type names on `embeds`/`references` edges (via
 // resolve_type_ref). Names that stay ambiguous are left as-is, so the caller
 // can still see external/unknown/undecided references.
+// resolve_initializer_callers gives each call in a constant's, global's or
+// struct field's initializer the declaration's final id. That id is set by
+// disambiguate_ids and separate_member_ids, after extraction, so the caller is
+// keyed by initializer_from until now. A call whose declaration isn't in the
+// graph is dropped rather than left pointing at nothing.
+fn resolve_initializer_callers(mut g Graph) {
+	mut final_id := map[string]string{}
+	for s in g.symbols {
+		if s.kind in [SymbolKind.constant, .global, .field] {
+			final_id[initializer_from(s.kind, s.file, s.line, s.name)] = s.id
+		}
+	}
+	mut out := []Edge{cap: g.edges.len}
+	for e in g.edges {
+		if !e.from.starts_with('init\x00') {
+			out << e
+			continue
+		}
+		id := final_id[e.from] or { continue }
+		out << Edge{...e, from: id}
+	}
+	g.edges = out
+}
+
 fn resolve_edges(mut g Graph) {
+	resolve_initializer_callers(mut g)
 	mut by_name := map[string][]CallCand{}
 	mut by_type_name := map[string][]TypeCand{}
 	// a module with exactly one `fn main` is one program, whose files see each
@@ -689,9 +714,9 @@ fn resolve_edges(mut g Graph) {
 		// needs the kinds the extractor actually emits calls/embeds/references
 		// edges from: fn/method (calls, and param/receiver/return-type
 		// references), struct (field-type references and embeds), interface
-		// (embeds) and type alias (the types it is built from). Enums are only
-		// ever a `to`.
-		if s.kind in [SymbolKind.function, .method, .struct_, .interface_, .type_alias] {
+		// (embeds), type alias (the types it is built from), and constant, global
+		// and field (the calls in their initializers). Enums are only ever a `to`.
+		if s.kind in [SymbolKind.function, .method, .struct_, .interface_, .type_alias, .constant, .global, .field] {
 			site_of[s.id] = DeclSite{
 				mod:     s.parent
 				file:    s.file
