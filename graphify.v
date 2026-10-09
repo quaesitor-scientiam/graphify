@@ -695,9 +695,13 @@ fn resolve_edges(mut g Graph) {
 			imports_of[s.file] << s.name
 			mut sc := scope_of[s.file] or { FileScope{} }
 			sc.prefixes[s.name] = s.name
-			// the alias is only on the signature: `import x.json2 as json`
+			// the alias and the path as written are only on the signature:
+			// `import x.json2 as json`, and `from x.json2` when the path redirects
 			if s.signature.contains(' as ') {
-				sc.prefixes[s.signature.all_after_last(' as ')] = s.name
+				sc.prefixes[s.signature.all_after(' as ').all_before(' from ')] = s.name
+			}
+			if s.signature.contains(' from ') {
+				sc.prefixes[s.signature.all_after(' from ')] = s.name
 			}
 			scope_of[s.file] = sc
 		}
