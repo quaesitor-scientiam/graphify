@@ -4885,6 +4885,36 @@ fn walk[T]() bool {
 	assert g.edges.any(it.kind == .calls && it.from == 'app.walk' && it.to == 'vlib.builtin.string.contains'), g.edges.map(it.to).str()
 }
 
+fn test_a_member_of_an_enum_is_a_value_of_the_enum_type() {
+	g := graph_of({
+		'lib/lib.v': 'module lib
+
+pub enum Colour {
+	red
+	green
+}
+
+pub fn (c Colour) str() string {
+	return \'\'
+}
+
+pub enum Shade {
+	dark
+}
+
+pub fn label() string {
+	return Colour.green.str()
+}
+
+pub fn shade() string {
+	return Shade.dark.str()
+}
+'
+	})
+	assert g.edges.any(it.kind == .calls && it.from == 'lib.label' && it.to == 'lib.Colour.str'), g.edges.map(it.to).str()
+	assert g.edges.any(it.kind == .calls && it.from == 'lib.shade' && it.to == 'str' && it.provenance == .undeclared), g.edges.map(it.to).str()
+}
+
 fn test_a_primitive_without_a_str_is_undeclared_and_shifts_keep_its_type() {
 	g := graph_of({
 		'lib/lib.v': 'module lib
