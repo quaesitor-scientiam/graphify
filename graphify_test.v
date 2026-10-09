@@ -4648,6 +4648,109 @@ pub fn default_show() Show {
 	assert g.edges.any(it.kind == .calls && it.from == 'lib.default_show' && it.provenance == .undeclared), g.edges.map(it.from).str()
 }
 
+fn test_a_per_platform_call_returns_the_type_its_variants_share() {
+	// `open_it` is declared once per platform in a standalone program, so its
+	// variants are renamed apart. They return the same type, so the receiver is typed.
+	files := {
+		'prog/main.v': 'module main
+
+pub struct Doc {
+	s string
+}
+
+pub struct Other {}
+
+pub fn (d Doc) contains(x string) bool {
+	return d.s == x
+}
+
+pub fn (o Other) contains(x string) bool {
+	return x == \'\'
+}
+
+fn main() {
+	println(per_platform())
+}
+
+fn per_platform() bool {
+	d := open_it() or { return false }
+	return d.contains(\'a\')
+}
+'
+		'prog/p_nix.c.v': 'module main
+
+fn open_it() ?Doc {
+	return Doc{}
+}
+'
+		'prog/p_windows.c.v': 'module main
+
+fn open_it() ?Doc {
+	return Doc{}
+}
+'
+	}
+	mut g := Graph{}
+	for rel, src in files {
+		syms, edges := extract_v_text(src, rel)
+		g.symbols << syms
+		g.edges << edges
+	}
+	disambiguate_ids(mut g)
+	separate_member_ids(mut g)
+	resolve_edges(mut g)
+	assert g.edges.any(it.kind == .calls && it.from == 'prog.per_platform' && it.to == 'prog.Doc.contains'), g.edges.map(it.to).str()
+}
+
+fn test_a_method_with_a_copy_per_platform_reaches_every_copy() {
+	files := {
+		'prog/main.v': 'module main
+
+pub struct Doc {
+	s string
+}
+
+pub struct Other {}
+
+pub fn (o Other) close() bool {
+	return false
+}
+
+fn main() {
+	println(run())
+}
+
+fn run() bool {
+	d := Doc{}
+	return d.close()
+}
+'
+		'prog/p_nix.c.v': 'module main
+
+pub fn (d Doc) close() bool {
+	return true
+}
+'
+		'prog/p_windows.c.v': 'module main
+
+pub fn (d Doc) close() bool {
+	return true
+}
+'
+	}
+	mut g := Graph{}
+	for rel, src in files {
+		syms, edges := extract_v_text(src, rel)
+		g.symbols << syms
+		g.edges << edges
+	}
+	disambiguate_ids(mut g)
+	separate_member_ids(mut g)
+	resolve_edges(mut g)
+	targets := g.edges.filter(it.kind == .calls && it.from == 'prog.run').map(it.to)
+	assert targets.contains('prog.Doc.close@prog/p_nix.c.v') && targets.contains('prog.Doc.close@prog/p_windows.c.v'), targets.str()
+}
+
 fn test_a_primitive_without_a_str_is_undeclared_and_shifts_keep_its_type() {
 	g := graph_of({
 		'lib/lib.v': 'module lib
