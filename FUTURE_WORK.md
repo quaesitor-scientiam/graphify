@@ -167,6 +167,8 @@ A call of a parameter of function type (`h fn () Doc`) has the function's return
 
 A member of an enum (`Colour.red`) is a value of the enum's type, when the name before it is an enum and not a constant (`enum_type` and `is_enum`, in infer.v). A method on that value is then found as on any type: `str()` on an enum that declares none is one V writes, so it is undeclared, and a `@[flag]` enum's `has()` and `set()` are too. A local initialized from a member (`flags := ArrayFlags.is_slice | ...`) has the enum's type, so `flags.set(...)` no longer links to an unrelated `array.set`. On the V compiler's tree that is 23 fewer unresolved calls (791 → 768), 14 of them `str()`, and none newly unresolved.
 
+A call of `str()` on a type that declares none is one V writes, and it returns a `string`, so a method called on the result (`x.str().contains(...)`) is found on `string`. `follow_steps` takes the type of the `str` step from the same rule that makes the call undeclared (`no_method`, in infer.v). On the V compiler's tree that resolves 42 calls on `string`, 25 of them `contains`, and none is newly unresolved.
+
 What remains is a long tail: values V infers in other ways (a comptime
 `for f in T.fields` variable, a receiver from a call with a computed argument),
 a sum type's shared field, function values the walk can't see are variables,

@@ -4915,6 +4915,34 @@ pub fn shade() string {
 	assert g.edges.any(it.kind == .calls && it.from == 'lib.shade' && it.to == 'str' && it.provenance == .undeclared), g.edges.map(it.to).str()
 }
 
+fn test_a_str_of_a_type_that_declares_none_is_a_string() {
+	g := graph_of({
+		'vlib/builtin/string.v': 'module builtin
+
+pub fn (s string) contains(x string) bool {
+	return s == x
+}
+'
+		'lib/lib.v': 'module lib
+
+pub struct Node {
+	id int
+}
+
+pub struct Other {}
+
+pub fn (o Other) contains(x string) bool {
+	return x == \'\'
+}
+
+pub fn has_id(n Node) bool {
+	return n.str().contains(\'1\')
+}
+'
+	})
+	assert g.edges.any(it.kind == .calls && it.from == 'lib.has_id' && it.to == 'vlib.builtin.string.contains'), g.edges.map(it.to).str()
+}
+
 fn test_a_primitive_without_a_str_is_undeclared_and_shifts_keep_its_type() {
 	g := graph_of({
 		'lib/lib.v': 'module lib
