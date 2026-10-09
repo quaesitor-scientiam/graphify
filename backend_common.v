@@ -226,11 +226,28 @@ fn resolve_import(mod string, file_path string, rel string) string {
 	}
 	for c in cands {
 		if has_v_sources(c) {
+			// an alias directory holds only the attribute, and `import x.json2` is
+			// the module it names (`json2`, for vlib/json2)
+			if target := alias_dir_target(c) {
+				full := root + '/' + target
+				base := if full.starts_with(vlib + '/') { vlib } else { root }
+				return full[base.len + 1..].replace('/', '.')
+			}
 			base := if c.starts_with(vlib + '/') { vlib } else { root }
 			return c[base.len + 1..].replace('/', '.')
 		}
 	}
 	return mod
+}
+
+// alias_dir_target is the path that a directory's `@[alias: '@VMODROOT/<path>']`
+// names (`vlib/json2` for vlib/x/json2), or none when `dir` is not an alias
+// directory. V keeps the attribute in the directory's alias.v.
+fn alias_dir_target(dir string) ?string {
+	src := os.read_file(os.join_path(dir, 'alias.v')) or { return none }
+	prefix := "@[alias: '@VMODROOT/"
+	start := src.index(prefix) or { return none }
+	return src[start + prefix.len..].all_before("'")
 }
 
 fn has_v_sources(dir string) bool {

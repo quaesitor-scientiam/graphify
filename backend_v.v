@@ -443,6 +443,11 @@ fn (mut f V3File) extract(root flat.NodeId) ([]Symbol, []Edge) {
 		path := resolve_import(written, f.real_path, f.rel)
 		alias := if n.typ != '' { n.typ } else { written.all_after_last('.') }
 		f.imports[alias] = path
+		if n.typ == '' && written != path {
+			// an unaliased path that redirects (an alias directory, `x.json2`) is
+			// still written as it was
+			f.imports[written] = path
+		}
 		for k in f.kids(id) {
 			sel := f.node(k)
 			if sel.kind == .ident {
@@ -453,7 +458,8 @@ fn (mut f V3File) extract(root flat.NodeId) ([]Symbol, []Edge) {
 			id:        import_id(mod_id, path)
 			name:      path
 			kind:      .import_
-			signature: 'import ${path}' + if alias != path { ' as ${alias}' } else { '' }
+			signature: 'import ${path}' + if alias != path { ' as ${alias}' } else { '' } +
+				if n.typ == '' && written != path { ' from ${written}' } else { '' }
 			file:      f.rel
 			line:      f.line_of(n.pos.offset)
 			parent:    mod_id

@@ -4982,6 +4982,36 @@ fn show(s string) string {
 	assert g.edges.any(it.kind == .calls && it.from == 'app.show' && it.to == 'str' && it.provenance == .undeclared), g.edges.map(it.to).str()
 }
 
+fn test_an_import_of_an_alias_directory_is_the_module_it_aliases() {
+	// vlib/x/json2 holds only `@[alias]`, so `import x.json2` is vlib/json2
+	root := write_tree('alias_dir', {
+		'vlib/json2/types.v':  'module json2
+
+pub type Any = bool | int
+
+pub fn decode[T](val string) !T {
+	return error(val)
+}
+'
+		'vlib/x/json2/alias.v': "@[alias: '@VMODROOT/vlib/json2']
+module json2
+"
+		'app/app.v':           'module app
+
+import x.json2
+
+fn show(s string) int {
+	return json2.decode[int](s) or { 0 }
+}
+'
+	})
+	defer {
+		os.rmdir_all(root) or {}
+	}
+	g := build_graph(Options{ root: root })
+	assert g.edges.any(it.kind == .calls && it.from == 'app.show' && it.to == 'vlib.json2.decode'), g.edges.filter(it.from == 'app.show').map(it.to).str()
+}
+
 fn test_a_primitive_without_a_str_is_undeclared_and_shifts_keep_its_type() {
 	g := graph_of({
 		'lib/lib.v': 'module lib
