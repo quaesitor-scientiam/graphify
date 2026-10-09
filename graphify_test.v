@@ -4773,6 +4773,46 @@ fn test_values() {
 	assert calls.any(it.to == 'lib.toml.map[string]Any.value' && it.provenance == .inferred), g.edges.map(it.to).str()
 }
 
+// `items.map(it.name).join(',')`: the map states no result, so its elements are a type the graph doesn't know, and `join` is declared on `[]string` alone, so the call is that array's join
+fn test_a_join_on_a_map_with_no_stated_result_is_the_array_join() {
+	g := graph_of({
+		'lib/builtin/builtin.v': 'module builtin
+
+pub struct array {}
+
+pub fn (a array) map(callback fn (voidptr) voidptr) array {
+	return array{}
+}
+
+pub fn (a []string) join(sep string) string {
+	return \'\'
+}
+'
+		'lib/other/other.v': 'module other
+
+pub struct Builder {}
+
+pub fn (b Builder) join(sep string) string {
+	return \'\'
+}
+'
+		'lib/tests/t_test.v': 'module tests
+
+import lib.other
+
+struct Item {
+	name string
+}
+
+fn names(items []Item) string {
+	return items.map(it.name).join(\',\')
+}
+'
+	})
+	calls := g.edges.filter(it.kind == .calls && it.from == 'lib.tests.names')
+	assert calls.any(it.to == 'lib.builtin.[]string.join' && it.provenance == .inferred), g.edges.map(it.to).str()
+}
+
 fn test_a_per_platform_call_returns_the_type_its_variants_share() {
 	// `open_it` is declared once per platform in a standalone program, so its
 	// variants are renamed apart. They return the same type, so the receiver is typed.

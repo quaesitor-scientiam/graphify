@@ -57,6 +57,11 @@ const const_depth = 4
 // builtin declares most of them as returning plain `array`, or not at all.
 const array_same_type = ['clone', 'filter', 'reverse', 'sorted', 'sorted_with_compare', 'slice']
 
+// string_array_methods are the methods V declares on a `[]string` and on no other array, so
+// a call of one on an array whose element type isn't known is the `[]string` method. `str()`
+// is not one: V generates it for every array, whatever its elements.
+const string_array_methods = ['join']
+
 // array_elem_methods are the array methods that return one element, which
 // builtin declares as returning `voidptr`.
 const array_elem_methods = ['first', 'last', 'pop', 'pop_left']
@@ -375,6 +380,11 @@ fn (inf &Infer) follow_steps(e Edge, depth int) ?InferredType {
 			}
 			if found := inf.method_on(t, name, e.file, 0) {
 				mut ret := inf.returns(found)?
+				// `xs.map(...)` with no stated result is an array of a type the graph doesn't
+				// know, which builtin's `array` stands for: method_on finds the method by its name
+				if name == 'map' && t.text.starts_with('[') && ret.text == 'array' {
+					ret.text = '[]'
+				}
 				// `Queue[int].pop()` returns the `T` of `Queue[T]`, here `int`
 				owner := found.all_before_last('.').all_after_last('.').all_before('[')
 				ret.text = owner_args(ret.text, t, owner, inf.generics_of[found] or { []string{} })
@@ -772,6 +782,13 @@ fn (inf &Infer) decl_site(id string, name string) ?CallCand {
 fn (inf &Infer) method_on(t InferredType, name string, file string, depth int) ?string {
 	text := bare_type(t.text)
 	cands := inf.by_name[name] or { return none }
+	// an array whose element type isn't known: `join` is the `[]string` method, and no other
+	// array has one (see string_array_methods)
+	if text == '[]' && name in string_array_methods {
+		if id := inf.only_array_method(cands, name) {
+			return id
+		}
+	}
 	if text.starts_with('[') {
 		if text.starts_with('[]') {
 			if id := inf.pick_method(cands, name, text, '', t, file) {
@@ -826,6 +843,29 @@ fn (inf &Infer) method_on(t InferredType, name string, file string, depth int) ?
 		}
 	}
 	return if found.len == 1 { found[0] } else { none }
+}
+
+// only_array_method is the one method `name` that builtin declares on an array of some
+// element type, or none when builtin declares it on several.
+fn (inf &Infer) only_array_method(cands []CallCand, name string) ?string {
+	mut ids := []string{}
+	for c in cands {
+		if !c.is_method || !import_reaches(c.mod, 'builtin') {
+			continue
+		}
+		id := c.id.all_before('@')
+		if !id.starts_with(c.mod + '.') || !id.ends_with('.' + name) {
+			continue
+		}
+		decl_owner := id[c.mod.len + 1..id.len - name.len - 1]
+		if decl_owner.starts_with('[]') && id !in ids {
+			ids << id
+		}
+	}
+	if ids.len == 1 {
+		return ids[0]
+	}
+	return none
 }
 
 // pick_method keeps the methods declared on `owner` and narrows them the way
