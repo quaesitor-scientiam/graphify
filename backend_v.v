@@ -2025,16 +2025,25 @@ fn (f &V3File) recipe(id flat.NodeId, ctx V3CallCtx) string {
 			}
 		}
 		.if_expr {
+			// a branch that names no type (an interpolated string, say) is passed over: V
+			// gives the expression the type its branches share, so the first branch that
+			// has one gives it
 			for k in kids {
 				if f.node(k).kind == .block {
-					return f.last_value(k, ctx)
+					r := f.last_value(k, ctx)
+					if r != '' {
+						return r
+					}
 				}
 			}
 		}
 		.match_stmt {
 			for k in kids {
 				if f.node(k).kind == .match_branch {
-					return f.last_value(k, ctx)
+					r := f.last_value(k, ctx)
+					if r != '' {
+						return r
+					}
 				}
 			}
 		}

@@ -6098,6 +6098,52 @@ pub struct C.KEY_EVENT_RECORD {
 	assert calls.any(it.to == 'vlib.builtin.rune.str')
 }
 
+// `host.contains('x')` on `host`, an `if` whose first branch is itself an `if` that yields no type (a string literal names none), so the `if` takes its type from the branch that does, the `string` of `name`: no `contains` edge is left unresolved (the name fallback can't pass by accident, see the competing `contains` methods).
+fn test_an_if_value_takes_the_type_of_the_branch_that_has_one() {
+	g := graph_of({
+		'vlib/builtin/string.v': 'module builtin
+
+pub fn (s string) contains(sub string) bool {
+	return false
+}
+
+'
+		'lib/tests/pick_test.v': 'module tests
+
+pub struct ProbeA {
+}
+
+pub fn (p ProbeA) contains(sub string) bool {
+	return false
+}
+
+pub struct ProbeB {
+}
+
+pub fn (p ProbeB) contains(sub string) bool {
+	return false
+}
+
+fn pick(flag bool, n int, name string) bool {
+	host := if flag {
+		if n == 0 {
+			"a"
+		} else {
+			"b"
+		}
+	} else {
+		name
+	}
+	return host.contains("x")
+}
+
+'
+	})
+	calls := g.edges.filter(it.kind == .calls && it.from == 'lib.tests.pick')
+	assert !calls.any(it.to == 'contains' && it.provenance != .undeclared)
+	assert calls.any(it.to == 'vlib.builtin.string.contains')
+}
+
 fn test_a_primitive_without_a_str_is_undeclared_and_shifts_keep_its_type() {
 	g := graph_of({
 		'lib/lib.v': 'module lib
