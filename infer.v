@@ -32,6 +32,7 @@ struct Infer {
 	enum_ids     map[string]bool     // ids of enums
 	dynamic_ids  map[string]bool     // ids of sum types and interfaces
 	generics_of  map[string][]string // free function id -> its type parameters
+	iface_ids    map[string]bool     // ids of interfaces
 mut:
 	memo map[string]InferredType
 }
@@ -266,6 +267,8 @@ fn (inf &Infer) follow_steps(e Edge, depth int) ?InferredType {
 			mod:  scope.mod
 			file: e.file
 		}
+	} else if start.starts_with('ct:') {
+		t = inf.comptime_type(start[3..], e.file)?
 	} else if start.starts_with('g:') {
 		if c := inf.find_const(start[2..], e.file) {
 			if depth >= const_depth {
@@ -393,6 +396,37 @@ fn (inf &Infer) follow_steps(e Edge, depth int) ?InferredType {
 		return none
 	}
 	return t
+}
+
+// comptime_type is the type a `$if T is X` block takes T to be, `name` read in
+// `file`, where X may be wrapped as `&X` or `[]X`. Not when X is an interface:
+// V's `T is Iface` holds for any T implementing it, so the block's T is not the
+// interface, and nothing here says which type T is.
+fn (inf &Infer) comptime_type(name string, file string) ?InferredType {
+	scope := inf.scope_of[file] or { FileScope{} }
+	mut base := name
+	for {
+		if base.starts_with('&') {
+			base = base[1..]
+		} else if base.starts_with('[]') {
+			base = base[2..]
+		} else {
+			break
+		}
+	}
+	if base !in primitive_types {
+		short := base.all_after_last('.')
+		qual := if base.contains('.') { base.all_before_last('.') } else { '' }
+		decl := inf.find_type(short, qual, InferredType{ mod: scope.mod, file: file }, file)?
+		if decl.id in inf.iface_ids {
+			return none
+		}
+	}
+	return InferredType{
+		text: name
+		mod:  scope.mod
+		file: file
+	}
 }
 
 // find_const is the const or global that `name` names from `file`: one of

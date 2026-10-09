@@ -5037,6 +5037,115 @@ pub fn (n Node) str() string {
 	assert g.edges.any(it.kind == .calls && it.from == 'lib.f' && it.to == 'str' && it.provenance == .undeclared), g.edges.map(it.to).str()
 }
 
+fn test_comptime_is_narrows_a_type_parameter_receiver() {
+	// `other.Node.str` is the competing str(): lib imports it too, so the
+	// name fallback sees two reachable str() methods and settles nothing
+	g := graph_of({
+		'leaf/leaf.v':  'module leaf
+
+pub struct Leaf {}
+
+pub fn (l Leaf) str() string {
+	return \'leaf\'
+}
+'
+		'other/node.v': 'module other
+
+pub struct Node {}
+
+pub fn (n Node) str() string {
+	return \'node\'
+}
+'
+		'lib/lib.v':    'module lib
+
+import leaf
+import other
+
+pub fn render[T](value T) string {
+	_ = other.Node{}
+	$if T is leaf.Leaf {
+		return value.str()
+	} $else {
+		return \'\'
+	}
+}
+'
+	})
+	assert g.edges.any(it.kind == .calls && it.from == 'lib.render' && it.to == 'leaf.Leaf.str'), g.edges.map(it.to).str()
+}
+
+fn test_comptime_is_narrows_a_variable_of_a_type_parameter() {
+	g := graph_of({
+		'leaf/leaf.v':  'module leaf
+
+pub struct Leaf {}
+
+pub fn (l Leaf) str() string {
+	return \'leaf\'
+}
+'
+		'other/node.v': 'module other
+
+pub struct Node {}
+
+pub fn (n Node) str() string {
+	return \'node\'
+}
+'
+		'lib/lib.v':    'module lib
+
+import leaf
+import other
+
+pub fn describe[T](data T) string {
+	_ = other.Node{}
+	$if data is leaf.Leaf {
+		return data.str()
+	}
+	return \'\'
+}
+'
+	})
+	assert g.edges.any(it.kind == .calls && it.from == 'lib.describe' && it.to == 'leaf.Leaf.str'), g.edges.map(it.to).str()
+}
+
+fn test_comptime_is_on_an_interface_names_no_type() {
+	// V's `T is Shape` holds for every T implementing Shape, so the block's T is
+	// not the interface: the call is not Shape.str, and lib imports Node's str()
+	// too, so the name fallback cannot pick Shape's either
+	g := graph_of({
+		'shape/shape.v': 'module shape
+
+pub interface Shape {
+	str() string
+}
+'
+		'other/node.v':  'module other
+
+pub struct Node {}
+
+pub fn (n Node) str() string {
+	return \'node\'
+}
+'
+		'lib/lib.v':     'module lib
+
+import shape
+import other
+
+pub fn draw[T](value T) string {
+	_ = other.Node{}
+	$if T is shape.Shape {
+		return value.str()
+	}
+	return \'\'
+}
+'
+	})
+	assert !g.edges.any(it.kind == .calls && it.from == 'lib.draw' && it.to.contains('Shape')), g.edges.map(it.to).str()
+}
+
 fn test_a_primitive_without_a_str_is_undeclared_and_shifts_keep_its_type() {
 	g := graph_of({
 		'lib/lib.v': 'module lib
