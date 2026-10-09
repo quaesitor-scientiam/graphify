@@ -877,6 +877,22 @@ fn resolve_edges(mut g Graph) {
 		generics_of:  generics_of
 	}
 	mut resolved := []Edge{cap: g.edges.len}
+	// variants_of maps each platform copy of a function or method to all of its
+	// copies: the same id before the `@file`, in the same module.
+	mut copies := map[string][]string{}
+	for s in g.symbols {
+		if s.kind in [SymbolKind.function, .method] && s.id.contains('@') && is_platform_file(s.file) {
+			copies[s.id.all_before('@')] << s.id
+		}
+	}
+	mut variants_of := map[string][]string{}
+	for _, ids in copies {
+		if ids.len > 1 {
+			for id in ids {
+				variants_of[id] = ids
+			}
+		}
+	}
 	// record_call keeps one edge per callee and receiver, so two raw edges
 	// can resolve to the same declaration; keep one, `extracted` if either is
 	mut seen_call := map[string]int{}
@@ -908,23 +924,26 @@ fn resolve_edges(mut g Graph) {
 					continue
 				}
 				if !unaddressable[res.id] {
-					key := '${e.from}\x00${res.id}'
-					if at := seen_call[key] {
-						if !res.inferred && resolved[at].provenance == .inferred {
-							resolved[at] = Edge{
-								...resolved[at]
-								provenance: .extracted
+					// a call that reaches one platform's copy of a function reaches every copy
+					for id in variants_of[res.id] or { [res.id] } {
+						key := '${e.from}\x00${id}'
+						if at := seen_call[key] {
+							if !res.inferred && resolved[at].provenance == .inferred {
+								resolved[at] = Edge{
+									...resolved[at]
+									provenance: .extracted
+								}
 							}
+							continue
 						}
-						continue
-					}
-					seen_call[key] = resolved.len
-					resolved << Edge{
-						from:       e.from
-						to:         res.id
-						kind:       .calls
-						is_method:  e.is_method
-						provenance: if res.inferred { .inferred } else { .extracted }
+						seen_call[key] = resolved.len
+						resolved << Edge{
+							from:       e.from
+							to:         id
+							kind:       .calls
+							is_method:  e.is_method
+							provenance: if res.inferred { .inferred } else { .extracted }
+						}
 					}
 					continue
 				}
@@ -1105,6 +1124,14 @@ fn resolve_callee(e Edge, by_name map[string][]CallCand, site_of map[string]Decl
 				return CallResolution{ id: c.id, inferred: false }
 			}
 		}
+		// a platform copy's id carries its file (see disambiguate_ids), so the
+		// receiver's own method may be a copy named without it; any copy will do,
+		// since variants_of links them all
+		for c in cands {
+		if c.id.all_before('@') == want {
+			return CallResolution{ id: c.id, inferred: false }
+		}
+	}
 		if res := resolve_by_receiver_type(e, cands, site_of) {
 			return res
 		}

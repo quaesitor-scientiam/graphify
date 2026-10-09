@@ -287,10 +287,18 @@ fn (inf &Infer) follow_steps(e Edge, depth int) ?InferredType {
 		mut id := ''
 		if call.to.contains('.') {
 			id = (resolve_qualified_callee(call, inf.by_name, inf.site_of, inf.scope_of)?).id
+			t = inf.returns(id)?
+		} else if res := resolve_callee(call, inf.by_name, inf.site_of, inf.imports_of) {
+			id = res.id
+			t = inf.returns(id)?
 		} else {
-			id = (resolve_callee(call, inf.by_name, inf.site_of, inf.imports_of)?).id
+			// one function declared once per platform: its variants must all return
+			// the same type, which is then the call's type
+			variants := platform_variants(call, inf.by_name, inf.site_of)?
+			ids := variants.map(it.id)
+			t = inf.same_return(ids)?
+			id = ids[0]
 		}
-		t = inf.returns(id)?
 		// the type arguments of a generic call (`p:` steps) stand for the
 		// callee's type parameters, in order, in its return type
 		mut targs := []string{}
@@ -514,6 +522,17 @@ fn is_name_byte(c u8) bool {
 
 // returns is the return type of the function or method with id `id`, in the
 // scope it is declared in.
+// same_return is the return type shared by every id, or none when they differ.
+fn (inf &Infer) same_return(ids []string) ?InferredType {
+	first := inf.returns(ids[0])?
+	for id in ids[1..] {
+		if inf.returns(id)?.text != first.text {
+			return none
+		}
+	}
+	return first
+}
+
 fn (inf &Infer) returns(id string) ?InferredType {
 	sig := inf.sig_of[id] or { return none }
 	name := inf.name_of[id] or { return none }
