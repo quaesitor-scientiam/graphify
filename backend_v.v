@@ -1490,9 +1490,10 @@ fn (f &V3File) type_arg(id flat.NodeId) ?string {
 		}
 		name = '${f.node(ks[0]).value}.${n.value}'
 	} else if n.kind == .map_init || n.kind == .array_init {
-		// a map or array type written out, `map[string]json.Any`, as the type itself
+		// a map or array type written out, `map[string]json.Any`, as the type itself,
+		// with its module names as the file's imports give them
 		t := if n.typ != '' { n.typ } else { n.value }
-		return if t == '' { none } else { t }
+		return if t == '' { none } else { f.type_text(t) }
 	} else {
 		return none
 	}

@@ -169,6 +169,8 @@ A member of an enum (`Colour.red`) is a value of the enum's type, when the name 
 
 A call of `str()` on a type that declares none is one V writes, and it returns a `string`, so a method called on the result (`x.str().contains(...)`) is found on `string`. `follow_steps` takes the type of the `str` step from the same rule that makes the call undeclared (`no_method`, in infer.v). On the V compiler's tree that resolves 42 calls on `string`, 25 of them `contains`, and none is newly unresolved.
 
+A generic type argument written out (`json.decode[[]map[string]json.Any](s)`) is named through the file's imports like any other type text (`type_arg` calls `type_text`, in backend_v.v), so the element type it gives the result is found. Before, `json.Any` kept its alias, found no type, and `value.str()` on it linked by name to whichever `str` was declared. On the V compiler's tree that leaves 12 calls fewer unresolved (725 → 713), 11 of them `str()`, and the `int()` calls that had linked to `cmd.tools.vmcp.Args.int` now reach `json2.Any.int`. What's left of the alias case is a module an `@[alias]` directory redirects (`vlib/x/json2`, which is `vlib/json2`): the graph doesn't follow it, so `x.json2.decode` and `x.json2.encode` (15 calls) stay unresolved.
+
 What remains is a long tail: values V infers in other ways (a comptime
 `for f in T.fields` variable, a receiver from a call with a computed argument),
 a sum type's shared field, function values the walk can't see are variables,
