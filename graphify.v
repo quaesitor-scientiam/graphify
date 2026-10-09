@@ -659,6 +659,19 @@ fn resolve_edges(mut g Graph) {
 	resolve_initializer_callers(mut g)
 	mut by_name := map[string][]CallCand{}
 	mut by_type_name := map[string][]TypeCand{}
+	// enum_names holds each enum by module and name, to recognise V's own zero()
+	// on a flag enum (see below).
+	mut enum_names := map[string]bool{}
+	// a field's site is its struct, so a struct maps to its own module
+	mut struct_mod := map[string]string{}
+	for s in g.symbols {
+		if s.kind == .enum_ {
+			enum_names[s.parent + '\x00' + s.name] = true
+		}
+		if s.kind == .struct_ {
+			struct_mod[s.id] = s.parent
+		}
+	}
 	// a module with exactly one `fn main` is one program, whose files see each
 	// other as one module; a module with several has a program per `main`
 	mut main_count := map[string]int{}
@@ -955,6 +968,18 @@ fn resolve_edges(mut g Graph) {
 				continue
 			}
 			seen_call[key] = resolved.len
+		}
+		if e.kind == .calls && e.to.ends_with('__static__zero') {
+			// V generates `T.zero()` for a @[flag] enum T and for no other enum, so a
+			// call of it with no zero declared, to an enum T in the caller's module, is
+			// one V provides.
+			if site := caller_site(e, site_of) {
+				mod := struct_mod[site.mod] or { site.mod }
+				if enum_names[mod + '\x00' + e.to.all_before('__static__')] {
+					resolved << Edge{...e, provenance: .undeclared}
+					continue
+				}
+			}
 		}
 		resolved << e
 	}

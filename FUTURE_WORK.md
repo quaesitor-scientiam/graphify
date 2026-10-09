@@ -158,6 +158,8 @@ type, which the graph doesn't name.
 
 A call in a constant's, global's or struct field's initializer (`const x = f()`, `n int = f()`) is recorded as made by that declaration. Its caller id is set after the renames that give colliding declarations their own ids (`resolve_initializer_callers`), so a constant that shares a name with a function keeps its own calls. On the V compiler's tree that adds 2,023 call edges. On a 300-name sample per group, checking the graph's caller files against the source (string literals, comments and casts excluded): names declared once 98.2% → 98.7%, names declared in several files 97.5% → 98.2%.
 
+V generates `T.zero()` for a `@[flag]` enum, and for no other enum, so an unresolved call of that form to an enum in the caller's module is undeclared (`enum_names`, in resolve_edges). It only matches an unqualified name: a `zero()` on an enum from another module (`asn1.Integer.zero()`) stays unresolved.
+
 What remains is a long tail: values V infers in other ways (a comptime
 `for f in T.fields` variable, a receiver from a call with a computed argument),
 a sum type's shared field, function values the walk can't see are variables,

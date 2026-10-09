@@ -4629,6 +4629,25 @@ fn make_n(x int) int {
 	assert !g.edges.any(it.kind == .calls && it.from == 'lib.test_it'), g.edges.map(it.from).str()
 }
 
+fn test_a_flag_enums_zero_is_undeclared() {
+	g := graph_of({
+		'lib/lib.v': 'module lib
+
+@[flag]
+pub enum Show {
+	a
+	b
+}
+
+pub fn default_show() Show {
+	return Show.zero()
+}
+'
+	})
+	// V provides `zero()` on a flag enum, so the call is undeclared, not unresolved
+	assert g.edges.any(it.kind == .calls && it.from == 'lib.default_show' && it.provenance == .undeclared), g.edges.map(it.from).str()
+}
+
 fn test_a_primitive_without_a_str_is_undeclared_and_shifts_keep_its_type() {
 	g := graph_of({
 		'lib/lib.v': 'module lib
