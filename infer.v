@@ -942,7 +942,7 @@ fn (inf &Infer) field_of(t InferredType, name string, file string, depth int) ?I
 	}
 	mut decl := TypeCand{}
 	if qual == 'C' {
-		decl = inf.c_struct(short)?
+		decl = inf.c_struct(short, t)?
 	} else {
 		decl = inf.find_type(short, qual, t, file)?
 	}
@@ -980,25 +980,42 @@ fn (inf &Infer) field_of(t InferredType, name string, file string, depth int) ?I
 	return if found.len == 1 { found[0] } else { none }
 }
 
-// c_struct is the C struct `C.name` names. V's C types are not qualified by a
-// module: it is the struct declared as `C.name` in any module, and a V struct of
-// that name is none of it. Two C structs of that name leave it unknown.
-fn (inf &Infer) c_struct(name string) ?TypeCand {
-	mut ids := []string{}
-	mut found := TypeCand{}
+// c_struct is the C struct `C.name` names, as seen from t's file. V's C types are
+// not qualified by a module: a C struct is one name for the whole program, so the
+// declaration in the nearest scope is the one: t's file, then its module, then the
+// program. Declarations of one id in that scope are one struct, one per platform;
+// two ids leave it unknown, and a V struct of that name is none of it.
+fn (inf &Infer) c_struct(name string, t InferredType) ?TypeCand {
+	mut same_file := []TypeCand{}
+	mut own_mod := []TypeCand{}
+	mut all := []TypeCand{}
 	for c in inf.by_type_name[name] or { return none } {
 		if !c.c {
 			continue
 		}
-		if c.id !in ids {
-			ids << c.id
+		all << c
+		if c.file == t.file {
+			same_file << c
 		}
-		found = c
+		if c.mod == t.mod {
+			own_mod << c
+		}
 	}
-	if ids.len != 1 {
-		return none
+	for tier in [same_file, own_mod, all] {
+		mut ids := []string{}
+		for c in tier {
+			if c.id !in ids {
+				ids << c.id
+			}
+		}
+		if ids.len == 1 {
+			return tier[0]
+		}
+		if ids.len > 1 {
+			return none
+		}
 	}
-	return found
+	return none
 }
 
 // bare_type drops what doesn't change which methods a type has: `&`, `?`,
