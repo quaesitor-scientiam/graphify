@@ -1090,6 +1090,10 @@ fn (mut f V3File) extract_type(id flat.NodeId, mut syms []Symbol, mut edges []Ed
 // param_type is the type id of a parameter whose type is a plain name, for
 // V3CallCtx.locals.
 fn (f &V3File) param_type(pn &flat.Node) ?string {
+	// a function value keeps its written type, whose return type a call of it has
+	if pn.value != '' && pn.value != '_' && pn.typ.starts_with('fn') {
+		return pn.typ
+	}
 	t := f.recv_type(pn.typ)
 	if pn.value != '' && pn.value != '_' && t.bytes().all(it.is_alnum() || it == `_` || it == `.`)
 		&& !is_generic_param(t.all_after_last('.')) {
@@ -1477,6 +1481,10 @@ fn (f &V3File) type_arg(id flat.NodeId) ?string {
 			return none
 		}
 		name = '${f.node(ks[0]).value}.${n.value}'
+	} else if n.kind == .map_init || n.kind == .array_init {
+		// a map or array type written out, `map[string]json.Any`, as the type itself
+		t := if n.typ != '' { n.typ } else { n.value }
+		return if t == '' { none } else { t }
 	} else {
 		return none
 	}
@@ -1629,6 +1637,12 @@ fn (f &V3File) recipe(id flat.NodeId, ctx V3CallCtx) string {
 				return ''
 			}
 			if !is_method {
+			// a call of a function value (a parameter of function type) has its return type
+			if t := ctx.locals[name] {
+				if t.starts_with('fn') {
+					return 't:' + t + recipe_sep + 'R'
+				}
+			}
 				mut rec := 'c:' + name
 				// `f[Config](x)`: the type arguments, `p:` steps in order,
 				// that follow_steps substitutes into the return type
