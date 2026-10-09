@@ -845,6 +845,10 @@ fn elem_type(t string) ?string {
 	if t == 'string' {
 		return 'u8'
 	}
+	// a channel's element, `chan T`, which `<-c` receives
+	if t.starts_with('chan ') {
+		return t[5..]
+	}
 	return none
 }
 

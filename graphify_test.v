@@ -5012,6 +5012,31 @@ fn show(s string) int {
 	assert g.edges.any(it.kind == .calls && it.from == 'app.show' && it.to == 'vlib.json2.decode'), g.edges.filter(it.from == 'app.show').map(it.to).str()
 }
 
+fn test_a_str_of_a_map_of_runes_is_undeclared_not_a_str_of_another_type() {
+	g := graph_of({
+		'lib/lib.v': 'module lib
+
+pub fn f() string {
+	m := {
+		\'a\': `a`
+	}
+	return m.str()
+}
+'
+		'node/node.v': 'module node
+
+pub struct Node {}
+
+pub fn (n Node) str() string {
+	return \'\'
+}
+'
+	})
+	// a map's str() is one V writes, so no declaration to resolve to; the rune
+	// values give the map its type, and the name `str` must not match Node.str
+	assert g.edges.any(it.kind == .calls && it.from == 'lib.f' && it.to == 'str' && it.provenance == .undeclared), g.edges.map(it.to).str()
+}
+
 fn test_a_primitive_without_a_str_is_undeclared_and_shifts_keep_its_type() {
 	g := graph_of({
 		'lib/lib.v': 'module lib
