@@ -757,10 +757,12 @@ fn (inf &Infer) find_type(short string, qual string, t InferredType, file string
 }
 
 // enum_type is the enum `name` names from `file`, the type of a member selected
-// from it.
+// from it. A qualified name, `gg.HorizontalAlign`, is an enum of that module.
 fn (inf &Infer) enum_type(name string, file string) ?InferredType {
 	scope := inf.scope_of[file] or { FileScope{} }
-	decl := inf.find_type(name, '', InferredType{ mod: scope.mod, file: file }, file)?
+	short := name.all_after_last('.')
+	qual := if name.contains('.') { name.all_before_last('.') } else { '' }
+	decl := inf.find_type(short, qual, InferredType{ mod: scope.mod, file: file }, file)?
 	if decl.id !in inf.enum_ids {
 		return none
 	}

@@ -5179,6 +5179,171 @@ pub fn f() string {
 	assert g.edges.any(it.kind == .calls && it.from == 'lib.f' && it.to == 'vlib.builtin.int.str'), g.edges.map(it.to).str()
 }
 
+fn test_shared_declaration_names_its_local() {
+	g := graph_of({
+		'other/node.v': 'module other
+
+pub struct Node {}
+
+pub fn (n Node) str() string {
+	return ""
+}
+'
+		'app/app.v':    'module app
+
+import other
+
+pub struct Abc {
+mut:
+	x f64
+}
+
+pub fn show() string {
+	shared s := Abc{
+		x: 6.25
+	}
+	astr := rlock s {
+		s.str()
+	}
+	return astr
+}
+'
+	})
+	assert g.edges.any(it.kind == .calls && it.from == 'app.show' && it.to == 'str' && it.provenance == .undeclared), g.edges.filter(it.from == 'app.show').map(it.to).str()
+}
+
+fn test_qualified_enum_const_is_its_enum() {
+	g := graph_of({
+		'gg/text.v':    'module gg
+
+pub enum HorizontalAlign {
+	left
+	right
+}
+'
+		'other/node.v': 'module other
+
+pub struct Node {}
+
+pub fn (n Node) str() string {
+	return ""
+}
+'
+		'app/app.v':    'module app
+
+import gg
+import other
+
+const left = gg.HorizontalAlign.left
+
+pub fn show() string {
+	align := left
+	return align.str()
+}
+
+pub fn show_direct() string {
+	return gg.HorizontalAlign.left.str()
+}
+'
+	})
+	assert g.edges.any(it.kind == .calls && it.from == 'app.show' && it.to == 'str' && it.provenance == .undeclared), g.edges.filter(it.from == 'app.show').map(it.to).str()
+	assert g.edges.any(it.kind == .calls && it.from == 'app.show_direct' && it.to == 'str' && it.provenance == .undeclared), g.edges.filter(it.from == 'app.show_direct').map(it.to).str()
+}
+
+fn test_orm_select_block_is_a_list_of_its_table() {
+	g := graph_of({
+		'other/node.v': 'module other
+
+pub struct Node {}
+
+pub fn (n Node) str() string {
+	return ""
+}
+'
+		'app/app.v':    'module app
+
+import other
+
+pub struct Address {
+	id int
+}
+
+pub fn show(db DB) string {
+	x1 := sql db {
+		select from Address
+	}!
+	return x1.str()
+}
+'
+	})
+	assert g.edges.any(it.kind == .calls && it.from == 'app.show' && it.to == 'str' && it.provenance == .undeclared), g.edges.filter(it.from == 'app.show').map(it.to).str()
+}
+
+fn test_enum_member_keys_type_a_map_literal() {
+	g := graph_of({
+		'other/node.v': 'module other
+
+pub struct Node {}
+
+pub fn (n Node) str() string {
+	return ""
+}
+'
+		'app/app.v':    'module app
+
+import other
+
+pub enum Animal {
+	cat
+	dog
+}
+
+pub fn show() string {
+	map_1 := {
+		Animal.cat: "gato"
+		.dog:       "perro"
+	}
+	return map_1.str()
+}
+
+pub fn show_values() string {
+	map_2 := {
+		"gato":  Animal.cat
+		"perro": .dog
+	}
+	return map_2.str()
+}
+'
+	})
+	assert g.edges.any(it.kind == .calls && it.from == 'app.show' && it.to == 'str' && it.provenance == .undeclared), g.edges.filter(it.from == 'app.show').map(it.to).str()
+	assert g.edges.any(it.kind == .calls && it.from == 'app.show_values' && it.to == 'str' && it.provenance == .undeclared), g.edges.filter(it.from == 'app.show_values').map(it.to).str()
+}
+
+fn test_plain_local_method_stays_in_its_own_test_file() {
+	// two `_test.v` files of one module, each with its own Alarms; V compiles each
+	// as its own program, so one_test.v's add is not visible from two_test.v
+	g := graph_of({
+		'pkg/one_test.v': 'module pkg
+
+pub struct Alarms {}
+
+pub fn (a Alarms) add(x int) {}
+'
+		'pkg/two_test.v': 'module pkg
+
+pub struct Alarms {}
+
+pub fn (shared a Alarms) add(x int) {}
+
+pub fn show() {
+	a := Alarms{}
+	a.add(1)
+}
+'
+	})
+	assert !g.edges.any(it.kind == .calls && it.from == 'pkg.show' && it.to == 'pkg.Alarms.add'), g.edges.filter(it.from == 'pkg.show').map(it.to).str()
+}
+
 fn test_a_primitive_without_a_str_is_undeclared_and_shifts_keep_its_type() {
 	g := graph_of({
 		'lib/lib.v': 'module lib
