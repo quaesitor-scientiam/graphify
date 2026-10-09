@@ -6382,6 +6382,23 @@ fn probe(x int) {
 	assert !calls.any(it.to == '__v3_isreftype')
 }
 
+// `bare_print('x')` and `__malloc(8)`: V's runtime helpers, which its bare builtin declares in its own source and no program does. Nothing in the program declares them, so each call is into the runtime and is marked undeclared, not left unresolved.
+fn test_a_runtime_helper_no_program_declares_is_undeclared() {
+	g := graph_of({
+		'lib/tests/runtime_test.v': 'module tests
+
+fn emit() {
+	bare_print(\'x\')
+	_ = __malloc(8)
+}
+'
+	})
+	calls := g.edges.filter(it.kind == .calls && it.from == 'lib.tests.emit')
+	assert calls.any(it.to == 'bare_print' && it.provenance == .undeclared)
+	assert calls.any(it.to == '__malloc' && it.provenance == .undeclared)
+	assert !calls.any(it.provenance != .undeclared && it.to in ['bare_print', '__malloc'])
+}
+
 fn test_a_primitive_without_a_str_is_undeclared_and_shifts_keep_its_type() {
 	g := graph_of({
 		'lib/lib.v': 'module lib

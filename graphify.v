@@ -1021,10 +1021,22 @@ fn resolve_edges(mut g Graph) {
 				}
 			}
 		}
+		// the runtime helpers V's bare builtin declares in its own source, which the
+		// default build doesn't compile, and the arena hooks it calls through: a call of
+		// one that no program declaration resolves is into the runtime, not the program
+		if e.kind == .calls && e.to in runtime_helpers {
+			resolved << Edge{...e, provenance: .undeclared}
+			continue
+		}
 		resolved << e
 	}
 	g.edges = resolved
 }
+
+// runtime_helpers are the names of V's runtime helpers, as the bare builtin declares
+// them (vlib/builtin/*/libc_impl.v) and the arena builtin's hooks (arena_d_builtin_arena.c.v)
+const runtime_helpers = ['__malloc', 'bare_print', 'bare_eprint', 'bare_panic', 'bare_backtrace', 'sys_write',
+	'g_arena_alloc_hook', 'g_arena_realloc_hook', 'g_arena_owns_hook']
 
 // site_key is where site_of keeps the location of one variant of an id that
 // several files declare (see resolve_edges).
