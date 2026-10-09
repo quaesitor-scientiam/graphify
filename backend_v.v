@@ -1568,6 +1568,12 @@ fn (f &V3File) recipe(id flat.NodeId, ctx V3CallCtx) string {
 			// `unsafe { x }`: the value of its last expression
 			return f.last_value(id, ctx)
 		}
+		.postfix {
+			// `[a, b]!`, a fixed-size array literal, has the type of the literal
+			if kids.len > 0 && f.node(kids[0]).kind == .array_literal {
+				return f.recipe(kids[0], ctx)
+			}
+		}
 		.array_init {
 			t := if n.typ != '' { n.typ } else { n.value }
 			if t != '' {
