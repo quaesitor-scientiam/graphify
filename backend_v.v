@@ -1590,7 +1590,7 @@ fn (mut f V3File) walk(id flat.NodeId, ctx V3CallCtx, mut edges []Edge, mut seen
 // declare returns `ctx` with the variables a `:=` declares. `a := x` has the
 // children [a, x], `a, b := x, y` [a, x, b, y], and `a, b := f()` [a, f(), b].
 fn (f &V3File) declare(n &flat.Node, kids []flat.NodeId, ctx V3CallCtx) V3CallCtx {
-	count := if n.value == '' { 1 } else { n.value.int() }
+	count := decl_count(n.value)
 	mut names := []string{}
 	mut recipes := []string{}
 	if kids.len == 2 * count {
@@ -1623,6 +1623,24 @@ fn (f &V3File) declare(n &flat.Node, kids []flat.NodeId, ctx V3CallCtx) V3CallCt
 		}
 	}
 	return out
+}
+
+// decl_count is how many names a `:=` declares, from the node's value. The
+// parser leaves it empty for one name and writes the count for several. A
+// `shared`, `atomic`, `volatile` or `static` in front of the statement is written
+// in front of that: `shared s := x` has the value 'shared', `shared a, b := f()`
+// 'shared:2'. Any other value declares none, as before.
+fn decl_count(value string) int {
+	last := value.all_after_last(':')
+	if last == '' || last in ['shared', 'atomic', 'volatile', 'static'] {
+		return 1
+	}
+	for i in 0 .. last.len {
+		if !last[i].is_digit() {
+			return 0
+		}
+	}
+	return last.int()
 }
 
 // type_checks are the `x is T` checks that hold where `cond` is true: the
@@ -1821,6 +1839,14 @@ fn (f &V3File) recipe(id flat.NodeId, ctx V3CallCtx) string {
 				return 't:' + f.type_text(t)
 			}
 		}
+		.sql_expr {
+			// `sql db { select from T }!` has the type the ORM transform gives the block:
+			// `![]T` for a select, `!int` for a write or a count, `!orm.AggregateValue`
+			// for an aggregate. The parser writes it as `typ`; `!void` has no value.
+			if n.typ.len > 1 && n.typ.starts_with('!') && n.typ != '!void' {
+				return 't:' + f.type_text(n.typ[1..])
+			}
+		}
 		.spawn_expr {
 			return 't:thread'
 		}
@@ -1958,11 +1984,24 @@ fn literal_map_type(f &V3File, kids []flat.NodeId) ?string {
 	for i := 0; i < kids.len; i += 2 {
 		k := f.literal_type(kids[i])
 		v := f.literal_type(kids[i + 1])
-		if k == '' || v == '' || (key != '' && k != key) || (val != '' && v != val) {
+		// a `.dog` shorthand (an enum_val) has the type the other entries have, which V
+		// requires them to share; any other entry must state its type
+		if (k == '' && f.node(kids[i]).kind != .enum_val)
+			|| (v == '' && f.node(kids[i + 1]).kind != .enum_val) {
 			return none
 		}
-		key = k
-		val = v
+		if (key != '' && k != '' && k != key) || (val != '' && v != '' && v != val) {
+			return none
+		}
+		if k != '' {
+			key = k
+		}
+		if v != '' {
+			val = v
+		}
+	}
+	if key == '' || val == '' {
+		return none
 	}
 	return 'map[${key}]${val}'
 }
@@ -1993,6 +2032,14 @@ fn (f &V3File) literal_type(id flat.NodeId) string {
 		}
 		.char_literal {
 			return 'rune'
+		}
+		.selector {
+			// `Animal.cat`, a member of an enum, has the enum's type: the name before a
+			// member is capitalized, which is a type's
+			if kids.len == 1 && f.node(kids[0]).kind == .ident && f.node(kids[0]).value.len > 0
+				&& f.node(kids[0]).value[0].is_capital() && n.value.len > 0 && !n.value[0].is_capital() {
+				return f.type_text(f.node(kids[0]).value)
+			}
 		}
 		.cast_expr, .struct_init {
 			if n.value != '' {

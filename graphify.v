@@ -1127,7 +1127,7 @@ fn resolve_callee(e Edge, by_name map[string][]CallCand, site_of map[string]Decl
 		want := e.recv_type + '.' + e.to
 		want_suffixed := if e.file != '' { '${want}@${e.file}' } else { '' }
 		for c in cands {
-			if c.id == want || (want_suffixed != '' && c.id == want_suffixed) {
+			if (c.id == want || (want_suffixed != '' && c.id == want_suffixed)) && !test_private(c.file, e.file) {
 				return CallResolution{ id: c.id, inferred: false }
 			}
 		}
@@ -1135,7 +1135,7 @@ fn resolve_callee(e Edge, by_name map[string][]CallCand, site_of map[string]Decl
 		// receiver's own method may be a copy named without it; any copy will do,
 		// since variants_of links them all
 		for c in cands {
-		if c.id.all_before('@') == want {
+		if c.id.all_before('@') == want && !test_private(c.file, e.file) {
 			return CallResolution{ id: c.id, inferred: false }
 		}
 	}

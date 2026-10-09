@@ -180,6 +180,8 @@ A type parameter `T` is an unknown type to the graph, so a method on a value typ
 
 A value that is a `$if c { a } $else { b }` (vlib/builtin's `max_int`, and a local initialized from one) has the type its branches share. `recipe` takes the common recipe of the branches, and gives none when they differ or when a branch has no value, since V keeps one branch and the graph can't tell which. On the V compiler's tree that resolves 3 calls more (603 → 600), 2 of them the `str()` calls on `max_int`.
 
+Four receivers the source states were lost. A `shared`, `atomic`, `volatile` or `static` statement writes its keyword in front of the declaration's name count, so `shared s := x` bound no name (`decl_count`, in backend_v.v). A qualified enum constant, `gg.HorizontalAlign.left`, looked up its enum by the short name and so found none (`enum_type`, in infer.v). A `sql db { select from T }!` block has the type the ORM transform gives it (`sql_expr` in the recipe). A map literal whose entries are enum members (`{.dog: 1, .cat: 2}`) had no type, since an enum member has none by `literal_type`, so the map had none (`literal_map_type` now takes the type from the entries that state one). A call of a method found in a same-named test file was linked across files, since the exact-id match skipped the test-only check (`resolve_callee`). On the V compiler's tree that resolves 22 more calls (600 → 578) and corrects two `Middleware[T].str` links to the enum methods they name.
+
 What remains is a long tail: values V infers in other ways (a comptime
 `for f in T.fields` variable, a receiver from a call with a computed argument),
 a sum type's shared field, function values the walk can't see are variables,
