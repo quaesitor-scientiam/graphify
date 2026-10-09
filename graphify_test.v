@@ -5469,6 +5469,505 @@ pub fn show() string {
 	assert calls.len == 1 && calls[0].to == 'vlib.builtin.u128.str', calls.map(it.to).str()
 }
 
+// `i64 { val_val.str() }` in a match of a `RedisValue` sum type: no `str` edge is left unresolved (the name fallback can't pass by accident, see the competing `str` methods).
+fn test_a_match_arm_on_a_primitive_types_its_sum_type_variable() {
+	g := graph_of({
+		'lib/other/other.v': 'module other
+
+pub struct Note {
+	text string
+}
+
+pub fn (n Note) str() string {
+	return n.text
+}
+
+'
+		'lib/redis/redis.v': 'module redis
+
+import other
+
+pub struct RedisMap {
+pub:
+	pairs []RedisValue
+}
+
+pub type RedisValue = bool | i64 | []u8 | RedisMap
+
+pub struct DB {
+}
+
+pub fn (mut db DB) cmd(cmd ...string) !RedisValue {
+	return RedisValue(i64(1))
+}
+
+pub fn (mut db DB) hgetall(key string) !map[string]string {
+	resp := db.cmd("HGETALL", key)!
+	mut result := map[string]string{}
+	match resp {
+		[]RedisValue {
+			for i in 0 .. resp.len / 2 {
+				val_val := resp[2 * i + 1]
+				v := match val_val {
+					[]u8 { val_val.bytestr() }
+					i64 { val_val.str() }
+					else { "" }
+				}
+				result[key] = v
+			}
+		}
+		else {}
+	}
+	return result
+}
+
+fn competitor() string {
+	n := other.Note{}
+	return n.str()
+}
+
+pub struct ProbeA {
+}
+
+pub fn (p ProbeA) str() string {
+	return ""
+}
+
+pub struct ProbeB {
+}
+
+pub fn (p ProbeB) str() string {
+	return ""
+}
+
+'
+	})
+	calls := g.edges.filter(it.kind == .calls && it.from == 'lib.redis.DB.hgetall')
+	assert !calls.any(it.to == 'str' && it.provenance != .undeclared)
+}
+
+// `toml.Doc { doa.ast.table.str() }` in a match on a sum type alias: no `str` edge is left unresolved (the name fallback can't pass by accident, see the competing `str` methods).
+fn test_a_match_arm_on_a_qualified_type_types_its_sum_type_parameter() {
+	g := graph_of({
+		'lib/other/other.v': 'module other
+
+pub struct Note {
+	text string
+}
+
+pub fn (n Note) str() string {
+	return n.text
+}
+
+'
+		'lib/to/to.v': 'module to
+
+import toml
+
+type DocOrAny = toml.Any | toml.Doc
+
+pub fn json(doa DocOrAny) string {
+	match doa {
+		toml.Doc {
+			return doa.ast.table.str()
+		}
+		toml.Any {
+			return ""
+		}
+	}
+}
+
+pub struct ProbeA {
+}
+
+pub fn (p ProbeA) str() string {
+	return ""
+}
+
+pub struct ProbeB {
+}
+
+pub fn (p ProbeB) str() string {
+	return ""
+}
+
+'
+		'lib/toml/toml.v': 'module toml
+
+import other
+
+pub struct Root {
+pub mut:
+	table Value
+}
+
+pub type Value = bool | string
+
+pub struct Doc {
+pub:
+	ast &Root = unsafe { nil }
+}
+
+pub type Any = bool | string
+
+pub struct Date {
+}
+
+pub fn (d Date) str() string {
+	return ""
+}
+
+fn competitor() string {
+	n := other.Note{}
+	return n.str()
+}
+'
+	})
+	calls := g.edges.filter(it.kind == .calls && it.from == 'lib.to.json')
+	assert !calls.any(it.to == 'str' && it.provenance != .undeclared)
+	assert !calls.any(it.to == 'lib.toml.Date.str')
+}
+
+// `toml_doc.reflect[User]().birthday.str()`: no `str` edge is left unresolved (the name fallback can't pass by accident, see the competing `str` methods).
+fn test_an_explicit_type_argument_of_a_method_names_its_own_type_parameter() {
+	g := graph_of({
+		'lib/other/other.v': 'module other
+
+pub struct Note {
+	text string
+}
+
+pub fn (n Note) str() string {
+	return n.text
+}
+
+'
+		'lib/tests/reflect_test.v': 'module tests
+
+import toml
+
+struct User {
+	birthday toml.Date
+}
+
+fn test_reflect() {
+	toml_doc := toml.parse_text("") or { panic(err) }
+	mut user := toml_doc.reflect[User]()
+	assert user.birthday.str() == ""
+}
+
+pub struct ProbeA {
+}
+
+pub fn (p ProbeA) str() string {
+	return ""
+}
+
+pub struct ProbeB {
+}
+
+pub fn (p ProbeB) str() string {
+	return ""
+}
+
+'
+		'lib/toml/toml.v': 'module toml
+
+import other
+
+pub struct Doc {
+}
+
+pub fn parse_text(text string) !Doc {
+	return Doc{}
+}
+
+pub fn (d Doc) reflect[T]() T {
+	return T{}
+}
+
+pub struct Date {
+}
+
+pub fn (d Date) str() string {
+	return ""
+}
+
+fn competitor() string {
+	n := other.Note{}
+	return n.str()
+}
+'
+	})
+	calls := g.edges.filter(it.kind == .calls && it.from == 'lib.tests.test_reflect')
+	assert !calls.any(it.to == 'str' && it.provenance != .undeclared)
+	assert calls.any(it.to == 'lib.toml.Date.str')
+}
+
+// `source.map(it.value.str())` on `type Sources = [2]Source`: no `str` edge is left unresolved (the name fallback can't pass by accident, see the competing `str` methods).
+fn test_an_alias_of_a_fixed_array_has_its_element_type() {
+	g := graph_of({
+		'lib/other/other.v': 'module other
+
+pub struct Note {
+	text string
+}
+
+pub fn (n Note) str() string {
+	return n.text
+}
+
+'
+		'lib/tests/mapped.v': 'module tests
+
+import other
+
+struct Source {
+	value int
+}
+
+type Sources = [2]Source
+
+fn mapped_sources(source Sources) [2]string {
+	return source.map(it.value.str()).map("value:" + it)
+}
+
+fn competitor() string {
+	n := other.Note{}
+	return n.str()
+}
+
+pub struct ProbeA {
+}
+
+pub fn (p ProbeA) str() string {
+	return ""
+}
+
+pub struct ProbeB {
+}
+
+pub fn (p ProbeB) str() string {
+	return ""
+}
+
+'
+	})
+	calls := g.edges.filter(it.kind == .calls && it.from == 'lib.tests.mapped_sources')
+	assert !calls.any(it.to == 'str' && it.provenance != .undeclared)
+}
+
+// `arr.map(fn (s int) string {...}).str()` in a match arm of `[]int`: no `str` edge is left unresolved (the name fallback can't pass by accident, see the competing `str` methods).
+fn test_a_match_arm_on_an_array_types_the_variable_and_map_returns_its_closure_type() {
+	g := graph_of({
+		'lib/other/other.v': 'module other
+
+pub struct Note {
+	text string
+}
+
+pub fn (n Note) str() string {
+	return n.text
+}
+
+'
+		'lib/tests/arr.v': 'module tests
+
+import other
+
+type Arr = []int | []string
+
+fn test_match_with_array_map_in_branches() string {
+	arr := Arr([0, 1])
+	ret := match arr {
+		[]int {
+			arr.map(fn (s int) string {
+				return s.str()
+			}).str()
+		}
+		else {
+			""
+		}
+	}
+	return ret
+}
+
+fn competitor() string {
+	n := other.Note{}
+	return n.str()
+}
+
+pub struct ProbeA {
+}
+
+pub fn (p ProbeA) str() string {
+	return ""
+}
+
+pub struct ProbeB {
+}
+
+pub fn (p ProbeB) str() string {
+	return ""
+}
+
+'
+	})
+	calls := g.edges.filter(it.kind == .calls && it.from == 'lib.tests.test_match_with_array_map_in_branches')
+	assert !calls.any(it.to == 'str' && it.provenance != .undeclared)
+}
+
+// `back.into_object[Integer]()!.value.str()`: no `str` edge is left unresolved (the name fallback can't pass by accident, see the competing `str` methods).
+fn test_an_explicit_type_argument_of_a_method_on_an_interface_names_its_own_type_parameter() {
+	g := graph_of({
+		'lib/asn1/element.v': 'module asn1
+
+import other
+
+pub struct Integer {
+pub:
+	value i64
+}
+
+pub struct Element {
+}
+
+pub fn decode(bytes []u8) !Element {
+	return Element{}
+}
+
+pub fn (el Element) into_object[T]() !T {
+	return T{}
+}
+
+fn competitor() string {
+	n := other.Note{}
+	return n.str()
+}
+'
+		'lib/asn1/integer_test.v': 'module asn1
+
+fn test_negative_number() ! {
+	back := decode([]u8{})!
+	back_value := back.into_object[Integer]()!
+	assert back_value.value.str() == ""
+}
+
+pub struct ProbeA {
+}
+
+pub fn (p ProbeA) str() string {
+	return ""
+}
+
+pub struct ProbeB {
+}
+
+pub fn (p ProbeB) str() string {
+	return ""
+}
+
+'
+		'lib/other/other.v': 'module other
+
+pub struct Note {
+	text string
+}
+
+pub fn (n Note) str() string {
+	return n.text
+}
+
+'
+	})
+	calls := g.edges.filter(it.kind == .calls && it.from == 'lib.asn1.test_negative_number')
+	assert !calls.any(it.to == 'str' && it.provenance != .undeclared)
+	assert calls.any(it.to == 'lib.asn1.Element.into_object')
+}
+
+// `toml_doc.reflect[User]().birthday.str()`, with each file's FileResult through the batch protocol the way a parallel worker's output is, before its symbols and edges join the graph
+fn test_a_method_type_parameter_survives_the_batch_protocol() {
+	files := {
+		'lib/other/other.v': 'module other
+
+pub struct Note {
+	text string
+}
+
+pub fn (n Note) str() string {
+	return n.text
+}
+
+'
+		'lib/tests/reflect_test.v': 'module tests
+
+import toml
+
+struct User {
+	birthday toml.Date
+}
+
+fn test_reflect() {
+	toml_doc := toml.parse_text("") or { panic(err) }
+	mut user := toml_doc.reflect[User]()
+	assert user.birthday.str() == ""
+}
+
+pub struct ProbeA {
+}
+
+pub fn (p ProbeA) str() string {
+	return ""
+}
+
+pub struct ProbeB {
+}
+
+pub fn (p ProbeB) str() string {
+	return ""
+}
+
+'
+		'lib/toml/toml.v': 'module toml
+
+import other
+
+pub struct Doc {
+}
+
+pub fn parse_text(text string) !Doc {
+	return Doc{}
+}
+
+pub fn (d Doc) reflect[T]() T {
+	return T{}
+}
+
+pub struct Date {
+}
+
+pub fn (d Date) str() string {
+	return ""
+}
+
+fn competitor() string {
+	n := other.Note{}
+	return n.str()
+}
+'
+	}
+	mut g := Graph{}
+	for rel, src in files {
+		fr := decode_file_result(encode_file_result(extract_v_text_result(src, rel)))
+		g.symbols << fr.symbols
+		g.edges << fr.edges
+	}
+	resolve_edges(mut g)
+	calls := g.edges.filter(it.kind == .calls && it.from == 'lib.tests.test_reflect')
+	assert !calls.any(it.to == 'str' && it.provenance != .undeclared)
+	assert calls.any(it.to == 'lib.toml.Date.str')
+}
+
 fn test_a_primitive_without_a_str_is_undeclared_and_shifts_keep_its_type() {
 	g := graph_of({
 		'lib/lib.v': 'module lib
