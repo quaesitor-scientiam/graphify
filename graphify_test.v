@@ -6144,6 +6144,188 @@ fn pick(flag bool, n int, name string) bool {
 	assert calls.any(it.to == 'vlib.builtin.string.contains')
 }
 
+// `value.str()` in `for _, value in entries`, where `entries := { 'a': n }` holds a variable `n` of `Item`: a map literal whose entries name no type takes the type of its key and of the first value that has one, so `Item.str` is the method called and no `str` edge is left unresolved (the name fallback can't pass by accident, see the competing `str` methods).
+fn test_a_map_literal_with_a_variable_value_takes_the_values_type() {
+	g := graph_of({
+		'lib/other/other.v': 'module other
+
+pub struct Note {
+	text string
+}
+
+pub fn (n Note) str() string {
+	return n.text
+}
+
+'
+		'lib/tests/map_literal_test.v': 'module tests
+
+import other
+
+pub struct Item {
+}
+
+pub fn (i Item) str() string {
+	return ""
+}
+
+fn walk(n Item) []string {
+	entries := { \'a\': n }
+	mut out := []string{}
+	for _, value in entries {
+		out << value.str()
+	}
+	return out
+}
+
+fn competitor() string {
+	n := other.Note{}
+	return n.str()
+}
+
+pub struct ProbeA {
+}
+
+pub fn (p ProbeA) str() string {
+	return ""
+}
+
+pub struct ProbeB {
+}
+
+pub fn (p ProbeB) str() string {
+	return ""
+}
+
+'
+	})
+	calls := g.edges.filter(it.kind == .calls && it.from == 'lib.tests.walk')
+	assert !calls.any(it.to == 'str' && it.provenance != .undeclared)
+	assert calls.any(it.to == 'lib.tests.Item.str')
+}
+
+// `value.str()` in `for _, value in entries`, where `entries := { 'a': [Item{}], 'b': [] }` has an empty array as its second value: the empty array names no type, so the map takes its type from the first value that has one, `[]Item`, and the loop's value is that array, whose elements are `Item`s (no `str` edge is left unresolved; see the competing `str` methods).
+fn test_a_map_literal_with_an_untyped_empty_array_takes_the_type_of_the_others() {
+	g := graph_of({
+		'lib/other/other.v': 'module other
+
+pub struct Note {
+	text string
+}
+
+pub fn (n Note) str() string {
+	return n.text
+}
+
+'
+		'lib/tests/empty_array_test.v': 'module tests
+
+import other
+
+pub struct Item {
+}
+
+pub fn (i Item) str() string {
+	return ""
+}
+
+fn walk() []string {
+	entries := { \'a\': [Item{}], \'b\': [] }
+	mut out := []string{}
+	for _, values in entries {
+		for value in values {
+			out << value.str()
+		}
+	}
+	return out
+}
+
+fn competitor() string {
+	n := other.Note{}
+	return n.str()
+}
+
+pub struct ProbeA {
+}
+
+pub fn (p ProbeA) str() string {
+	return ""
+}
+
+pub struct ProbeB {
+}
+
+pub fn (p ProbeB) str() string {
+	return ""
+}
+
+'
+	})
+	calls := g.edges.filter(it.kind == .calls && it.from == 'lib.tests.walk')
+	assert !calls.any(it.to == 'str' && it.provenance != .undeclared)
+	assert calls.any(it.to == 'lib.tests.Item.str')
+}
+
+// `value.str()` in `for _, value in m`, where `m := { -1: Item{} }` has a negative key: `-1` is an int, so the map is `map[int]Item` and the value is an `Item` (no `str` edge is left unresolved; see the competing `str` methods).
+fn test_a_map_literal_with_a_negative_key_is_typed_by_its_number() {
+	g := graph_of({
+		'lib/other/other.v': 'module other
+
+pub struct Note {
+	text string
+}
+
+pub fn (n Note) str() string {
+	return n.text
+}
+
+'
+		'lib/tests/negative_key_test.v': 'module tests
+
+import other
+
+pub struct Item {
+}
+
+pub fn (i Item) str() string {
+	return ""
+}
+
+fn walk() []string {
+	m := { -1: Item{} }
+	mut out := []string{}
+	for _, value in m {
+		out << value.str()
+	}
+	return out
+}
+
+fn competitor() string {
+	n := other.Note{}
+	return n.str()
+}
+
+pub struct ProbeA {
+}
+
+pub fn (p ProbeA) str() string {
+	return ""
+}
+
+pub struct ProbeB {
+}
+
+pub fn (p ProbeB) str() string {
+	return ""
+}
+
+'
+	})
+	calls := g.edges.filter(it.kind == .calls && it.from == 'lib.tests.walk')
+	assert !calls.any(it.to == 'str' && it.provenance != .undeclared)
+	assert calls.any(it.to == 'lib.tests.Item.str')
+}
+
 fn test_a_primitive_without_a_str_is_undeclared_and_shifts_keep_its_type() {
 	g := graph_of({
 		'lib/lib.v': 'module lib

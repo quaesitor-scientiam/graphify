@@ -1863,6 +1863,12 @@ fn (f &V3File) recipe(id flat.NodeId, ctx V3CallCtx) string {
 			if t := literal_map_type(f, kids) {
 				return 't:' + t
 			}
+			// with a value that names no type (a variable, an empty array), the key's
+			// type and the first value's that has one are the map's: V gives every entry
+			// the same types
+			if r := map_entries_recipe(f, kids, ctx) {
+				return r
+			}
 		}
 		.comptime_if {
 			// `$if c { a } $else { b }` as a value, as vlib/builtin's max_int is: V keeps
@@ -2132,6 +2138,52 @@ fn literal_map_type(f &V3File, kids []flat.NodeId) ?string {
 	return 'map[${key}]${val}'
 }
 
+// map_entries_recipe is the recipe of a map literal that no entry-by-entry literal
+// type gives: the type of its first key that states one, and the type of its first
+// value that has a recipe or states one, the key and value of a map V types from
+// its entries.
+fn map_entries_recipe(f &V3File, kids []flat.NodeId, ctx V3CallCtx) ?string {
+	if kids.len < 2 || kids.len % 2 != 0 {
+		return none
+	}
+	mut key := ''
+	for i := 0; i < kids.len; i += 2 {
+		if k := stated_literal_type(f, kids[i]) {
+			key = k
+			break
+		}
+	}
+	if key == '' {
+		return none
+	}
+	for i := 1; i < kids.len; i += 2 {
+		r := f.recipe(kids[i], ctx)
+		if r != '' {
+			return r + recipe_sep + 'mapof:' + key
+		}
+	}
+	for i := 1; i < kids.len; i += 2 {
+		if v := stated_literal_type(f, kids[i]) {
+			return 't:' + v + recipe_sep + 'mapof:' + key
+		}
+	}
+	return none
+}
+
+// stated_literal_type is literal_type of an entry whose text states its type, but
+// not of a number: an untyped number takes the type of the entries beside it, so
+// it names none.
+fn stated_literal_type(f &V3File, id flat.NodeId) ?string {
+	if f.node(id).kind in [.int_literal, .float_literal, .prefix] {
+		return none
+	}
+	t := f.literal_type(id)
+	if t == '' {
+		return none
+	}
+	return t
+}
+
 // literal_type is the type of an expression whose text states it: a literal,
 // a cast or a struct or map written with its type, a nested untyped literal
 // map or array, a type conversion `Any(1)` or `json.Any(1)`, and a shift or
@@ -2165,6 +2217,12 @@ fn (f &V3File) literal_type(id flat.NodeId) string {
 			if kids.len == 1 && f.node(kids[0]).kind == .ident && f.node(kids[0]).value.len > 0
 				&& f.node(kids[0]).value[0].is_capital() && n.value.len > 0 && !n.value[0].is_capital() {
 				return f.type_text(f.node(kids[0]).value)
+			}
+		}
+		.prefix {
+			// `-1` and `+1.5` have the type of their number
+			if kids.len == 1 && n.op in [.minus, .plus] {
+				return f.literal_type(kids[0])
 			}
 		}
 		.cast_expr, .struct_init {
