@@ -147,12 +147,14 @@ resolves to `u128.str`, and `str()` on a primitive that has no declaration (`u12
 in builds that lack one) is undeclared. On the V compiler's tree: unresolved calls
 913 -> 900 (0.35%).
 
-Two families are harder than the rest. A declaration that exists once per platform
-(`open_tool_cache_entry_dir` in `toolcache_nix.c.v` and `_windows.c.v`) can't be
-given one call edge that is right on every OS, and the graph must be identical on
-every OS, so its callers stay unresolved even when their receiver's type is known.
-And a C function's result (`C.PQerrorMessage(...)`) has the C type, which the
-graph doesn't name.
+A declaration that exists once per platform (`open_tool_cache_entry_dir` in
+`toolcache_nix.c.v` and `_windows.c.v`) can't be given one call edge that is right
+on every OS, and the graph must be identical on every OS. A plain call to one now
+links to every platform's version (`platform_variants`), each a real declaration,
+so a change to any of them shows its caller. Method calls to such a declaration
+stay unresolved, since the receiver's type isn't checked: 23 calls on the V
+compiler's tree. And a C function's result (`C.PQerrorMessage(...)`) has the C
+type, which the graph doesn't name.
 
 What remains is a long tail: values V infers in other ways (a comptime
 `for f in T.fields` variable, a receiver from a call with a computed argument),

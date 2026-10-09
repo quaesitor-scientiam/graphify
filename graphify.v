@@ -891,6 +891,22 @@ fn resolve_edges(mut g Graph) {
 					continue
 				}
 			}
+			if variants := platform_variants(e, by_name, site_of) {
+				for v in variants {
+					key := '${e.from}\x00${v.id}'
+					if key !in seen_call {
+						seen_call[key] = resolved.len
+						resolved << Edge{
+							from:       e.from
+							to:         v.id
+							kind:       .calls
+							is_method:  e.is_method
+							provenance: .inferred
+						}
+					}
+				}
+				continue
+			}
 		}
 		if e.kind == .embeds || e.kind == .references {
 			// Same refusal as above, generalized to type ids: a struct named
@@ -939,6 +955,56 @@ fn caller_site(e Edge, site_of map[string]DeclSite) ?DeclSite {
 		}
 	}
 	return none
+}
+
+// platform_variants returns the declarations a call reaches when the callee
+// is one function declared once per platform in the caller's own module, such
+// as `open_dir` in `dir_nix.c.v` and `dir_windows.c.v`. A call can't say which
+// platform runs it, and the graph must be the same on every platform, so the
+// call links to every variant: each is a real declaration, and the call shows
+// up for a change to any of them. Only renamed variants reach this point (see
+// disambiguate_ids); variants sharing one id already resolve through only_id.
+fn platform_variants(e Edge, by_name map[string][]CallCand, site_of map[string]DeclSite) ?[]CallCand {
+	// Only plain calls: a method call's receiver type decides which declaration
+	// it means, and this doesn't check it.
+	if e.is_method {
+		return none
+	}
+	cands := by_name[e.to] or { return none }
+	caller := caller_site(e, site_of) or { return none }
+	mut local := []CallCand{}
+	for c in cands {
+		if c.mod == caller.mod && !c.is_method {
+			local << c
+		}
+	}
+	if local.len < 2 {
+		return none
+	}
+	base := local[0].id.split('@')[0]
+	for c in local {
+		if c.id.split('@')[0] != base || !is_platform_file(c.file) {
+			return none
+		}
+	}
+	return local
+}
+
+// is_platform_file reports whether a file holds one platform's version of a
+// declaration: an OS suffix on the file name, such as `_nix` or `_windows`, or
+// the `.js.v` JavaScript backend.
+fn is_platform_file(file string) bool {
+	name := file.all_after_last('/')
+	if name.ends_with('.js.v') {
+		return true
+	}
+	stem := name.all_before('.')
+	for suffix in ['_nix', '_windows', '_linux', '_darwin', '_macos', '_android', '_freebsd', '_openbsd', '_netbsd', '_solaris', '_ios', '_wasm', '_haiku', '_serenity'] {
+		if stem.ends_with(suffix) {
+			return true
+		}
+	}
+	return false
 }
 
 // resolve_callee picks the one declaration a call edge refers to, or none when

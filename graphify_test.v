@@ -4538,6 +4538,40 @@ fn main() {
 	assert !g.edges.any(it.kind == .calls && it.from == 'two.main' && it.to == 'two.helper_two')
 }
 
+fn test_a_call_to_a_per_platform_function_reaches_every_variant() {
+	// `open_dir` is declared once per platform in the caller's program. The call
+	// can't say which platform runs it, and the graph is the same on every one,
+	// so it links to both variants. The renaming step is what makes them distinct.
+	files := {
+		'prog/main.v':          'module main
+
+fn main() {
+	open_dir()
+}
+'
+		'prog/dir_nix.c.v':     'module main
+
+fn open_dir() {
+}
+'
+		'prog/dir_windows.c.v': 'module main
+
+fn open_dir() {
+}
+'
+	}
+	mut g := Graph{}
+	for rel, src in files {
+		syms, edges := extract_v_text(src, rel)
+		g.symbols << syms
+		g.edges << edges
+	}
+	disambiguate_ids(mut g)
+	resolve_edges(mut g)
+	targets := g.edges.filter(it.kind == .calls && it.from == 'prog.main').map(it.to)
+	assert targets.sorted() == ['prog.open_dir@prog/dir_nix.c.v', 'prog.open_dir@prog/dir_windows.c.v'], targets.str()
+}
+
 fn test_a_primitive_without_a_str_is_undeclared_and_shifts_keep_its_type() {
 	g := graph_of({
 		'lib/lib.v': 'module lib
