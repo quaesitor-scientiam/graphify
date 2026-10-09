@@ -178,6 +178,8 @@ A map literal's entries are typed by `literal_type` (backend_v.v), which replace
 
 A type parameter `T` is an unknown type to the graph, so a method on a value typed `T` finds nothing and falls to name matching. Inside `$if T is X { ... }`, V compiles the block only when `T` is `X`, so the block's `T` is `X` (`retyped`, in backend_v.v, and the `ct:` recipe step, read by `comptime_type`, in infer.v). The same holds for a variable of type `T` in `$if v is X`. An interface is not narrowed (`iface_ids`), since `T is Shape` holds for every type implementing `Shape`, and the call is not `Shape.str`. What stays unresolved in this group is a generic receiver with no check, which has one type per instantiation, and a `T` whose check is `$int` or another kind of type, which names no one type. On the V compiler's tree that resolves 6 calls more (609 → 603), 4 of them `str()`, and none is newly unresolved.
 
+A value that is a `$if c { a } $else { b }` (vlib/builtin's `max_int`, and a local initialized from one) has the type its branches share. `recipe` takes the common recipe of the branches, and gives none when they differ or when a branch has no value, since V keeps one branch and the graph can't tell which. On the V compiler's tree that resolves 3 calls more (603 → 600), 2 of them the `str()` calls on `max_int`.
+
 What remains is a long tail: values V infers in other ways (a comptime
 `for f in T.fields` variable, a receiver from a call with a computed argument),
 a sum type's shared field, function values the walk can't see are variables,
