@@ -380,10 +380,15 @@ fn (inf &Infer) follow_steps(e Edge, depth int) ?InferredType {
 			}
 			if found := inf.method_on(t, name, e.file, 0) {
 				mut ret := inf.returns(found)?
-				// `xs.map(...)` with no stated result is an array of a type the graph doesn't
-				// know, which builtin's `array` stands for: method_on finds the method by its name
-				if name == 'map' && t.text.starts_with('[') && ret.text == 'array' {
-					ret.text = '[]'
+				// builtin's untyped `array` result, which hides the element type: `xs.map(...)`
+				// with no stated result has one the graph doesn't know (`[]`), and `xs.repeat(n)`
+				// has xs's own
+				if t.text.starts_with('[') && ret.text == 'array' {
+					if name == 'map' {
+						ret.text = '[]'
+					} else if name == 'repeat' {
+						ret.text = t.text
+					}
 				}
 				// `Queue[int].pop()` returns the `T` of `Queue[T]`, here `int`
 				owner := found.all_before_last('.').all_after_last('.').all_before('[')

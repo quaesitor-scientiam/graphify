@@ -4813,6 +4813,42 @@ fn names(items []Item) string {
 	assert calls.any(it.to == 'lib.builtin.[]string.join' && it.provenance == .inferred), g.edges.map(it.to).str()
 }
 
+// `bs.repeat(2).hex()`: builtin's `repeat` returns an untyped `array`, which hides the element type, but a repeat keeps its elements, so the result is a `[]u8` and `hex` is that type's. A second `hex` the file imports keeps the name alone from deciding it.
+fn test_a_repeat_keeps_the_element_type_of_the_array_it_repeats() {
+	g := graph_of({
+		'lib/builtin/builtin.v': 'module builtin
+
+pub struct array {}
+
+pub fn (a array) repeat(count int) array {
+	return array{}
+}
+
+pub fn (b []u8) hex() string {
+	return \'\'
+}
+'
+		'lib/other/other.v': 'module other
+
+pub struct Enc {}
+
+pub fn (e Enc) hex() string {
+	return \'\'
+}
+'
+		'lib/tests/t_test.v': 'module tests
+
+import lib.other
+
+fn digits(bs []u8) string {
+	return bs.repeat(2).hex()
+}
+'
+	})
+	calls := g.edges.filter(it.kind == .calls && it.from == 'lib.tests.digits')
+	assert calls.any(it.to == 'lib.builtin.[]u8.hex' && it.provenance == .inferred), g.edges.map(it.to).str()
+}
+
 fn test_a_per_platform_call_returns_the_type_its_variants_share() {
 	// `open_it` is declared once per platform in a standalone program, so its
 	// variants are renamed apart. They return the same type, so the receiver is typed.
