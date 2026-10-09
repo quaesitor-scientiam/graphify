@@ -173,6 +173,8 @@ A generic type argument written out (`json.decode[[]map[string]json.Any](s)`) is
 
 A directory whose `alias.v` holds `@[alias: '@VMODROOT/<path>']` stands for the module at that path, as V's module aliasing does: `import x.json2` is `vlib/json2`. `alias_dir_target` (in backend_common.v) reads the target, and `resolve_import` names the module by it, so the module's calls and types resolve. The import keeps the path as written (`from` in its signature, and `f.imports`), since calls are spelled `x.json2.decode`. On the V compiler's tree that resolves 21 more calls, the 15 of `x.json2.decode` and `x.json2.encode` among them, and none is newly unresolved.
 
+Inside `$if field.typ is T` (or `$if method.return_type is T`), the selector `x.$(field.name)` (or `x.$method()`) has the type T. `comptime_pin` reads the condition as the type it fixes, the walk carries it into the block in `pins` (set by the `.comptime_if` case), and the recipe reads it (`comptime_field_pin` and the method form). Unpinned, a field's type differs from field to field, so the call is left unresolved: a `$map` condition, a `!is`, or a compound one fixes nothing. On the V compiler's tree that resolves 5 calls more (692 → 687), 4 of them `str()`, and one `str()` on a struct that declares none is undeclared. What stays unresolved in this group is a generic receiver (`encode_struct[T]`), a field whose type differs by field with no check, and a method whose return type is the same for every method but not written as a check.
+
 What remains is a long tail: values V infers in other ways (a comptime
 `for f in T.fields` variable, a receiver from a call with a computed argument),
 a sum type's shared field, function values the walk can't see are variables,

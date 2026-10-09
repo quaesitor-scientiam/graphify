@@ -1141,6 +1141,9 @@ mut:
 	// fallbacks is the declared type of each variable narrowed by a type
 	// check (see narrowed), where its narrowed type lacks a method
 	fallbacks map[string]string
+	// pins is the type recipe that a `$if` on a `$for` loop variable fixes
+	// its selector to, keyed as comptime_pin keys it (see comptime_pin)
+	pins map[string]string
 }
 
 // TypeCheck is a variable narrowed to a type by `name is typ`, as written.
@@ -1209,6 +1212,16 @@ fn (ctx V3CallCtx) with_vars(names []string, recipes []string) V3CallCtx {
 	mut vars := ctx.vars.clone()
 	mut locals := ctx.locals.clone()
 	mut fallbacks := ctx.fallbacks.clone()
+	// pins are rare (a `$if` on a loop variable), so they are copied only when some
+	// are set, and a name declared here loses any pin it had
+	mut pins := ctx.pins
+	if pins.len > 0 {
+		pins = pins.clone()
+		for name in names {
+			pins.delete('field:' + name)
+			pins.delete('ret:' + name)
+		}
+	}
 	for i, name in names {
 		locals.delete(name)
 		fallbacks.delete(name)
@@ -1219,7 +1232,73 @@ fn (ctx V3CallCtx) with_vars(names []string, recipes []string) V3CallCtx {
 		locals:    locals
 		vars:      vars
 		fallbacks: fallbacks
+		pins:      pins
 	}
+}
+
+// comptime_pin reads the condition of a `$if` as the type it fixes a `$for`
+// loop variable's selector to. `field.typ is int` fixes `x.$(field.name)` to
+// an int in its block, and `method.return_type is string` fixes `x.$method()`
+// to a string. It returns the key that the selector looks up (see
+// comptime_field_pin and comptime_ret_pin) and the recipe of the type. A test
+// that names no one type (`$map`, `!is`, a compound condition) fixes nothing.
+fn comptime_pin(cond string) ?(string, string) {
+	idx := cond.index(' is ') or { return none }
+	lhs := cond[..idx].trim_space()
+	rhs := cond[idx + 4..].trim_space()
+	if rhs == '' || rhs.starts_with('$') || rhs.contains(' ') || is_generic_param(rhs) {
+		return none
+	}
+	mut key := ''
+	if lhs.ends_with('.typ') {
+		key = 'field:' + lhs[..lhs.len - 4]
+	} else if lhs.ends_with('.return_type') {
+		key = 'ret:' + lhs[..lhs.len - 12]
+	} else {
+		return none
+	}
+	name := key.all_after(':')
+	if name == '' || !name.bytes().all(it.is_alnum() || it == `_`) {
+		return none
+	}
+	return key, 't:' + rhs
+}
+
+// comptime_field_pin is the recipe of `x.$(field.name)`, the selector `sel`
+// whose inner name is `field.name`, when a `$if field.typ is T` around it
+// fixes that field to T. The field is the one the loop walks, so its type is T
+// wherever the `$if` holds.
+fn (f &V3File) comptime_field_pin(sel flat.NodeId, ctx V3CallCtx) string {
+	ks := f.kids(sel)
+	if ks.len != 2 {
+		return ''
+	}
+	inner := f.node(ks[1])
+	ik := f.kids(ks[1])
+	if inner.kind != .selector || inner.value != 'name' || ik.len != 1 {
+		return ''
+	}
+	if f.node(ik[0]).kind != .ident {
+		return ''
+	}
+	return ctx.pins['field:' + f.node(ik[0]).value] or { '' }
+}
+
+// is_dollar_selector reports whether `id` is a comptime selector, `x.$(...)` or
+// `x.$method`, which the parser writes as a selector named `$` on `x`.
+fn (f &V3File) is_dollar_selector(id flat.NodeId) bool {
+	return f.node(id).kind == .selector && f.node(id).value == '$' && f.kids(id).len == 2
+}
+
+// comptime_ret_pin is the recipe of `x.$method()`, the selector `sel` whose
+// inner name is the method loop's variable, when a `$if method.return_type is T`
+// around it fixes that method's return type to T.
+fn (f &V3File) comptime_ret_pin(sel flat.NodeId, ctx V3CallCtx) string {
+	ks := f.kids(sel)
+	if ks.len != 2 || f.node(ks[1]).kind != .ident {
+		return ''
+	}
+	return ctx.pins['ret:' + f.node(ks[1]).value] or { '' }
 }
 
 // walk_initializer records the calls in a declaration's initializer as calls
@@ -1287,6 +1366,20 @@ fn (mut f V3File) walk(id flat.NodeId, ctx V3CallCtx, mut edges []Edge, mut seen
 			if parts.len == 2 && parts[1] == 'fields' {
 				f.walk_list(kids, ctx.with_vars([parts[0]], ['t:builtin.FieldData']), mut edges, mut seen)
 				return ctx
+			}
+		}
+		.comptime_if {
+			// `$if field.typ is int { x.$(field.name) }` in a field loop: the
+			// block's selector is an int (see comptime_pin). The branches after
+			// it keep the context they had.
+			if kids.len > 0 {
+				if key, recipe := comptime_pin(n.value) {
+					mut pins := ctx.pins.clone()
+					pins[key] = recipe
+					f.walk(kids[0], V3CallCtx{ ...ctx, pins: pins }, mut edges, mut seen)
+					f.walk_list(kids[1..], ctx, mut edges, mut seen)
+					return ctx
+				}
 			}
 		}
 		.for_in_stmt {
@@ -1625,6 +1718,10 @@ fn (f &V3File) recipe(id flat.NodeId, ctx V3CallCtx) string {
 			}
 		}
 		.selector {
+			if n.value == '$' && kids.len == 2 {
+				// `x.$(field.name)` has the type an enclosing `$if` fixes its field to
+				return f.comptime_field_pin(id, ctx)
+			}
 			if n.value in ['len', 'cap'] {
 				return 't:int'
 			}
@@ -1673,6 +1770,13 @@ fn (f &V3File) recipe(id flat.NodeId, ctx V3CallCtx) string {
 					}
 				}
 				return rec
+			}
+			// `x.$method()` under `$if method.return_type is T` returns a T
+			if f.is_dollar_selector(kids[0]) {
+				ret := f.comptime_ret_pin(kids[0], ctx)
+				if ret != '' {
+					return ret
+				}
 			}
 			r := f.recipe(target, ctx)
 			if r != '' {
