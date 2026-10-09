@@ -65,6 +65,9 @@ pub mut:
 	// generic call's type arguments are matched to. Extraction-only, like
 	// Edge.recv_recipe: not written to graph.json.
 	recipe string @[json: '-']
+	// tparams is a method's own type parameters, `T` in `fn (d Doc) reflect[T]() T`
+	// (its recipe holds its receiver's). Extraction-only, like recipe.
+	tparams string @[json: '-']
 }
 
 // Edge is one relationship between two symbols (by id).

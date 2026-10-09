@@ -32,6 +32,7 @@ struct Infer {
 	enum_ids     map[string]bool     // ids of enums
 	dynamic_ids  map[string]bool     // ids of sum types and interfaces
 	generics_of  map[string][]string // free function id -> its type parameters
+	tparams_of   map[string][]string // method id -> its own type parameters
 	iface_ids    map[string]bool     // ids of interfaces
 mut:
 	memo map[string]InferredType
@@ -257,6 +258,33 @@ fn (mut inf Infer) fallback_receiver(e Edge) ?InferredType {
 	return inf.follow(Edge{ ...e, recv_recipe: e.recv_recipe[idx + 1..] })
 }
 
+// unalias is `t` with the alias it names replaced by the type the alias names,
+// read in the alias's own scope, following a chain of aliases: `Sources` of
+// `type Sources = [2]Source` is `[2]Source`. A sum type is no alias here.
+fn (inf &Infer) unalias(t InferredType, file string) InferredType {
+	mut cur := t
+	for _ in 0 .. embed_depth {
+		text := bare_type(cur.text)
+		if !is_named_type(text) {
+			break
+		}
+		named := strip_generic_args(text)
+		short := named.all_after_last('.')
+		qual := if named.contains('.') { named.all_before_last('.') } else { '' }
+		decl := inf.find_type(short, qual, cur, file) or { break }
+		target := inf.alias_of[decl.id] or { break }
+		if bare_type(target) == text {
+			break
+		}
+		cur = InferredType{
+			text: target
+			mod:  decl.mod
+			file: decl.file
+		}
+	}
+	return cur
+}
+
 fn (inf &Infer) follow_steps(e Edge, depth int) ?InferredType {
 	steps := e.recv_recipe.split(recipe_sep)
 	mut t := InferredType{}
@@ -296,8 +324,9 @@ fn (inf &Infer) follow_steps(e Edge, depth int) ?InferredType {
 	} else {
 		return none
 	}
-	for step in steps[1..] {
-		if step.starts_with('p:') {
+	rest := steps[1..]
+	for si, step in rest {
+		if step.starts_with('p:') || step.starts_with('mapto:') {
 			continue
 		}
 		if step == 'th' {
@@ -317,6 +346,16 @@ fn (inf &Infer) follow_steps(e Edge, depth int) ?InferredType {
 					mod:  t.mod
 					file: t.file
 				}
+				continue
+			}
+			// a method the alias itself, or the type it names, has comes first; an alias
+			// of an array or map (`type Sources = [2]Source`) otherwise has its methods
+			if (inf.method_on(t, name, e.file, 0) or { '' }) == '' {
+				t = inf.unalias(t, e.file)
+			}
+			if name == 'map' && t.text.starts_with('[') && si + 1 < rest.len
+				&& rest[si + 1].starts_with('mapto:') {
+				t.text = '[]' + rest[si + 1][6..]
 				continue
 			}
 			if t.text.starts_with('[') && name in array_same_type {
@@ -339,6 +378,20 @@ fn (inf &Infer) follow_steps(e Edge, depth int) ?InferredType {
 				// `Queue[int].pop()` returns the `T` of `Queue[T]`, here `int`
 				owner := found.all_before_last('.').all_after_last('.').all_before('[')
 				ret.text = owner_args(ret.text, t, owner, inf.generics_of[found] or { []string{} })
+				// `x.reflect[User]()` returns the `T` of `reflect[T]`, here `User`: the
+				// `p:` steps right after this one are the type arguments, in order
+				mut targs := []string{}
+				for j := si + 1; j < rest.len; j++ {
+					if !rest[j].starts_with('p:') {
+						break
+					}
+					targs << rest[j][2..]
+				}
+				for i, param in inf.tparams_of[found] or { []string{} } {
+					if i < targs.len && targs[i] != '' {
+						ret.text = subst_word(ret.text, param, targs[i])
+					}
+				}
 				t = ret
 			} else {
 				// V writes `str()` for a type that declares none, and it returns a string
@@ -357,6 +410,8 @@ fn (inf &Infer) follow_steps(e Edge, depth int) ?InferredType {
 			}
 			t = inf.field_of(t, step[2..], e.file, 0)?
 		} else if step == '[]' {
+			// an alias of an array, `type Sources = [2]Source`, has its element type
+			t = inf.unalias(t, e.file)
 			t.text = elem_type(t.text)?
 		} else if step == 'R' {
 			// the return type of a function type, `fn (int) Doc`
@@ -365,6 +420,7 @@ fn (inf &Infer) follow_steps(e Edge, depth int) ?InferredType {
 			// `x >>> n` is unsigned, as wide as x
 			t.text = unsigned_of(t.text)?
 		} else if step == 'k' {
+			t = inf.unalias(t, e.file)
 			if t.text.starts_with('map[') {
 				k, _ := map_parts(t.text)?
 				t.text = k

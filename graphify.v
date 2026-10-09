@@ -822,6 +822,7 @@ fn resolve_edges(mut g Graph) {
 	mut dynamic_ids := map[string]bool{}
 	mut iface_ids := map[string]bool{}
 	mut generics_of := map[string][]string{}
+	mut tparams_of := map[string][]string{}
 	for e in g.edges {
 		if e.kind == .embeds {
 			embeds_of[e.from] << e
@@ -839,6 +840,9 @@ fn resolve_edges(mut g Graph) {
 				fn_names[s.id] = s.name
 				if s.recipe != '' {
 					generics_of[s.id] = s.recipe.split(',')
+				}
+				if s.tparams != '' {
+					tparams_of[s.id] = s.tparams.split(',')
 				}
 			}
 			.field {
@@ -885,6 +889,7 @@ fn resolve_edges(mut g Graph) {
 		dynamic_ids:  dynamic_ids
 		iface_ids:    iface_ids
 		generics_of:  generics_of
+		tparams_of:   tparams_of
 	}
 	mut resolved := []Edge{cap: g.edges.len}
 	// variants_of maps each platform copy of a function or method to all of its

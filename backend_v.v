@@ -137,6 +137,26 @@ fn extract_v3(path string, src string, rel string, real_path string) FileResult 
 	}
 }
 
+// method_tparams reads the type parameters of the method `name` declared on
+// `line`, `fn (d Doc) reflect[T]() T` -> [T]; V3's parser doesn't keep them.
+fn (f &V3File) method_tparams(line int, name string) []string {
+	if line < 1 || line > f.lines.len {
+		return []string{}
+	}
+	text := f.lines[line - 1]
+	at := text.index(' ${name}[') or { return []string{} }
+	rest := text[at + name.len + 2..]
+	end := rest.index(']') or { return []string{} }
+	mut out := []string{}
+	for p in rest[..end].split(',') {
+		word := p.trim_space().all_before(' ')
+		if word != '' {
+			out << word
+		}
+	}
+	return out
+}
+
 // generic_params reads the type parameters of the free function `name`
 // declared on `line`, `fn fold[T, R](...)` -> [T, R]. V3's parser doesn't keep
 // them, but the header line does; a constraint (`T Number`) is dropped.
@@ -760,6 +780,7 @@ fn (mut f V3File) extract_fn(id flat.NodeId, mut syms []Symbol, mut edges []Edge
 		parent:    f.mod_id
 		doc:       doc_from(f.lines, line)
 		recipe:    if is_method { split_type_args(recv_typ).join(',') } else { f.generic_params(line, 'fn ${name}').join(',') }
+		tparams:   if is_method { f.method_tparams(line, name).join(',') } else { '' }
 	})
 	mut rseen := map[string]bool{}
 	if is_method {
@@ -1541,9 +1562,8 @@ fn (mut f V3File) walk(id flat.NodeId, ctx V3CallCtx, mut edges []Edge, mut seen
 					branch := f.kids(k)
 					mut body := ctx
 					if subject.kind == .ident && f.node(k).value == '1' && branch.len >= 2 {
-						pat := f.node(branch[0])
-						if pat.kind == .ident && pat.value.len > 0 && pat.value[0].is_capital() {
-							body = ctx.narrowed(subject.value, 't:' + f.type_text(pat.value))
+						if pt := f.match_pattern_type(branch[0]) {
+							body = ctx.narrowed(subject.value, 't:' + f.type_text(pt))
 						}
 					}
 					f.walk_list(branch, body, mut edges, mut seen)
@@ -1983,7 +2003,25 @@ fn (f &V3File) recipe(id flat.NodeId, ctx V3CallCtx) string {
 			}
 			r := f.recipe(target, ctx)
 			if r != '' {
-				return r + recipe_sep + 'm:' + name
+				mut rec := r + recipe_sep + 'm:' + name
+				// `x.reflect[User]()`: the type arguments, `p:` steps in order, that
+				// follow_steps substitutes for the method's own type parameters
+				if f.node(kids[0]).kind == .index {
+					ik := f.kids(kids[0])
+					if ik.len > 1 {
+						for ta in ik[1..] {
+							arg := f.type_arg(ta) or { '' }
+							rec += recipe_sep + 'p:' + arg
+						}
+					}
+				}
+				// `xs.map(fn (x T) R { ... })`: the closure's written return type, R,
+				// is the element type of the array it makes
+				if name == 'map' && kids.len == 2 && f.node(kids[1]).kind == .fn_literal
+					&& f.node(kids[1]).typ != '' {
+					rec += recipe_sep + 'mapto:' + f.type_text(f.node(kids[1]).typ)
+				}
+				return rec
 			}
 		}
 		.if_expr {
@@ -2020,6 +2058,34 @@ fn (f &V3File) recipe(id flat.NodeId, ctx V3CallCtx) string {
 		else {}
 	}
 	return ''
+}
+
+// match_pattern_type is the type a `match` branch's pattern names, which a subject
+// of a sum type takes in that branch: a type name, a primitive (`i64`), a module's
+// type (`toml.Doc`) or an array type (`[]int`). none for a value.
+fn (f &V3File) match_pattern_type(pat flat.NodeId) ?string {
+	n := f.node(pat)
+	kids := f.kids(pat)
+	match n.kind {
+		.ident {
+			if n.value in primitive_types || (n.value.len > 0 && n.value[0].is_capital()) {
+				return n.value
+			}
+		}
+		.selector {
+			if kids.len == 1 && f.node(kids[0]).kind == .ident && f.node(kids[0]).value in f.imports
+				&& n.value.len > 0 && n.value[0].is_capital() {
+				return '${f.node(kids[0]).value}.${n.value}'
+			}
+		}
+		.array_init {
+			if kids.len == 0 && n.typ.starts_with('[') {
+				return n.typ
+			}
+		}
+		else {}
+	}
+	return none
 }
 
 // last_value is the recipe of the value a block or match branch ends with.
