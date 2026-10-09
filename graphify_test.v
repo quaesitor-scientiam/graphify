@@ -4869,6 +4869,8 @@ pub fn (o Other) contains(x string) bool {
 '
 		'app/app.v': 'module app
 
+import vlib.lib
+
 fn walk[T]() bool {
 	mut ok := false
 	$for field in T.fields {
