@@ -1663,6 +1663,23 @@ fn (f &V3File) recipe(id flat.NodeId, ctx V3CallCtx) string {
 				if n.op == .not {
 					return 't:bool'
 				}
+				if n.op == .arrow {
+					// `<-c` receives an element of the channel `c`
+					r := f.recipe(kids[0], ctx)
+					if r != '' {
+						return r + recipe_sep + '[]'
+					}
+				}
+			}
+		}
+		.typeof_expr {
+			// `typeof(x)` is the name of x's type, a string
+			return 't:string'
+		}
+		.dump_expr {
+			// `dump(x)` prints x and has x's value
+			if kids.len == 1 {
+				return f.recipe(kids[0], ctx)
 			}
 		}
 		.struct_init, .cast_expr, .as_expr {
@@ -1727,6 +1744,15 @@ fn (f &V3File) recipe(id flat.NodeId, ctx V3CallCtx) string {
 			}
 			if kids.len == 1 {
 				t := f.node(kids[0])
+				if t.kind == .typeof_expr {
+					// the fields of `typeof(x)`: its name, index and indirections
+					match n.value {
+						'name' { return 't:string' }
+						'idx' { return 't:int' }
+						'indirections' { return 't:u8' }
+						else { return '' }
+					}
+				}
 				if t.kind == .ident && t.value in ['C', 'JS'] {
 					return ''
 				}
@@ -1801,7 +1827,7 @@ fn (f &V3File) recipe(id flat.NodeId, ctx V3CallCtx) string {
 			if n.op in [.eq, .ne, .lt, .gt, .le, .ge, .logical_and, .logical_or] {
 				return 't:bool'
 			}
-			if n.op in [.plus, .minus, .mul, .div, .mod, .amp, .pipe, .left_shift, .right_shift]
+			if n.op in [.plus, .minus, .mul, .div, .mod, .amp, .pipe, .xor, .left_shift, .right_shift]
 				&& kids.len > 0 {
 				return f.recipe(kids[0], ctx)
 			}
@@ -1813,8 +1839,8 @@ fn (f &V3File) recipe(id flat.NodeId, ctx V3CallCtx) string {
 
 // last_value is the recipe of the value a block or match branch ends with.
 // literal_map_type is the type of a map literal written without one, when
-// its keys are all one kind of literal and so are its values: `map[string]string`
-// for `{ 'name': 'Joe' }`.
+// its keys are all one type and so are its values: `map[string]string` for
+// `{ 'name': 'Joe' }`, `map[string]map[string]int` for a nested literal.
 fn literal_map_type(f &V3File, kids []flat.NodeId) ?string {
 	if kids.len == 0 || kids.len % 2 != 0 {
 		return none
@@ -1822,8 +1848,8 @@ fn literal_map_type(f &V3File, kids []flat.NodeId) ?string {
 	mut key := ''
 	mut val := ''
 	for i := 0; i < kids.len; i += 2 {
-		k := literal_type_name(f.node(kids[i]).kind)
-		v := literal_type_name(f.node(kids[i + 1]).kind)
+		k := f.literal_type(kids[i])
+		v := f.literal_type(kids[i + 1])
 		if k == '' || v == '' || (key != '' && k != key) || (val != '' && v != val) {
 			return none
 		}
@@ -1833,15 +1859,83 @@ fn literal_map_type(f &V3File, kids []flat.NodeId) ?string {
 	return 'map[${key}]${val}'
 }
 
-// literal_type_name is the type of a literal expression of this kind, or ''.
-fn literal_type_name(k flat.NodeKind) string {
-	return match k {
-		.string_literal, .string_interp { 'string' }
-		.int_literal { 'int' }
-		.bool_literal { 'bool' }
-		.float_literal { 'f64' }
-		else { '' }
+// literal_type is the type of an expression whose text states it: a literal,
+// a cast or a struct or map written with its type, a nested untyped literal
+// map or array, a type conversion `Any(1)` or `json.Any(1)`, and a shift or
+// arithmetic of one of these. '' when the text doesn't say (a variable, a
+// call of a function, an enum value).
+fn (f &V3File) literal_type(id flat.NodeId) string {
+	if int(id) < 0 {
+		return ''
 	}
+	n := f.node(id)
+	kids := f.kids(id)
+	match n.kind {
+		.string_literal, .string_interp {
+			return 'string'
+		}
+		.int_literal {
+			return 'int'
+		}
+		.bool_literal {
+			return 'bool'
+		}
+		.float_literal {
+			return 'f64'
+		}
+		.char_literal {
+			return 'rune'
+		}
+		.cast_expr, .struct_init {
+			if n.value != '' {
+				return f.type_text(n.value)
+			}
+		}
+		.map_init {
+			if n.value != '' {
+				return f.type_text(n.value)
+			}
+			if t := literal_map_type(f, kids) {
+				return t
+			}
+		}
+		.array_literal {
+			if kids.len > 0 {
+				e := f.literal_type(kids[0])
+				if e != '' {
+					return '[]' + e
+				}
+			}
+		}
+		.call {
+			// `Any(1)`, `json.Any(1)`: a capitalized callee is a type, not a function
+			if kids.len > 0 {
+				c := f.node(kids[0])
+				if c.kind == .ident && c.value != '' && (c.value in primitive_types || c.value[0].is_capital()) {
+					return f.type_text(c.value)
+				}
+				if c.kind == .selector && c.value.len > 0 && c.value[0].is_capital() {
+					ck := f.kids(kids[0])
+					if ck.len == 1 && f.node(ck[0]).kind == .ident {
+						return f.type_text('${f.node(ck[0]).value}.${c.value}')
+					}
+				}
+			}
+		}
+		.infix {
+			if n.op in [.plus, .minus, .mul, .div, .mod, .amp, .pipe, .xor, .left_shift, .right_shift]
+				&& kids.len > 0 {
+				return f.literal_type(kids[0])
+			}
+		}
+		.paren {
+			if kids.len > 0 {
+				return f.literal_type(kids[0])
+			}
+		}
+		else {}
+	}
+	return ''
 }
 
 fn (f &V3File) last_value(id flat.NodeId, ctx V3CallCtx) string {
