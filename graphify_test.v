@@ -5968,6 +5968,136 @@ fn competitor() string {
 	assert calls.any(it.to == 'lib.toml.Date.str')
 }
 
+// `ctx.read_buf[i].Event.KeyEvent.uChar.UnicodeChar.str()`, where the C structs `Event`, `KEY_EVENT_RECORD` and `uChar` are declared in the caller's module and again in two other modules, as the terminal UI's Windows files are: the C namespace is one for the program, so the declaration nearest the field's own file is the one, and `rune.str` is the `str` the chain reaches (the name fallback can't pass by accident, see the competing `str` methods).
+fn test_a_c_struct_declared_in_several_modules_takes_the_nearest_declaration() {
+	g := graph_of({
+		'vlib/builtin/rune.v': 'module builtin
+
+pub fn (c rune) str() string {
+	return ""
+}
+
+'
+		'lib/other/other.v': 'module other
+
+pub struct Note {
+	text string
+}
+
+pub fn (n Note) str() string {
+	return n.text
+}
+
+'
+		'lib/ui/input.v': 'module ui
+
+pub struct Context {
+	ExtraContext
+}
+
+fn competitor() string {
+	n := other.Note{}
+	return n.str()
+}
+
+pub struct ProbeA {
+}
+
+pub fn (p ProbeA) str() string {
+	return ""
+}
+
+pub struct ProbeB {
+}
+
+pub fn (p ProbeB) str() string {
+	return ""
+}
+
+'
+		'lib/ui/input_nix.c.v': 'module ui
+
+struct ExtraContext {
+mut:
+	read_buf []u8
+}
+
+'
+		'lib/ui/input_windows.c.v': 'module ui
+
+import other
+
+const buf_size = 4
+
+struct ExtraContext {
+mut:
+	read_buf [buf_size]C.INPUT_RECORD
+}
+
+fn (mut ctx Context) parse_events() {
+	for i in 0 .. 4 {
+		match int(ctx.read_buf[i].EventType) {
+			1 {
+				e := unsafe { ctx.read_buf[i].Event.KeyEvent }
+				s := unsafe { e.uChar.UnicodeChar.str() }
+				_ = s
+			}
+			else {}
+		}
+	}
+}
+
+'
+		'lib/ui/consoleapi_windows.c.v': 'module ui
+
+pub union C.Event {
+	KeyEvent C.KEY_EVENT_RECORD
+}
+
+pub struct C.INPUT_RECORD {
+	EventType u16
+	Event     C.Event
+}
+
+pub union C.uChar {
+mut:
+	UnicodeChar rune
+	AsciiChar   u8
+}
+
+pub struct C.KEY_EVENT_RECORD {
+	bKeyDown i32
+	uChar    C.uChar
+}
+
+'
+		'lib/term/term_windows.c.v': 'module term
+
+pub union C.uChar {
+mut:
+	UnicodeChar rune
+	AsciiChar   u8
+}
+
+'
+		'lib/v/compiler_tests/posix_wait.v': 'module compiler_tests
+
+pub union C.Event {
+	KeyEvent C.KEY_EVENT_RECORD
+}
+
+pub struct C.KEY_EVENT_RECORD {
+	bKeyDown i32
+	uChar    C.uChar
+}
+
+'
+	})
+	calls := g.edges.filter(it.kind == .calls && it.from == 'lib.ui.Context.parse_events')
+	assert !calls.any(it.to == 'str' && it.provenance != .undeclared)
+	assert calls.any(it.to == 'vlib.builtin.rune.str')
+}
+
 fn test_a_primitive_without_a_str_is_undeclared_and_shifts_keep_its_type() {
 	g := graph_of({
 		'lib/lib.v': 'module lib
