@@ -266,6 +266,27 @@ fn (f &V3File) line_is_pub(line int) bool {
 	return line >= 1 && line <= f.lines.len && f.lines[line - 1].trim_space().starts_with('pub ')
 }
 
+// is_flag_enum reports whether the declaration at `line` carries @[flag]. Its
+// attribute lines sit above it, and the walk up passes over attributes and doc
+// comments the way doc_from does.
+fn (f &V3File) is_flag_enum(line int) bool {
+	mut i := line - 2 // 0-based index of the line above the declaration
+	for i >= 0 && i < f.lines.len {
+		t := f.lines[i].trim_space()
+		if t.starts_with('@[') {
+			for attr in t.trim_string_left('@[').trim_string_right(']').split(';') {
+				if attr.trim_space() == 'flag' {
+					return true
+				}
+			}
+		} else if !t.starts_with('//') {
+			break
+		}
+		i--
+	}
+	return false
+}
+
 // declares_extern reports whether `line` declares a `fn C.` or `fn JS.`
 // binding.
 fn (f &V3File) declares_extern(line int) bool {
@@ -896,6 +917,8 @@ fn (mut f V3File) extract_enum(id flat.NodeId, mut syms []Symbol, mut edges []Ed
 	}
 	line := f.line_of(n.pos.offset)
 	is_pub := f.line_is_pub(line)
+	// `zero()` is V's own only on a @[flag] enum, so the flag goes in the signature
+	is_flag := f.is_flag_enum(line)
 	// V3's enum_decl spans only its name: the enum ends at the `}` after its
 	// last field
 	mut after := int(n.pos.end)
@@ -910,7 +933,7 @@ fn (mut f V3File) extract_enum(id flat.NodeId, mut syms []Symbol, mut edges []Ed
 		id:        '${f.mod_id}.${short}'
 		name:      short
 		kind:      .enum_
-		signature: (if is_pub { 'pub ' } else { '' }) + 'enum ${short}'
+		signature: (if is_flag { '@[flag] ' } else { '' }) + (if is_pub { 'pub ' } else { '' }) + 'enum ${short}'
 		file:      f.rel
 		line:      line
 		end_line:  f.line_of(i32(close))
