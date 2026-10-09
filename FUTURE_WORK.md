@@ -161,6 +161,8 @@ A call in a constant's, global's or struct field's initializer (`const x = f()`,
 V generates `T.zero()` for a `@[flag]` enum, and for no other enum, so an unresolved call of that form to an enum in the caller's module is undeclared (`enum_names`, in resolve_edges). It only matches an unqualified name: a `zero()` on an enum from another module (`asn1.Integer.zero()`) stays unresolved.
 A call on the result of a function declared once per platform is typed when every copy returns the same type (`same_return`, in infer.v), since the copies are renamed apart in a standalone program and no single one is the call's target. A call that reaches one copy of a function or method reaches all of them (`variants_of`, in resolve_edges), since the graph must match on every platform. A receiver's method is also found when its copy is named with its file (the base-name pass in resolve_callee). On the V compiler's tree that resolves 23 more calls and adds 39 call edges.
 
+A fixed-size array literal (`['Jan', 'Feb']!`) is a postfix node over an array literal, which the recipe code didn't read, so its elements had no type. Its recipe is now the literal's (`.postfix` in recipe). On the V compiler's tree that resolves a loop over `const month_names = [...]!` and 28 other calls.
+
 What remains is a long tail: values V infers in other ways (a comptime
 `for f in T.fields` variable, a receiver from a call with a computed argument),
 a sum type's shared field, function values the walk can't see are variables,

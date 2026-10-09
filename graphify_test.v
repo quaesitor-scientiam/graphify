@@ -4751,6 +4751,37 @@ pub fn (d Doc) close() bool {
 	assert targets.contains('prog.Doc.close@prog/p_nix.c.v') && targets.contains('prog.Doc.close@prog/p_windows.c.v'), targets.str()
 }
 
+fn test_a_fixed_size_array_literal_has_the_type_of_its_elements() {
+	// `['a', 'b']!` is a fixed-size array, so its loop variable is a string
+	g := graph_of({
+		'vlib/builtin/string.v': 'module builtin
+
+pub fn (s string) to_lower() string {
+	return s
+}
+'
+		'vlib/builtin/rune.v': 'module builtin
+
+pub fn (r rune) to_lower() rune {
+	return r
+}
+'
+		'vlib/net/n.v': 'module net
+
+const names = [\'Jan\', \'Feb\']!
+
+pub fn loop() string {
+	mut out := \'\'
+	for m in names {
+		out = m.to_lower()
+	}
+	return out
+}
+'
+	})
+	assert g.edges.any(it.kind == .calls && it.from == 'vlib.net.loop' && it.to == 'vlib.builtin.string.to_lower'), g.edges.map(it.to).str()
+}
+
 fn test_a_primitive_without_a_str_is_undeclared_and_shifts_keep_its_type() {
 	g := graph_of({
 		'lib/lib.v': 'module lib
