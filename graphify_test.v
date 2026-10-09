@@ -4698,6 +4698,48 @@ fn plain_zero() Pick {
 	assert !g.edges.any(it.kind == .calls && it.from == 'lib.tests.plain_zero' && it.provenance == .undeclared), g.edges.map(it.from).str()
 }
 
+// `json.decode[AnyStruct[json.Any]](s)!.val.int()`: the type argument is a generic struct, so `val` is a `json.Any` and its `int()` is that type's. A second `int` method the file also imports keeps the name alone from deciding it.
+fn test_a_generic_struct_as_a_type_argument_types_its_field() {
+	g := graph_of({
+		'lib/json2/json.v': 'module json2
+
+pub struct Any {}
+
+pub fn (f Any) int() int {
+	return 0
+}
+
+pub fn decode[T](s string) !T {
+	return T{}
+}
+'
+		'lib/alt/alt.v': 'module alt
+
+pub struct Bar {}
+
+pub fn (b Bar) int() int {
+	return 0
+}
+'
+		'lib/tests/t_test.v': 'module tests
+
+import lib.json2 as json
+import lib.alt
+
+struct AnyStruct[T] {
+	val T
+}
+
+fn test_values() {
+	json.decode[AnyStruct[json.Any]](\'\')!.val.int()
+}
+'
+	})
+	calls := g.edges.filter(it.kind == .calls && it.from == 'lib.tests.test_values')
+	assert calls.any(it.to == 'lib.json2.Any.int' && it.provenance == .inferred), g.edges.map(it.to).str()
+	assert !calls.any(it.to == 'lib.alt.Bar.int' || it.to == 'int'), g.edges.map(it.to).str()
+}
+
 fn test_a_per_platform_call_returns_the_type_its_variants_share() {
 	// `open_it` is declared once per platform in a standalone program, so its
 	// variants are renamed apart. They return the same type, so the receiver is typed.

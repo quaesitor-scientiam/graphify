@@ -1766,7 +1766,8 @@ fn (f &V3File) plain_callee(call flat.NodeId, ctx V3CallCtx) bool {
 // type_arg names a type argument of a generic call (`Config` in
 // `json.decode[Config](s)`, `json.Any`) as a recipe step needs it: a primitive
 // as it is, anything else qualified with its module. An index that isn't a
-// type, `a[i](x)` or `[]T`, has no such name.
+// type, `a[i](x)` or `[]T`, has no such name. A generic struct, `AnyStruct[json.Any]`,
+// is named by its base and its type arguments.
 fn (f &V3File) type_arg(id flat.NodeId) ?string {
 	n := f.node(id)
 	mut name := ''
@@ -1783,6 +1784,19 @@ fn (f &V3File) type_arg(id flat.NodeId) ?string {
 		// with its module names as the file's imports give them
 		t := if n.typ != '' { n.typ } else { n.value }
 		return if t == '' { none } else { f.type_text(t) }
+	} else if n.kind == .index {
+		// a generic struct written out, `AnyStruct[json.Any]`: its name and its type
+		// arguments, each named as above
+		ks := f.kids(id)
+		if ks.len < 2 {
+			return none
+		}
+		base := f.type_arg(ks[0]) or { return none }
+		mut args := []string{}
+		for ta in ks[1..] {
+			args << f.type_arg(ta) or { return none }
+		}
+		return '${base}[${args.join(',')}]'
 	} else {
 		return none
 	}
