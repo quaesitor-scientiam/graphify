@@ -165,6 +165,8 @@ A fixed-size array literal (`['Jan', 'Feb']!`) is a postfix node over an array l
 
 A call of a parameter of function type (`h fn () Doc`) has the function's return type (`fn_return`, in infer.v). A generic call's map or array type argument (`json.decode[map[string]json.Any](s)`) is named as written, so the type it returns is known. What's left among the receivers on the V compiler's tree is mostly generic: a return type that is a type parameter of a generic function (`extract[H]`), or of a method (`reflect[T]()`), whose own type parameters aren't stored, and a module the tree doesn't have (`markdown`). The variable of a `$for field in T.fields` loop is a builtin `FieldData` (`comptime_for` in the walk), so its `attrs` and `name` are typed.
 
+A member of an enum (`Colour.red`) is a value of the enum's type, when the name before it is an enum and not a constant (`enum_type` and `is_enum`, in infer.v). A method on that value is then found as on any type: `str()` on an enum that declares none is one V writes, so it is undeclared, and a `@[flag]` enum's `has()` and `set()` are too. A local initialized from a member (`flags := ArrayFlags.is_slice | ...`) has the enum's type, so `flags.set(...)` no longer links to an unrelated `array.set`. On the V compiler's tree that is 23 fewer unresolved calls (791 → 768), 14 of them `str()`, and none newly unresolved.
+
 What remains is a long tail: values V infers in other ways (a comptime
 `for f in T.fields` variable, a receiver from a call with a computed argument),
 a sum type's shared field, function values the walk can't see are variables,

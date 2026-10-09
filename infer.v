@@ -267,16 +267,20 @@ fn (inf &Infer) follow_steps(e Edge, depth int) ?InferredType {
 			file: e.file
 		}
 	} else if start.starts_with('g:') {
-		c := inf.find_const(start[2..], e.file)?
-		if depth >= const_depth {
-			return none
+		if c := inf.find_const(start[2..], e.file) {
+			if depth >= const_depth {
+				return none
+			}
+			// the const's own recipe, in the scope of the file declaring it
+			t = inf.follow_steps(Edge{
+				from:        c.id
+				file:        c.file
+				recv_recipe: c.recipe
+			}, depth + 1)?
+		} else {
+			// `Colour.red` names a member of the enum Colour, a value of its type
+			t = inf.enum_type(start[2..], e.file)?
 		}
-		// the const's own recipe, in the scope of the file declaring it
-		t = inf.follow_steps(Edge{
-			from:        c.id
-			file:        c.file
-			recv_recipe: c.recipe
-		}, depth + 1)?
 	} else if start.starts_with('c:') {
 		call := Edge{
 			from: e.from
@@ -349,6 +353,10 @@ fn (inf &Infer) follow_steps(e Edge, depth int) ?InferredType {
 			ret.text = owner_args(ret.text, t, owner, inf.generics_of[found] or { []string{} })
 			t = ret
 		} else if step.starts_with('f:') {
+			// a selector on an enum names one of its members, a value of that type
+			if inf.is_enum(t, e.file) {
+				continue
+			}
 			t = inf.field_of(t, step[2..], e.file, 0)?
 		} else if step == '[]' {
 			t.text = elem_type(t.text)?
@@ -702,6 +710,29 @@ fn (inf &Infer) find_type(short string, qual string, t InferredType, file string
 		}
 	}
 	return none
+}
+
+// enum_type is the enum `name` names from `file`, the type of a member selected
+// from it.
+fn (inf &Infer) enum_type(name string, file string) ?InferredType {
+	scope := inf.scope_of[file] or { FileScope{} }
+	decl := inf.find_type(name, '', InferredType{ mod: scope.mod, file: file }, file)?
+	if decl.id !in inf.enum_ids {
+		return none
+	}
+	return decl.as_type()
+}
+
+// is_enum reports whether `t` names an enum.
+fn (inf &Infer) is_enum(t InferredType, file string) bool {
+	text := bare_type(t.text)
+	if !is_named_type(text) {
+		return false
+	}
+	named := strip_generic_args(text)
+	qual := if named.contains('.') { named.all_before_last('.') } else { '' }
+	decl := inf.find_type(named.all_after_last('.'), qual, t, file) or { return false }
+	return decl.id in inf.enum_ids
 }
 
 // field_of is the type of field `name` of the struct `t` names.
