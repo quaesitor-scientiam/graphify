@@ -5028,3 +5028,92 @@ pub fn run() string {
 	assert calls.len == 1 && calls[0].to == 'str'
 	assert calls[0].provenance == .undeclared
 }
+
+fn test_a_str_on_a_comptime_field_is_that_fields_type_inside_a_type_check() {
+	g := graph_of({
+		'vlib/builtin/int.v': 'module builtin
+
+pub fn (i int) str() string {
+	return \'\'
+}
+'
+		'lib/lib.v': 'module lib
+
+pub struct Node {}
+
+pub fn (n Node) str() string {
+	return \'\'
+}
+'
+		'app/app.v': 'module app
+
+import lib
+
+fn encode[T](val T) bool {
+	mut ok := false
+	$for field in T.fields {
+		$if field.typ is int {
+			ok = val.$(field.name).str() == \'\'
+		}
+	}
+	return ok
+}
+
+fn encode_other_fields[T](val T) bool {
+	mut ok := false
+	$for field in T.fields {
+		$if field.typ is int {
+			ok = true
+		} $else {
+			ok = val.$(field.name).str() == \'\'
+		}
+	}
+	return ok
+}
+'
+	})
+	assert g.edges.any(it.kind == .calls && it.from == 'app.encode' && it.to == 'vlib.builtin.int.str'), g.edges.filter(it.from == 'app.encode').map(it.to).str()
+	// a field the type check doesn't name stays unknown
+	assert !g.edges.any(it.kind == .calls && it.from == 'app.encode_other_fields' && it.to == 'vlib.builtin.int.str')
+}
+
+fn test_a_str_on_a_comptime_method_call_is_that_methods_return_type_inside_a_type_check() {
+	g := graph_of({
+		'vlib/builtin/int.v': 'module builtin
+
+pub fn (i int) str() string {
+	return \'\'
+}
+'
+		'lib/lib.v': 'module lib
+
+pub struct Node {}
+
+pub fn (n Node) str() string {
+	return \'\'
+}
+'
+		'app/app.v': 'module app
+
+import lib
+
+struct Foo {}
+
+fn (f Foo) number() int {
+	return 1
+}
+
+fn run[T](val T) bool {
+	mut ok := false
+	$for method in T.methods {
+		$if method.return_type is int {
+			x := val.$method()
+			ok = x.str() == \'\'
+		}
+	}
+	return ok
+}
+'
+	})
+	assert g.edges.any(it.kind == .calls && it.from == 'app.run' && it.to == 'vlib.builtin.int.str'), g.edges.filter(it.from == 'app.run').map(it.to).str()
+}
