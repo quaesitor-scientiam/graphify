@@ -165,8 +165,9 @@ fn (inf &Infer) no_method(t InferredType, name string, file string) ?string {
 	if name == 'wait' && (text.starts_with('thread') || text.starts_with('[]thread')) {
 		return ''
 	}
-	// `str()` on a primitive the builtin doesn't declare one for (`u128`)
-	if name == 'str' && text in primitive_types {
+	// `str()` on a primitive the builtin doesn't declare one for (`u128`), or on a
+	// thread, which V writes as `thread(int)`
+	if name == 'str' && (text in primitive_types || is_thread_type(text)) {
 		return ''
 	}
 	if text.starts_with('[') && (name in array_builtins || name == 'str') {
@@ -285,41 +286,12 @@ fn (inf &Infer) follow_steps(e Edge, depth int) ?InferredType {
 			t = inf.enum_type(start[2..], e.file)?
 		}
 	} else if start.starts_with('c:') {
-		call := Edge{
-			from: e.from
-			to:   start[2..]
-			kind: .calls
-			file: e.file
-		}
-		mut id := ''
-		if call.to.contains('.') {
-			id = (resolve_qualified_callee(call, inf.by_name, inf.site_of, inf.scope_of)?).id
-			t = inf.returns(id)?
-		} else if res := resolve_callee(call, inf.by_name, inf.site_of, inf.imports_of) {
-			id = res.id
-			t = inf.returns(id)?
-		} else {
-			// one function declared once per platform: its variants must all return
-			// the same type, which is then the call's type
-			variants := platform_variants(call, inf.by_name, inf.site_of)?
-			ids := variants.map(it.id)
-			t = inf.same_return(ids)?
-			id = ids[0]
-		}
-		// the type arguments of a generic call (`p:` steps) stand for the
-		// callee's type parameters, in order, in its return type
-		mut targs := []string{}
-		for step in steps[1..] {
-			if !step.starts_with('p:') {
-				break
+		t = inf.call_result(e, start[2..], steps) or {
+			// a spawned call whose result isn't known is a thread of an unknown result
+			if 'th' !in steps {
+				return none
 			}
-			targs << step[2..]
-		}
-		params := inf.generics_of[id] or { []string{} }
-		for i, param in params {
-			if i < targs.len && targs[i] != '' {
-				t.text = subst_word(t.text, param, targs[i])
-			}
+			InferredType{}
 		}
 	} else {
 		return none
@@ -328,12 +300,25 @@ fn (inf &Infer) follow_steps(e Edge, depth int) ?InferredType {
 		if step.starts_with('p:') {
 			continue
 		}
+		if step == 'th' {
+			t = spawned_thread(t)
+			continue
+		}
 		t.text = bare_type(t.text)
 		if t.text == '' {
 			return none
 		}
 		if step.starts_with('m:') {
 			name := step[2..]
+			if name == 'wait' && t.text.starts_with('thread ') {
+				// a thread's wait() is the result of the function it runs
+				t = InferredType{
+					text: t.text[7..]
+					mod:  t.mod
+					file: t.file
+				}
+				continue
+			}
 			if t.text.starts_with('[') && name in array_same_type {
 				continue
 			}
@@ -376,6 +361,9 @@ fn (inf &Infer) follow_steps(e Edge, depth int) ?InferredType {
 		} else if step == 'R' {
 			// the return type of a function type, `fn (int) Doc`
 			t.text = fn_return(t.text)?
+		} else if step == 'us' {
+			// `x >>> n` is unsigned, as wide as x
+			t.text = unsigned_of(t.text)?
 		} else if step == 'k' {
 			if t.text.starts_with('map[') {
 				k, _ := map_parts(t.text)?
@@ -396,6 +384,101 @@ fn (inf &Infer) follow_steps(e Edge, depth int) ?InferredType {
 		return none
 	}
 	return t
+}
+
+// call_result is the return type of the call `to` made from e's file, its
+// generic arguments (the `p:` steps of `steps`) put in place of its parameters.
+fn (inf &Infer) call_result(e Edge, to string, steps []string) ?InferredType {
+	call := Edge{
+		from: e.from
+		to:   to
+		kind: .calls
+		file: e.file
+	}
+	mut t := InferredType{}
+	mut id := ''
+	if call.to.contains('.') {
+		id = (resolve_qualified_callee(call, inf.by_name, inf.site_of, inf.scope_of)?).id
+		t = inf.returns(id)?
+	} else if res := resolve_callee(call, inf.by_name, inf.site_of, inf.imports_of) {
+		id = res.id
+		t = inf.returns(id)?
+	} else {
+		// one function declared once per platform: its variants must all return
+		// the same type, which is then the call's type
+		variants := platform_variants(call, inf.by_name, inf.site_of)?
+		ids := variants.map(it.id)
+		t = inf.same_return(ids)?
+		id = ids[0]
+	}
+	// the type arguments of a generic call (`p:` steps) stand for the
+	// callee's type parameters, in order, in its return type
+	mut targs := []string{}
+	for step in steps[1..] {
+		if !step.starts_with('p:') {
+			break
+		}
+		targs << step[2..]
+	}
+	params := inf.generics_of[id] or { []string{} }
+	for i, param in params {
+		if i < targs.len && targs[i] != '' {
+			t.text = subst_word(t.text, param, targs[i])
+		}
+	}
+	return t
+}
+
+// spawned_thread is the type of the thread a spawned call starts, given the
+// call's result t: `thread T`, or bare `thread` when T isn't a plain type name
+// (a result, an option, a generic parameter) or isn't known.
+fn spawned_thread(t InferredType) InferredType {
+	plain := t.text != '' && !t.text.starts_with('thread')
+		&& (is_named_type(t.text) || t.text.starts_with('['))
+		&& !is_generic_param(t.text.trim_left('[]'))
+	if !plain {
+		return InferredType{
+			text: 'thread'
+			mod:  t.mod
+			file: t.file
+		}
+	}
+	return InferredType{
+		text: 'thread ' + t.text
+		mod:  t.mod
+		file: t.file
+	}
+}
+
+// is_thread_type reports whether a type is a thread: bare, or with the result it
+// yields (`thread int`).
+fn is_thread_type(t string) bool {
+	return t == 'thread' || t.starts_with('thread ')
+}
+
+// unsigned_counterparts pairs each integer type with the unsigned type `x >>> n`
+// has for an x of that type, the one of the same width (V's
+// unsigned_shift_result_type). `int` is left out: its width is the platform's,
+// and a literal operand has no type to name.
+const unsigned_counterparts = {
+	'i8':    'u8'
+	'i16':   'u16'
+	'i32':   'u32'
+	'rune':  'u32'
+	'i64':   'u64'
+	'i128':  'u128'
+	'isize': 'usize'
+	'u8':    'u8'
+	'u16':   'u16'
+	'u32':   'u32'
+	'u64':   'u64'
+	'u128':  'u128'
+	'usize': 'usize'
+}
+
+// unsigned_of is the unsigned type `x >>> n` has for an operand of type t.
+fn unsigned_of(t string) ?string {
+	return unsigned_counterparts[t] or { return none }
 }
 
 // comptime_type is the type a `$if T is X` block takes T to be, `name` read in
@@ -801,7 +884,12 @@ fn (inf &Infer) field_of(t InferredType, name string, file string, depth int) ?I
 	if is_generic_param(short) {
 		return none
 	}
-	decl := inf.find_type(short, qual, t, file)?
+	mut decl := TypeCand{}
+	if qual == 'C' {
+		decl = inf.c_struct(short)?
+	} else {
+		decl = inf.find_type(short, qual, t, file)?
+	}
 	key := '${decl.id}\x00${name}'
 	if ft := inf.field_type[key] {
 		// `s.items` of a `Stack[int]` is `[]int`, where the field is `[]T`
@@ -834,6 +922,27 @@ fn (inf &Infer) field_of(t InferredType, name string, file string, depth int) ?I
 		}
 	}
 	return if found.len == 1 { found[0] } else { none }
+}
+
+// c_struct is the C struct `C.name` names. V's C types are not qualified by a
+// module: it is the struct declared as `C.name` in any module, and a V struct of
+// that name is none of it. Two C structs of that name leave it unknown.
+fn (inf &Infer) c_struct(name string) ?TypeCand {
+	mut ids := []string{}
+	mut found := TypeCand{}
+	for c in inf.by_type_name[name] or { return none } {
+		if !c.c {
+			continue
+		}
+		if c.id !in ids {
+			ids << c.id
+		}
+		found = c
+	}
+	if ids.len != 1 {
+		return none
+	}
+	return found
 }
 
 // bare_type drops what doesn't change which methods a type has: `&`, `?`,

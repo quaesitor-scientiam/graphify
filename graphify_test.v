@@ -5344,6 +5344,131 @@ pub fn show() {
 	assert !g.edges.any(it.kind == .calls && it.from == 'pkg.show' && it.to == 'pkg.Alarms.add'), g.edges.filter(it.from == 'pkg.show').map(it.to).str()
 }
 
+fn test_e16_wait_of_a_spawned_call_is_the_callees_result() {
+	g := graph_of({
+		'other/other.v':         'module other
+
+pub struct Box {}
+
+pub fn (b Box) str() string {
+	return \'\'
+}
+'
+		'vlib/builtin/string.v': 'module builtin
+
+pub fn (s string) str() string {
+	return s
+}
+'
+		'lib/lib.v':             'module lib
+
+import other
+
+fn name() string {
+	return \'x\'
+}
+
+pub fn run() string {
+	res := (spawn name()).wait()
+	return res.str()
+}
+'
+	})
+	calls := g.edges.filter(it.kind == .calls && it.from == 'lib.run' && it.to.ends_with('str'))
+	assert calls.len == 1 && calls[0].to == 'vlib.builtin.string.str', calls.map(it.to).str()
+}
+
+fn test_e16_str_of_a_thread_is_compiler_provided() {
+	g := graph_of({
+		'other/other.v': 'module other
+
+pub struct Box {}
+
+pub fn (b Box) str() string {
+	return \'\'
+}
+'
+		'lib/lib.v':     'module lib
+
+import other
+
+fn ret() int {
+	return 1
+}
+
+pub fn run() string {
+	th := spawn ret()
+	return th.str()
+}
+'
+	})
+	calls := g.edges.filter(it.kind == .calls && it.from == 'lib.run' && it.to.ends_with('str'))
+	assert calls.len == 1 && calls[0].to == 'str' && calls[0].provenance == .undeclared, calls.map(it.to).str()
+}
+
+fn test_e16_str_of_a_field_of_a_c_struct_is_the_fields_type() {
+	g := graph_of({
+		'other/other.v':        'module other
+
+pub struct Box {}
+
+pub fn (b Box) str() string {
+	return \'\'
+}
+'
+		'vlib/builtin/i32.v': 'module builtin
+
+pub fn (n i32) str() string {
+	return \'\'
+}
+'
+		'lib/lib.v':            'module lib
+
+import other
+
+pub struct C.addrinfo {
+	ai_family i32
+}
+
+pub fn family(ai &C.addrinfo) string {
+	return ai.ai_family.str()
+}
+'
+	})
+	calls := g.edges.filter(it.kind == .calls && it.from == 'lib.family' && it.to.ends_with('str'))
+	assert calls.len == 1 && calls[0].to == 'vlib.builtin.i32.str', calls.map(it.to).str()
+}
+
+fn test_e16_a_logical_right_shift_has_the_unsigned_type_of_its_operand() {
+	g := graph_of({
+		'other/other.v':         'module other
+
+pub struct Box {}
+
+pub fn (b Box) str() string {
+	return \'\'
+}
+'
+		'vlib/builtin/u128.v': 'module builtin
+
+pub fn (n u128) str() string {
+	return \'\'
+}
+'
+		'lib/lib.v':             'module lib
+
+import other
+
+pub fn show() string {
+	y := i128(-1)
+	return (y >>> 1).str()
+}
+'
+	})
+	calls := g.edges.filter(it.kind == .calls && it.from == 'lib.show' && it.to.ends_with('str'))
+	assert calls.len == 1 && calls[0].to == 'vlib.builtin.u128.str', calls.map(it.to).str()
+}
+
 fn test_a_primitive_without_a_str_is_undeclared_and_shifts_keep_its_type() {
 	g := graph_of({
 		'lib/lib.v': 'module lib
