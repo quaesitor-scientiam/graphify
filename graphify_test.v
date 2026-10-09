@@ -6326,6 +6326,62 @@ pub fn (p ProbeB) str() string {
 	assert calls.any(it.to == 'lib.tests.Item.str')
 }
 
+// `Kind.from(1)` for an enum `Kind` in the caller's module that declares no `from`: V generates it for every enum, so the call is one V provides, marked undeclared rather than left unresolved.
+fn test_a_generated_from_of_an_enum_in_the_callers_module_is_provided_by_v() {
+	g := graph_of({
+		'lib/tests/kind_test.v': 'module tests
+
+pub enum Kind {
+	a
+	b
+}
+
+fn parse(n int) Kind {
+	return Kind.from(n) or { Kind.a }
+}
+'
+	})
+	calls := g.edges.filter(it.kind == .calls && it.from == 'lib.tests.parse')
+	assert calls.any(it.to == 'Kind__static__from' && it.provenance == .undeclared)
+	assert !calls.any(it.to == 'Kind__static__from' && it.provenance != .undeclared)
+}
+
+// `Kind.from_string('a')`, the same as `from` for an enum with no `from_string` declared: V generates it for every enum.
+fn test_a_generated_from_string_of_an_enum_in_the_callers_module_is_provided_by_v() {
+	g := graph_of({
+		'lib/tests/kind_test.v': 'module tests
+
+pub enum Kind {
+	a
+	b
+}
+
+fn parse(s string) Kind {
+	return Kind.from_string(s) or { Kind.a }
+}
+'
+	})
+	calls := g.edges.filter(it.kind == .calls && it.from == 'lib.tests.parse')
+	assert calls.any(it.to == 'Kind__static__from_string' && it.provenance == .undeclared)
+	assert !calls.any(it.to == 'Kind__static__from_string' && it.provenance != .undeclared)
+}
+
+// `__addr(x)` and `__v3_isreftype(x)` are compiler forms that V lowers, so the calls keep no edge at all: they are not calls into the program.
+fn test_a_compiler_intrinsic_call_keeps_no_edge() {
+	g := graph_of({
+		'lib/tests/intrinsic_test.v': 'module tests
+
+fn probe(x int) {
+	_ = __addr(x)
+	_ = __v3_isreftype(x)
+}
+'
+	})
+	calls := g.edges.filter(it.kind == .calls && it.from == 'lib.tests.probe')
+	assert !calls.any(it.to == '__addr')
+	assert !calls.any(it.to == '__v3_isreftype')
+}
+
 fn test_a_primitive_without_a_str_is_undeclared_and_shifts_keep_its_type() {
 	g := graph_of({
 		'lib/lib.v': 'module lib
