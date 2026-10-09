@@ -4943,6 +4943,45 @@ pub fn has_id(n Node) bool {
 	assert g.edges.any(it.kind == .calls && it.from == 'lib.has_id' && it.to == 'vlib.builtin.string.contains'), g.edges.map(it.to).str()
 }
 
+fn test_a_generic_type_argument_written_with_an_import_alias_is_named_in_full() {
+	g := graph_of({
+		'vlib/json2/decode.v': 'module json2
+
+pub type Any = bool | int
+
+pub fn decode[T](val string) !T {
+	return error(val)
+}
+'
+		'other/node.v': 'module other
+
+pub struct Node {}
+
+pub fn (n Node) str() string {
+	return \'\'
+}
+'
+		'app/app.v': 'module app
+
+import json2 as json
+
+fn show(s string) string {
+	blocks := json.decode[[]map[string]json.Any](s) or {
+		return \'\'
+	}
+	for block in blocks {
+		value := block[\'text\'] or {
+			continue
+		}
+		return value.str()
+	}
+	return \'\'
+}
+'
+	})
+	assert g.edges.any(it.kind == .calls && it.from == 'app.show' && it.to == 'str' && it.provenance == .undeclared), g.edges.map(it.to).str()
+}
+
 fn test_a_primitive_without_a_str_is_undeclared_and_shifts_keep_its_type() {
 	g := graph_of({
 		'lib/lib.v': 'module lib
