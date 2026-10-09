@@ -817,6 +817,7 @@ fn resolve_edges(mut g Graph) {
 	mut consts := map[string][]Symbol{}
 	mut enum_ids := map[string]bool{}
 	mut dynamic_ids := map[string]bool{}
+	mut iface_ids := map[string]bool{}
 	mut generics_of := map[string][]string{}
 	for e in g.edges {
 		if e.kind == .embeds {
@@ -859,6 +860,7 @@ fn resolve_edges(mut g Graph) {
 			}
 			.interface_ {
 				dynamic_ids[s.id] = true
+				iface_ids[s.id] = true
 			}
 			else {}
 		}
@@ -878,6 +880,7 @@ fn resolve_edges(mut g Graph) {
 		consts:       consts
 		enum_ids:     enum_ids
 		dynamic_ids:  dynamic_ids
+		iface_ids:    iface_ids
 		generics_of:  generics_of
 	}
 	mut resolved := []Edge{cap: g.edges.len}

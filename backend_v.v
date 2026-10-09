@@ -790,6 +790,7 @@ fn (mut f V3File) extract_fn(id flat.NodeId, mut syms []Symbol, mut edges []Edge
 		recv_name: recv_name
 		recv_type: if is_method { '${f.mod_id}.${recv_typ.trim_left('&')}' } else { '' }
 		file:      f.rel
+		tparams:   if is_method { split_type_args(recv_typ) } else { f.generic_params(line, 'fn ${name}') }
 		locals:    locals
 		vars:      vars
 	}
@@ -1135,6 +1136,9 @@ struct V3CallCtx {
 	recv_name string
 	recv_type string
 	file      string
+	// tparams are the type parameters of the enclosing function, or of its
+	// receiver's generic type, `T` in `fn encode[T](v T)`
+	tparams []string
 mut:
 	locals map[string]string
 	vars   map[string]string
@@ -1192,6 +1196,80 @@ fn (ctx V3CallCtx) narrowed(name string, recipe string) V3CallCtx {
 		}
 	}
 	return out
+}
+
+// comptime_type_is reads a `$if` condition that tests one type, `T is Empty`,
+// as the name and the type: `T` and `Empty`. It is empty for any other
+// condition, such as `T is $int`, which names a kind of types, not one type.
+fn comptime_type_is(cond string) (string, string) {
+	parts := cond.trim_space().split(' ')
+	if parts.len != 3 || parts[1] != 'is' {
+		return '', ''
+	}
+	typ := parts[2]
+	if typ == '' || !(typ[0].is_letter() || typ[0] == `_`) {
+		return '', ''
+	}
+	for c in typ {
+		if !(c.is_alnum() || c == `_` || c == `.`) {
+			return '', ''
+		}
+	}
+	return parts[0], typ
+}
+
+// is_tparam_recipe reports whether a recipe is exactly a type parameter, `t:T`.
+fn is_tparam_recipe(recipe string, tparams []string) bool {
+	return recipe.starts_with('t:') && recipe[2..] in tparams
+}
+
+// retyped is `ctx` with the type parameter `name` taken to be `typ`, in each
+// variable, local and receiver whose type names it (`value T` becomes `value Empty`).
+fn (ctx V3CallCtx) retyped(name string, typ string) V3CallCtx {
+	mut vars := map[string]string{}
+	for k, r in ctx.vars {
+		vars[k] = retype_recipe(r, name, typ)
+	}
+	mut fallbacks := map[string]string{}
+	for k, r in ctx.fallbacks {
+		fallbacks[k] = retype_recipe(r, name, typ)
+	}
+	mut locals := map[string]string{}
+	for k, t in ctx.locals {
+		locals[k] = subst_word(t, name, typ)
+	}
+	return V3CallCtx{
+		...ctx
+		recv_type: subst_word(ctx.recv_type, name, typ)
+		locals:    locals
+		vars:      vars
+		fallbacks: fallbacks
+	}
+}
+
+// retype_recipe is `recipe` with the type parameter `name` replaced by `typ` in
+// each step that names a type: the start `t:T`, and a generic call's type
+// argument `p:T`.
+fn retype_recipe(recipe string, name string, typ string) string {
+	if !recipe.contains(name) {
+		return recipe
+	}
+	mut alts := []string{}
+	for alt in recipe.split(recipe_alt) {
+		mut steps := []string{}
+		for step in alt.split(recipe_sep) {
+			if step.starts_with('t:') && subst_word(step[2..], name, typ) != step[2..] {
+				// a type that names the parameter: narrowed, so an interface is not taken (see infer.v's ct:)
+				steps << 'ct:' + subst_word(step[2..], name, typ)
+			} else if step.starts_with('p:') {
+				steps << 'p:' + subst_word(step[2..], name, typ)
+			} else {
+				steps << step
+			}
+		}
+		alts << steps.join(recipe_sep)
+	}
+	return alts.join(recipe_alt)
 }
 
 // recipe_sep separates the steps of a type recipe. It is a control character
@@ -1360,15 +1438,24 @@ fn (mut f V3File) walk(id flat.NodeId, ctx V3CallCtx, mut edges []Edge, mut seen
 				}
 			}
 		}
-		.comptime_for {
-			// `$for field in T.fields`: each field is a builtin FieldData
-			parts := n.value.split('|')
-			if parts.len == 2 && parts[1] == 'fields' {
-				f.walk_list(kids, ctx.with_vars([parts[0]], ['t:builtin.FieldData']), mut edges, mut seen)
-				return ctx
-			}
-		}
 		.comptime_if {
+			// `$if T is Empty { ... }` in a generic function: V compiles the block
+			// only when T is Empty, so a variable typed T is an Empty in it; the
+			// other branches keep T
+			if kids.len >= 1 {
+				name, typ := comptime_type_is(n.value)
+				if name != '' && name in ctx.tparams {
+					f.walk(kids[0], ctx.retyped(name, f.type_text(typ)), mut edges, mut seen)
+					f.walk_list(kids[1..], ctx, mut edges, mut seen)
+					return ctx
+				}
+				// `$if data is bool` on a variable of type T: `data` is a bool in the block
+				if name != '' && name in ctx.vars && is_tparam_recipe(ctx.vars[name], ctx.tparams) {
+					f.walk(kids[0], ctx.with_vars([name], ['ct:' + f.type_text(typ)]), mut edges, mut seen)
+					f.walk_list(kids[1..], ctx, mut edges, mut seen)
+					return ctx
+				}
+			}
 			// `$if field.typ is int { x.$(field.name) }` in a field loop: the
 			// block's selector is an int (see comptime_pin). The branches after
 			// it keep the context they had.
@@ -1380,6 +1467,14 @@ fn (mut f V3File) walk(id flat.NodeId, ctx V3CallCtx, mut edges []Edge, mut seen
 					f.walk_list(kids[1..], ctx, mut edges, mut seen)
 					return ctx
 				}
+			}
+		}
+		.comptime_for {
+			// `$for field in T.fields`: each field is a builtin FieldData
+			parts := n.value.split('|')
+			if parts.len == 2 && parts[1] == 'fields' {
+				f.walk_list(kids, ctx.with_vars([parts[0]], ['t:builtin.FieldData']), mut edges, mut seen)
+				return ctx
 			}
 		}
 		.for_in_stmt {
