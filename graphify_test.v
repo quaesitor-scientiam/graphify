@@ -4843,6 +4843,46 @@ pub fn field(json_text string, key string) string {
 	assert g.edges.any(it.kind == .calls && it.from == 'app.field' && it.to == 'lib.Any.str'), g.edges.map(it.to).str()
 }
 
+fn test_a_comptime_field_loop_variable_is_a_field_data() {
+	g := graph_of({
+		'vlib/builtin/meta.v': 'module builtin
+
+pub struct FieldData {
+pub:
+	name  string
+	attrs []string
+}
+'
+		'vlib/builtin/string.v': 'module builtin
+
+pub fn (s string) contains(x string) bool {
+	return s == x
+}
+'
+		'vlib/lib/lib.v': 'module lib
+
+pub struct Other {}
+
+pub fn (o Other) contains(x string) bool {
+	return x == \'\'
+}
+'
+		'app/app.v': 'module app
+
+fn walk[T]() bool {
+	mut ok := false
+	$for field in T.fields {
+		for attr in field.attrs {
+			ok = attr.contains(\'a\')
+		}
+	}
+	return ok
+}
+'
+	})
+	assert g.edges.any(it.kind == .calls && it.from == 'app.walk' && it.to == 'vlib.builtin.string.contains'), g.edges.map(it.to).str()
+}
+
 fn test_a_primitive_without_a_str_is_undeclared_and_shifts_keep_its_type() {
 	g := graph_of({
 		'lib/lib.v': 'module lib
