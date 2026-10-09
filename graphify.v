@@ -664,9 +664,12 @@ fn resolve_edges(mut g Graph) {
 	// enum_names holds each enum by module and name, to recognise V's own zero()
 	// on a flag enum (see below).
 	mut enum_names := map[string]bool{}
+	// sym_ids holds every symbol id, to see whether an enum declares a method
+	mut sym_ids := map[string]bool{}
 	// a field's site is its struct, so a struct maps to its own module
 	mut struct_mod := map[string]string{}
 	for s in g.symbols {
+		sym_ids[s.id] = true
 		if s.kind == .enum_ {
 			enum_names[s.parent + '\x00' + s.name] = true
 		}
@@ -1003,13 +1006,16 @@ fn resolve_edges(mut g Graph) {
 			}
 			seen_call[key] = resolved.len
 		}
-		if e.kind == .calls && e.to.ends_with('__static__zero') {
-			// V generates `T.zero()` for a @[flag] enum T and for no other enum, so a
-			// call of it with no zero declared, to an enum T in the caller's module, is
-			// one V provides.
+		if e.kind == .calls && (e.to.ends_with('__static__zero') || e.to.ends_with('__static__from')
+			|| e.to.ends_with('__static__from_string')) {
+			// V generates `T.zero()` for a @[flag] enum T, and `T.from(x)` and
+			// `T.from_string(s)` for every enum T. A call of one of them, to an enum T in
+			// the caller's module that declares no method of that name, is one V provides.
 			if site := caller_site(e, site_of) {
 				mod := struct_mod[site.mod] or { site.mod }
-				if enum_names[mod + '\x00' + e.to.all_before('__static__')] {
+				typ := e.to.all_before('__static__')
+				method := e.to.all_after('__static__')
+				if enum_names[mod + '\x00' + typ] && '${mod}.${typ}.${method}' !in sym_ids {
 					resolved << Edge{...e, provenance: .undeclared}
 					continue
 				}

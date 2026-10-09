@@ -2369,8 +2369,10 @@ fn (mut f V3File) record_call(callee_id flat.NodeId, ctx V3CallCtx, mut edges []
 			}
 		}
 	}
-	if name == '' || name.starts_with('$') || name.starts_with('__v_') {
-		// `$` and `__v_` names are compile-time forms and V3's own stand-ins
+	if name == '' || name.starts_with('$') || name.starts_with('__v_') || name.starts_with('__v3_')
+		|| name == '__addr' {
+		// `$`, `__v_` and `__v3_` names are compile-time forms and V3's own stand-ins, and
+		// `__addr` is a compiler intrinsic that V lowers: V keeps no call of any of them
 		return
 	}
 	// `f()` where `f` is a variable or parameter calls a function value
