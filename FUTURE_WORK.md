@@ -151,9 +151,11 @@ A declaration that exists once per platform (`open_tool_cache_entry_dir` in
 `toolcache_nix.c.v` and `_windows.c.v`) can't be given one call edge that is right
 on every OS, and the graph must be identical on every OS. A plain call to one now
 links to every platform's version (`platform_variants`), each a real declaration,
-so a change to any of them shows its caller. Method calls to such a declaration
-stay unresolved, since the receiver's type isn't checked: 23 calls on the V
-compiler's tree. And a C function's result (`C.PQerrorMessage(...)`) has the C
+so a change to any of them shows its caller. A method call to one used to stay
+unresolved, since the receiver's type isn't checked (23 calls on the V compiler's
+tree at an earlier commit). On `c6bb06f5` no unresolved call is a method call to a
+per-platform declaration: the only unresolved calls that share a name with one are a
+function-typed field's call and two array `index` calls. And a C function's result (`C.PQerrorMessage(...)`) has the C
 type, which the graph doesn't name.
 
 A call in a constant's, global's or struct field's initializer (`const x = f()`, `n int = f()`) is recorded as made by that declaration. Its caller id is set after the renames that give colliding declarations their own ids (`resolve_initializer_callers`), so a constant that shares a name with a function keeps its own calls. On the V compiler's tree that adds 2,023 call edges. On a 300-name sample per group, checking the graph's caller files against the source (string literals, comments and casts excluded): names declared once 98.2% → 98.7%, names declared in several files 97.5% → 98.2%.
@@ -177,6 +179,8 @@ Inside `$if field.typ is T` (or `$if method.return_type is T`), the selector `x.
 A map literal's entries are typed by `literal_type` (backend_v.v), which replaces the four-kind table: a rune, a nested literal, a cast or a conversion such as `Any(1)` or `json.Any(1)`, and an arithmetic or shift of these. So `{'a': `a`}` is a `map[string]rune`, and a `str()` on it is one V writes, not a call of some other type's `str`. `typeof(x)` is a string with `.idx` and `.name`, and `dump(x)` has x's type. `<-c` is the element of the channel `c` (`elem_type`, in infer.v). On the V compiler's tree that resolves 78 calls more (687 → 609), 17 of them `str()`, and 8 `str()` calls on values that declare none are undeclared. Left alone: comptime receivers (14 callers, covered by the comptime pins), `>>>` (its result is unsigned, which a plain recipe gets wrong), a `sql` block, and enum-literal keys.
 
 A type parameter `T` is an unknown type to the graph, so a method on a value typed `T` finds nothing and falls to name matching. Inside `$if T is X { ... }`, V compiles the block only when `T` is `X`, so the block's `T` is `X` (`retyped`, in backend_v.v, and the `ct:` recipe step, read by `comptime_type`, in infer.v). The same holds for a variable of type `T` in `$if v is X`. An interface is not narrowed (`iface_ids`), since `T is Shape` holds for every type implementing `Shape`, and the call is not `Shape.str`. What stays unresolved in this group is a generic receiver with no check, which has one type per instantiation, and a `T` whose check is `$int` or another kind of type, which names no one type. On the V compiler's tree that resolves 6 calls more (609 → 603), 4 of them `str()`, and none is newly unresolved.
+
+The first kind is 40 calls on the V compiler's tree at `c6bb06f5` (13 `str()`, 5 `type_name()`, and the rest, many of them in V's compiler tests and a few in `json2`, `json5`, `strconv`, `redis` and `cbor`). Linking them needs the types each generic is instantiated with, and most instantiations are inferred from the arguments rather than written: `format_thousands` has 2 explicit `[T]` call sites and 33 inferred ones, and `drop_owned` has 2 and 63. Resolving them would mean recording the type arguments at each generic call site, inferring those given as arguments, and linking each call to the method of every type it is instantiated with. That changes the extractor, the edge data and the cache format, so it is left for its own change.
 
 A value that is a `$if c { a } $else { b }` (vlib/builtin's `max_int`, and a local initialized from one) has the type its branches share. `recipe` takes the common recipe of the branches, and gives none when they differ or when a branch has no value, since V keeps one branch and the graph can't tell which. On the V compiler's tree that resolves 3 calls more (603 → 600), 2 of them the `str()` calls on `max_int`.
 
