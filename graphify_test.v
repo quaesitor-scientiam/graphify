@@ -6679,6 +6679,88 @@ fn emit() {
 	assert !calls.any(it.provenance != .undeclared && it.to in ['bare_print', '__malloc'])
 }
 
+// `uintptr_t(41)`, a bare call of `type uintptr_t = usize` in the caller's own module, is a conversion to that alias, so the call resolves to it instead of staying unresolved
+fn test_a_bare_call_of_a_type_alias_in_scope_is_a_conversion_to_it() {
+	g := graph_of({
+		'lib/tests/alias_types.v': 'module tests
+
+type uintptr_t = usize
+'
+		'lib/tests/alias_use.v':   'module tests
+
+fn cast_it() usize {
+	return uintptr_t(41)
+}
+'
+	})
+	calls := g.edges.filter(it.kind == .calls && it.from == 'lib.tests.cast_it')
+	assert calls.any(it.to == 'lib.tests.uintptr_t' && it.provenance == .inferred)
+	assert !calls.any(it.to == 'uintptr_t')
+}
+
+// an alias in a module the caller does not import is not in its scope, so it does not claim a bare call of the same name
+fn test_a_type_alias_the_caller_cannot_see_does_not_claim_a_bare_call() {
+	g := graph_of({
+		'lib/far/types.v':       'module far
+
+type uintptr_t = usize
+'
+		'lib/tests/alias_use.v': 'module tests
+
+fn cast_it() usize {
+	return uintptr_t(41)
+}
+'
+	})
+	calls := g.edges.filter(it.kind == .calls && it.from == 'lib.tests.cast_it')
+	assert !calls.any(it.to == 'lib.far.uintptr_t')
+	assert calls.any(it.to == 'uintptr_t')
+}
+
+// a directory with no `fn main` is built as one program (V test), so a main file in it sees the alias in a sibling file, `_test.v` callers included
+fn test_a_type_alias_is_in_scope_for_a_main_file_in_a_directory_with_no_main() {
+	g := graph_of({
+		'lib/casts/types.v':     'module main
+
+type uintptr_t = usize
+'
+		'lib/casts/cast_test.v': 'module main
+
+fn cast_it() usize {
+	return uintptr_t(41)
+}
+'
+	})
+	calls := g.edges.filter(it.kind == .calls && it.from == 'lib.casts.cast_it')
+	assert calls.any(it.to == 'lib.casts.uintptr_t' && it.provenance == .inferred)
+}
+
+// a directory with several `fn main` is several programs, so an alias in one of them is not a conversion from another
+fn test_a_type_alias_is_not_in_scope_across_programs_in_a_directory_with_several_mains() {
+	g := graph_of({
+		'lib/casts/types.v': 'module main
+
+type uintptr_t = usize
+'
+		'lib/casts/a.v':     'module main
+
+fn main() {
+	cast_it()
+}
+
+fn cast_it() usize {
+	return uintptr_t(41)
+}
+'
+		'lib/casts/b.v':     'module main
+
+fn main() {}
+'
+	})
+	calls := g.edges.filter(it.kind == .calls && it.from == 'lib.casts.cast_it')
+	assert !calls.any(it.to == 'lib.casts.uintptr_t')
+}
+
 fn test_a_primitive_without_a_str_is_undeclared_and_shifts_keep_its_type() {
 	g := graph_of({
 		'lib/lib.v': 'module lib

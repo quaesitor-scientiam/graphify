@@ -589,6 +589,10 @@ struct DeclSite {
 	// solo is set when the module's only `fn main` is this one's: the module
 	// is one program, so its files are one another's module (see resolve_edges)
 	solo bool
+	// no_main is set when the module has no `fn main` at all: a directory of
+	// translated or test files, built together. Only a type alias's lookup
+	// (alias_conversion) takes the module as one program for this.
+	no_main bool
 }
 
 // TypeCand is one declaration that a raw type name (on an `embeds` or
@@ -661,6 +665,8 @@ fn resolve_edges(mut g Graph) {
 	resolve_initializer_callers(mut g)
 	mut by_name := map[string][]CallCand{}
 	mut by_type_name := map[string][]TypeCand{}
+	// type aliases by name, for a bare call of one (see alias_conversion)
+	mut alias_by_name := map[string][]TypeCand{}
 	// enum_names holds each enum by module and name, to recognise V's own zero()
 	// on a flag enum (see below).
 	mut enum_names := map[string]bool{}
@@ -732,6 +738,13 @@ fn resolve_edges(mut g Graph) {
 				file:      s.file
 			}
 		}
+		if s.kind == .type_alias {
+			alias_by_name[s.name] << TypeCand{
+				id:   s.id
+				mod:  s.parent
+				file: s.file
+			}
+		}
 		if s.kind in [SymbolKind.struct_, .enum_, .interface_, .type_alias] {
 			by_type_name[s.name] << TypeCand{
 				id:   s.id
@@ -752,6 +765,7 @@ fn resolve_edges(mut g Graph) {
 				file:    s.file
 				is_main: in_main_unit(s, mains)
 				solo:    main_count[s.parent] == 1
+				no_main: main_count[s.parent] == 0
 			}
 		}
 		// id_count/id_main/id_files feed the build-unit-aware duplicate check
@@ -818,6 +832,7 @@ fn resolve_edges(mut g Graph) {
 				file:    s.file
 				is_main: in_main_unit(s, mains)
 				solo:    main_count[s.parent] == 1
+				no_main: main_count[s.parent] == 0
 			}
 		}
 	}
@@ -1012,6 +1027,22 @@ fn resolve_edges(mut g Graph) {
 				continue
 			}
 			seen_call[key] = resolved.len
+		}
+		// a bare call of a type alias is a conversion to it: `uintptr_t(x)` under
+		// `type uintptr_t = usize`. Only the aliases the caller can see count (see
+		// alias_conversion), and a method call is never one.
+		if e.kind == .calls && !e.is_method && !e.to.contains('.') {
+			if id := alias_conversion(e, alias_by_name, site_of, imports_of) {
+				if !unaddressable[id] {
+					resolved << Edge{
+						from:       e.from
+						to:         id
+						kind:       .calls
+						provenance: .inferred
+					}
+					continue
+				}
+			}
 		}
 		if e.kind == .calls && (e.to.ends_with('__static__zero') || e.to.ends_with('__static__from')
 			|| e.to.ends_with('__static__from_string')) {
@@ -1423,6 +1454,15 @@ fn resolve_type_ref(e Edge, by_type_name map[string][]TypeCand, site_of map[stri
 	// no known site for the referencing declaration means no locality signal
 	// is trustworthy, so stop here rather than guess
 	caller := caller_site(e, site_of) or { return none }
+	return type_in_scope(cands, caller, imports_of, false)
+}
+
+// type_in_scope picks the one candidate a name in the caller's scope refers to, by
+// locality: the caller's own file, then its module, then what its imports reach.
+// none when no candidate is in scope or a step stays ambiguous. mains_share lets a
+// caller in a module with no `fn main` see its module's files as one program, which
+// only a conversion to a type alias needs (see alias_conversion).
+fn type_in_scope(cands []TypeCand, caller DeclSite, imports_of map[string][]string, mains_share bool) ?CallResolution {
 	mut same_file := []TypeCand{}
 	for c in cands {
 		if c.file == caller.file {
@@ -1432,7 +1472,7 @@ fn resolve_type_ref(e Edge, by_type_name map[string][]TypeCand, site_of map[stri
 	if id := only_type_id(same_file) {
 		return CallResolution{ id: id, inferred: true }
 	}
-	if caller.mod != '' && (!caller.is_main || caller.solo) {
+	if caller.mod != '' && (!caller.is_main || caller.solo || (mains_share && caller.no_main)) {
 		mut same_mod := []TypeCand{}
 		for c in cands {
 			if c.mod == caller.mod && !test_private(c.file, caller.file) {
@@ -1454,6 +1494,17 @@ fn resolve_type_ref(e Edge, by_type_name map[string][]TypeCand, site_of map[stri
 		return CallResolution{ id: id, inferred: true }
 	}
 	return none
+}
+
+// alias_conversion is the type alias a bare call names when the call is a conversion
+// to it: V reads `uintptr_t(x)` under `type uintptr_t = usize` as a conversion, not a
+// call of a function. Unlike resolve_type_ref there is no unique-name step: a bare
+// name the caller cannot see is not a conversion of that alias elsewhere in the program.
+fn alias_conversion(e Edge, alias_by_name map[string][]TypeCand, site_of map[string]DeclSite, imports_of map[string][]string) ?string {
+	cands := alias_by_name[e.to] or { return none }
+	caller := caller_site(e, site_of) or { return none }
+	res := type_in_scope(cands, caller, imports_of, true)?
+	return res.id
 }
 
 fn rel_path(root string, path string) string {
