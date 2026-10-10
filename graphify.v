@@ -1355,7 +1355,10 @@ fn resolve_qualified_callee(e Edge, by_name map[string][]CallCand, site_of map[s
 		}
 		// `main` is shared by every standalone program, so the own-module
 		// match there is held to the caller's own file
-		own := prefix == scope.declared && c.mod == scope.mod && (!scope.is_main || c.file == file)
+		// the module id too: a call through the file's own module name is recorded
+		// with the id (callee, in backend_v.v), as `vlib.semver.from` where the file
+		// writes `semver`, and a receiver's type is read through that name (call_result)
+		own :=(prefix == scope.declared || prefix == scope.mod) && c.mod == scope.mod && (!scope.is_main || c.file == file)
 		if own {
 			if !test_private(c.file, file) {
 				fits << c
