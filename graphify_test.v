@@ -4893,6 +4893,41 @@ fn check() bool {
 	assert calls.any(it.to == 'lib.semver.Version.satisfies'), g.edges.map(it.to).str()
 }
 
+// `v.satisfies(...)` on the result of `semver.from(...)` inside `module semver` is `Version`'s method. The
+// module has another `satisfies`, so the name alone can't pick one: the result's type has to come through
+// the module's own name, which the recipe spells with the module id (`lib.semver.from`).
+fn test_a_method_on_a_module_call_result_is_typed_through_the_module_name() {
+	g := graph_of({
+		'lib/semver/semver.v': 'module semver
+
+pub struct Version {}
+
+pub fn from(s string) !Version {
+	return Version{}
+}
+
+pub fn (v Version) satisfies(r string) bool {
+	return true
+}
+
+pub struct Range {}
+
+pub fn (r Range) satisfies(v Version) bool {
+	return true
+}
+'
+		'lib/semver/check_test.v': 'module semver
+
+fn check() bool {
+	v := semver.from(\'0.1.0\') or { return false }
+	return v.satisfies(\'x\')
+}
+'
+	})
+	calls := g.edges.filter(it.kind == .calls && it.from == 'lib.semver.check')
+	assert calls.any(it.to == 'lib.semver.Version.satisfies'), g.edges.map(it.to).str()
+}
+
 fn test_a_per_platform_call_returns_the_type_its_variants_share() {
 	// `open_it` is declared once per platform in a standalone program, so its
 	// variants are renamed apart. They return the same type, so the receiver is typed.
