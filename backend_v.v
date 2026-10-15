@@ -482,9 +482,9 @@ fn (mut f V3File) extract(root flat.NodeId) ([]Symbol, []Edge) {
 		}
 		written := n.value
 		path := resolve_import(written, f.real_path, f.rel)
-		alias := if n.typ != '' { n.typ } else { written.all_after_last('.') }
+		alias := if n.typ_text() != '' { n.typ_text() } else { written.all_after_last('.') }
 		f.imports[alias] = path
-		if n.typ == '' && written != path {
+		if n.typ_text() == '' && written != path {
 			// an unaliased path that redirects (an alias directory, `x.json2`) is
 			// still written as it was
 			f.imports[written] = path
@@ -500,7 +500,7 @@ fn (mut f V3File) extract(root flat.NodeId) ([]Symbol, []Edge) {
 			name:      path
 			kind:      .import_
 			signature: 'import ${path}' + if alias != path { ' as ${alias}' } else { '' } +
-				if n.typ == '' && written != path { ' from ${written}' } else { '' }
+				if n.typ_text() == '' && written != path { ' from ${written}' } else { '' }
 			file:      f.rel
 			line:      f.line_of(n.pos.offset)
 			parent:    mod_id
@@ -591,8 +591,8 @@ fn (mut f V3File) extract_implied_imports(declared string, mut syms []Symbol, mu
 		if n.kind == .decl_assign && n.value == 'shared' {
 			found << 'sync'
 		}
-		if n.typ != '' && n.kind != .struct_init {
-			words := type_words(n.typ)
+		if n.typ_text() != '' && n.kind != .struct_init {
+			words := type_words(n.typ_text())
 			if 'chan' in words || 'shared' in words {
 				found << 'sync'
 			}
@@ -772,7 +772,7 @@ fn (mut f V3File) extract_fn(id flat.NodeId, mut syms []Symbol, mut edges []Edge
 	if is_method {
 		r := f.node(params[0])
 		recv_name = r.value
-		recv_typ = f.type_text(r.typ)
+		recv_typ = f.type_text(r.typ_text())
 		fid = '${f.mod_id}.${recv_typ.trim_left('&')}.${name}'
 	}
 	mut sig := if f.line_is_pub(line) { 'pub fn ' } else { 'fn ' }
@@ -783,11 +783,11 @@ fn (mut f V3File) extract_fn(id flat.NodeId, mut syms []Symbol, mut edges []Edge
 	mut parts := []string{}
 	for i := start; i < params.len; i++ {
 		pn := f.node(params[i])
-		parts << '${pn.value} ${f.type_text(pn.typ)}'
+		parts << '${pn.value} ${f.type_text(pn.typ_text())}'
 	}
 	sig += '${name}(${parts.join(', ')})'
-	if n.typ != '' && n.typ != 'void' {
-		sig += ' ${f.type_text(n.typ)}'
+	if n.typ_text() != '' && n.typ_text() != 'void' {
+		sig += ' ${f.type_text(n.typ_text())}'
 	}
 	f.add_symbol(mut syms, mut edges, Symbol{
 		id:        fid
@@ -808,17 +808,17 @@ fn (mut f V3File) extract_fn(id flat.NodeId, mut syms []Symbol, mut edges []Edge
 		add_ref(fid, f.type_ref(recv_typ), f.rel, mut edges, mut rseen)
 	}
 	for i := start; i < params.len; i++ {
-		add_ref(fid, f.type_ref(f.node(params[i]).typ), f.rel, mut edges, mut rseen)
+		add_ref(fid, f.type_ref(f.node(params[i]).typ_text()), f.rel, mut edges, mut rseen)
 	}
-	if n.typ != '' && n.typ != 'void' {
-		add_ref(fid, f.type_ref(n.typ), f.rel, mut edges, mut rseen)
+	if n.typ_text() != '' && n.typ_text() != 'void' {
+		add_ref(fid, f.type_ref(n.typ_text()), f.rel, mut edges, mut rseen)
 	}
 	mut locals := map[string]string{}
 	mut vars := map[string]string{}
 	for pid in params {
 		pn := f.node(pid)
 		if pn.value != '' && pn.value != '_' {
-			vars[pn.value] = if pn.typ != '' { 't:' + f.type_text(pn.typ) } else { '' }
+			vars[pn.value] = if pn.typ_text() != '' { 't:' + f.type_text(pn.typ_text()) } else { '' }
 		}
 	}
 	for i := start; i < params.len; i++ {
@@ -877,21 +877,21 @@ fn (mut f V3File) extract_struct(id flat.NodeId, mut syms []Symbol, mut edges []
 		if fd.kind != .field_decl {
 			continue
 		}
-		base := base_name(fd.typ)
-		if fd.value == fd.typ && base.len > 0 && base[0].is_capital() {
+		base := base_name(fd.typ_text())
+		if fd.value == fd.typ_text() && base.len > 0 && base[0].is_capital() {
 			// an embedded struct: V3 lists it as a field named by its type as
 			// written, `Base`, `veb.Middleware[Context]`
 			edges << Edge{
 				from: sid
-				to:   f.type_ref(fd.typ)
+				to:   f.type_ref(fd.typ_text())
 				kind: .embeds
 				file: f.rel
 			}
-			add_ref(sid, f.type_ref(fd.typ), f.rel, mut edges, mut rseen)
+			add_ref(sid, f.type_ref(fd.typ_text()), f.rel, mut edges, mut rseen)
 			continue
 		}
 		fline := f.line_of(fd.pos.offset)
-		tname := f.type_text(fd.typ)
+		tname := f.type_text(fd.typ_text())
 		fname := fd.value.trim_left('@')
 		f.add_symbol(mut syms, mut edges, Symbol{
 			id:        '${sid}.${fname}'
@@ -905,7 +905,7 @@ fn (mut f V3File) extract_struct(id flat.NodeId, mut syms []Symbol, mut edges []
 			parent:    sid
 		})
 		f.walk_initializer(.field, fname, fline, f.kids(k), mut edges)
-		add_ref(sid, f.type_ref(fd.typ), f.rel, mut edges, mut rseen)
+		add_ref(sid, f.type_ref(fd.typ_text()), f.rel, mut edges, mut rseen)
 	}
 }
 
@@ -979,14 +979,14 @@ fn (mut f V3File) extract_interface(id flat.NodeId, mut syms []Symbol, mut edges
 			for pk in f.kids(k) {
 				pn := f.node(pk)
 				if pn.kind == .param {
-					parts << '${pn.value} ${f.type_text(pn.typ)}'
-					add_ref(mid, f.type_ref(pn.typ), f.rel, mut edges, mut mseen)
+					parts << '${pn.value} ${f.type_text(pn.typ_text())}'
+					add_ref(mid, f.type_ref(pn.typ_text()), f.rel, mut edges, mut mseen)
 				}
 			}
 			mut sig := 'fn (${short}) ${m.value}(${parts.join(', ')})'
-			if m.typ != '' && m.typ != 'void' {
-				sig += ' ${f.type_text(m.typ)}'
-				add_ref(mid, f.type_ref(m.typ), f.rel, mut edges, mut mseen)
+			if m.typ_text() != '' && m.typ_text() != 'void' {
+				sig += ' ${f.type_text(m.typ_text())}'
+				add_ref(mid, f.type_ref(m.typ_text()), f.rel, mut edges, mut mseen)
 			}
 			f.add_symbol(mut syms, mut edges, Symbol{
 				id:        mid
@@ -1005,7 +1005,7 @@ fn (mut f V3File) extract_interface(id flat.NodeId, mut syms []Symbol, mut edges
 		// an embedded interface is a member with no type and a capitalized
 		// name; fields are lower case
 		base := base_name(m.value)
-		if m.typ == '' && base.len > 0 && base[0].is_capital() {
+		if m.typ_text() == '' && base.len > 0 && base[0].is_capital() {
 			edges << Edge{
 				from: iid
 				to:   f.type_ref(m.value)
@@ -1015,19 +1015,19 @@ fn (mut f V3File) extract_interface(id flat.NodeId, mut syms []Symbol, mut edges
 			add_ref(iid, f.type_ref(m.value), f.rel, mut edges, mut rseen)
 			continue
 		}
-		if m.typ != '' {
+		if m.typ_text() != '' {
 			f.add_symbol(mut syms, mut edges, Symbol{
 				id:        '${iid}.${m.value}'
 				name:      m.value
 				kind:      .field
-				signature: '${m.value} ${f.type_text(m.typ)}'
+				signature: '${m.value} ${f.type_text(m.typ_text())}'
 				file:      f.rel
 				line:      mline
 				end_line:  mline
 				is_pub:    is_pub
 				parent:    iid
 			})
-			add_ref(iid, f.type_ref(m.typ), f.rel, mut edges, mut rseen)
+			add_ref(iid, f.type_ref(m.typ_text()), f.rel, mut edges, mut rseen)
 		}
 	}
 }
@@ -1070,7 +1070,7 @@ fn (mut f V3File) extract_globals(id flat.NodeId, mut syms []Symbol, mut edges [
 			continue
 		}
 		value := f.kids(k)
-		typ := if g.typ != '' { f.type_text(g.typ) } else { '' }
+		typ := if g.typ_text() != '' { f.type_text(g.typ_text()) } else { '' }
 		line := f.line_of(g.pos.offset)
 		f.add_symbol(mut syms, mut edges, Symbol{
 			id:        '${f.mod_id}.${g.value}'
@@ -1093,7 +1093,7 @@ fn (mut f V3File) extract_globals(id flat.NodeId, mut syms []Symbol, mut edges [
 		f.walk_initializer(.global, g.value, line, value, mut edges)
 		if typ != '' {
 			mut rseen := map[string]bool{}
-			add_ref('${f.mod_id}.${g.value}', f.type_ref(g.typ), f.rel, mut edges, mut rseen)
+			add_ref('${f.mod_id}.${g.value}', f.type_ref(g.typ_text()), f.rel, mut edges, mut rseen)
 		}
 	}
 }
@@ -1116,7 +1116,7 @@ fn (mut f V3File) extract_type(id flat.NodeId, mut syms []Symbol, mut edges []Ed
 		}
 		rhs = parts.join(' | ')
 	} else {
-		rhs = f.type_text(n.typ)
+		rhs = f.type_text(n.typ_text())
 		if rhs.starts_with('fn') {
 			parts << fn_type_parts(rhs)
 		} else {
@@ -1145,10 +1145,10 @@ fn (mut f V3File) extract_type(id flat.NodeId, mut syms []Symbol, mut edges []Ed
 // V3CallCtx.locals.
 fn (f &V3File) param_type(pn &flat.Node) ?string {
 	// a function value keeps its written type, whose return type a call of it has
-	if pn.value != '' && pn.value != '_' && pn.typ.starts_with('fn') {
-		return pn.typ
+	if pn.value != '' && pn.value != '_' && pn.typ_text().starts_with('fn') {
+		return pn.typ_text()
 	}
-	t := f.recv_type(pn.typ)
+	t := f.recv_type(pn.typ_text())
 	if pn.value != '' && pn.value != '_' && t.bytes().all(it.is_alnum() || it == `_` || it == `.`)
 		&& !is_generic_param(t.all_after_last('.')) {
 		return t
@@ -1609,7 +1609,7 @@ fn (mut f V3File) walk(id flat.NodeId, ctx V3CallCtx, mut edges []Edge, mut seen
 				p := f.node(k)
 				if p.kind == .param && p.value != '' {
 					names << p.value
-					recipes << if p.typ != '' { 't:' + f.type_text(p.typ) } else { '' }
+					recipes << if p.typ_text() != '' { 't:' + f.type_text(p.typ_text()) } else { '' }
 				}
 			}
 			mut inner := ctx.with_vars(names, recipes)
@@ -1782,7 +1782,7 @@ fn (f &V3File) type_arg(id flat.NodeId) ?string {
 	} else if n.kind == .map_init || n.kind == .array_init {
 		// a map or array type written out, `map[string]json.Any`, as the type itself,
 		// with its module names as the file's imports give them
-		t := if n.typ != '' { n.typ } else { n.value }
+		t := if n.typ_text() != '' { n.typ_text() } else { n.value }
 		return if t == '' { none } else { f.type_text(t) }
 	} else if n.kind == .index {
 		// a generic struct written out, `AnyStruct[json.Any]`: its name and its type
@@ -1931,7 +1931,7 @@ fn (f &V3File) recipe(id flat.NodeId, ctx V3CallCtx) string {
 			}
 		}
 		.array_init {
-			t := if n.typ != '' { n.typ } else { n.value }
+			t := if n.typ_text() != '' { n.typ_text() } else { n.value }
 			if t != '' {
 				return 't:' + f.type_text(t)
 			}
@@ -1940,8 +1940,8 @@ fn (f &V3File) recipe(id flat.NodeId, ctx V3CallCtx) string {
 			// `sql db { select from T }!` has the type the ORM transform gives the block:
 			// `![]T` for a select, `!int` for a write or a count, `!orm.AggregateValue`
 			// for an aggregate. The parser writes it as `typ`; `!void` has no value.
-			if n.typ.len > 1 && n.typ.starts_with('!') && n.typ != '!void' {
-				return 't:' + f.type_text(n.typ[1..])
+			if n.typ_text().len > 1 && n.typ_text().starts_with('!') && n.typ_text() != '!void' {
+				return 't:' + f.type_text(n.typ_text()[1..])
 			}
 		}
 		.spawn_expr {
@@ -2061,8 +2061,8 @@ fn (f &V3File) recipe(id flat.NodeId, ctx V3CallCtx) string {
 				// `xs.map(fn (x T) R { ... })`: the closure's written return type, R,
 				// is the element type of the array it makes
 				if name == 'map' && kids.len == 2 && f.node(kids[1]).kind == .fn_literal
-					&& f.node(kids[1]).typ != '' {
-					rec += recipe_sep + 'mapto:' + f.type_text(f.node(kids[1]).typ)
+					&& f.node(kids[1]).typ_text() != '' {
+					rec += recipe_sep + 'mapto:' + f.type_text(f.node(kids[1]).typ_text())
 				}
 				return rec
 			}
@@ -2131,8 +2131,8 @@ fn (f &V3File) match_pattern_type(pat flat.NodeId) ?string {
 			}
 		}
 		.array_init {
-			if kids.len == 0 && n.typ.starts_with('[') {
-				return n.typ
+			if kids.len == 0 && n.typ_text().starts_with('[') {
+				return n.typ_text()
 			}
 		}
 		else {}
