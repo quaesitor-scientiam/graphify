@@ -7114,6 +7114,35 @@ fn test_a_membership_test_is_a_bool_for_the_method_on_it() {
 	assert 'demo.bool.describe' in targets, targets.str()
 }
 
+fn test_a_method_on_a_type_parameter_links_to_each_instantiations_method() {
+	// `show[T]` calls describe() on a value of type T, and it is called with a Box and a
+	// Pen, so the call reaches the describe() of each
+	root := write_tree('generic_instantiation', {
+		'demo.v': 'module demo\n\npub struct Box {\n}\n\npub fn (b Box) describe() string {\n\treturn \'box\'\n}\n\npub struct Pen {\n}\n\npub fn (p Pen) describe() string {\n\treturn \'pen\'\n}\n\npub fn show[T](v T) string {\n\treturn v.describe()\n}\n\npub fn run() string {\n\treturn show(Box{}) + show(Pen{})\n}\n'
+	})
+	defer {
+		os.rmdir_all(root) or {}
+	}
+	g := build_graph(Options{ root: root })
+	targets := g.edges.filter(it.kind == .calls && it.from == 'demo.show').map(it.to)
+	assert 'demo.Box.describe' in targets, targets.str()
+	assert 'demo.Pen.describe' in targets, targets.str()
+}
+
+fn test_a_slice_parameter_takes_the_element_type_of_its_argument() {
+	// `push[T](mut q []T)` is called with a []Node, so the method call on an element
+	// of type T reaches Node.weight
+	root := write_tree('slice_param_instantiation', {
+		'demo.v': 'module demo\n\npub struct Node {\n\tv int\n}\n\npub fn (n Node) weight() int {\n\treturn n.v\n}\n\nfn push[T](mut q []T, x int) {\n\tfor e in q {\n\t\t_ = e.weight()\n\t}\n\t_ = x\n}\n\npub fn run() {\n\tmut q := []Node{}\n\tpush(mut q, 1)\n}\n'
+	})
+	defer {
+		os.rmdir_all(root) or {}
+	}
+	g := build_graph(Options{ root: root })
+	targets := g.edges.filter(it.kind == .calls && it.from == 'demo.push').map(it.to)
+	assert 'demo.Node.weight' in targets, targets.str()
+}
+
 fn test_a_c_binding_result_type_picks_the_method_among_same_named_ones() {
 	// two types declare `size`, so only the result type of C.make_thing() can tell
 	// which one the call means

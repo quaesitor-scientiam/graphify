@@ -1013,6 +1013,8 @@ fn resolve_edges(mut g Graph) {
 							kind:       .calls
 							is_method:  e.is_method
 							provenance: if res.inferred { .inferred } else { .extracted }
+							file:       e.file
+	arg_sites:  e.arg_sites
 						}
 					}
 					continue
@@ -1029,6 +1031,8 @@ fn resolve_edges(mut g Graph) {
 							kind:       .calls
 							is_method:  e.is_method
 							provenance: .inferred
+							file:       e.file
+	arg_sites:  e.arg_sites
 						}
 					}
 				}
@@ -1046,6 +1050,8 @@ fn resolve_edges(mut g Graph) {
 						to:         res.id
 						kind:       e.kind
 						provenance: if res.inferred { .inferred } else { .extracted }
+						file:       e.file
+	arg_sites:  e.arg_sites
 					}
 					continue
 				}
@@ -1106,7 +1112,16 @@ fn resolve_edges(mut g Graph) {
 		}
 		resolved << e
 	}
-	g.edges = resolved
+	// a method call on a type parameter is linked to the methods of the types its
+	// generic function is called with (generics.v); only functions with type parameters
+	// carry a recipe
+	mut generic_funcs := map[string]Symbol{}
+	for s in g.symbols {
+		if s.kind == .function && s.recipe != '' {
+			generic_funcs[s.id] = s
+		}
+	}
+	g.edges = expand_type_param_calls(resolved, mut inf, generic_funcs)
 }
 
 // runtime_helpers are the names of V's runtime helpers, as the bare builtin declares
