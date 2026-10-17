@@ -7101,6 +7101,21 @@ fn test_the_value_of_a_generated_enum_from_is_the_enum() {
 	assert 'demo.Colour.size' in targets, targets.str()
 }
 
+fn test_a_c_binding_result_type_picks_the_method_among_same_named_ones() {
+	// two types declare `size`, so only the result type of C.make_thing() can tell
+	// which one the call means
+	root := write_tree('c_binding_result_type', {
+		'demo.v': 'module demo\n\npub struct Thing {\n}\n\npub fn (t Thing) size() int {\n\treturn 1\n}\n\npub struct Other {\n}\n\npub fn (o Other) size() int {\n\treturn 2\n}\n\nfn C.make_thing() Thing\n\npub fn use_it() int {\n\treturn C.make_thing().size()\n}\n'
+	})
+	defer {
+		os.rmdir_all(root) or {}
+	}
+	g := build_graph(Options{ root: root })
+	targets := g.edges.filter(it.kind == .calls && it.from == 'demo.use_it').map(it.to)
+	assert 'demo.Thing.size' in targets, targets.str()
+	assert 'demo.Other.size' !in targets, targets.str()
+}
+
 fn test_a_c_binding_declared_in_several_test_files_is_one_function() {
 	// each test file is its own build unit, so a V function of one name there is one
 	// per file; a C binding is one function, so the call in use.v reaches `C.puts`
