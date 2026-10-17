@@ -75,9 +75,11 @@ pub fn get_string_array() &&char {
 '
 	syms, _ := extract_v_text(src, 'demo.v')
 	fns := syms.filter(it.kind == .function)
-	assert fns.len == 1
-	assert fns[0].id == 'demo.get_string_array'
-	assert fns[0].name == 'get_string_array'
+	// the binding is a symbol of its own, under the C namespace, so the two ids differ
+	mut ids := fns.map(it.id)
+	ids.sort()
+	assert ids == ['C.get_string_array', 'demo.get_string_array'], ids.str()
+	assert fns.filter(it.id == 'demo.get_string_array')[0].name == 'get_string_array'
 }
 
 fn test_top_level_comptime_if_declarations_are_extracted() {
@@ -7052,4 +7054,81 @@ fn test_a_worker_crash_is_recovered_from_on_both_paths() {
 	worker := compile_crash_worker(dir)
 	check_carry_forward(worker, dir)
 	check_first_sighting(worker, dir)
+}
+
+fn test_a_c_function_binding_is_a_symbol_and_types_the_call_that_uses_it() {
+	// `fn C.name(...)` is a function of the C namespace: a symbol with id `C.name`,
+	// and a call of it has the result type its declaration gives
+	root := write_tree('c_extern_binding', {
+		'demo.v': 'module demo\n\npub struct Thing {\n}\n\npub fn (t Thing) size() int {\n\treturn 1\n}\n\nfn C.make_thing() Thing\n\nfn C.puts(s &char) int\n\npub fn use_it() int {\n\treturn C.make_thing().size() + C.puts(unsafe { nil })\n}\n'
+	})
+	defer {
+		os.rmdir_all(root) or {}
+	}
+	g := build_graph(Options{ root: root })
+	assert g.symbols.any(it.id == 'C.puts' && it.kind == .function), g.symbols.map(it.id).str()
+	assert g.symbols.any(it.id == 'C.make_thing' && it.signature == 'fn C.make_thing() Thing'), g.symbols.map(it.id).str()
+	assert g.edges.any(it.kind == .calls && it.from == 'demo.use_it' && it.to == 'C.puts'), g.edges.filter(it.from == 'demo.use_it').map(it.to).str()
+	assert g.edges.any(it.kind == .calls && it.from == 'demo.use_it' && it.to == 'demo.Thing.size'), g.edges.filter(it.from == 'demo.use_it').map(it.to).str()
+}
+
+fn test_a_c_call_the_program_binds_nowhere_is_undeclared() {
+	// `C.puts` is bound in the program, so its call resolves; `C.close` is declared
+	// only by a system header, so its call is undeclared, as a runtime helper's is
+	root := write_tree('c_call_undeclared', {
+		'demo.v': 'module demo\n\nfn C.puts(s &char) int\n\npub fn say() int {\n\treturn C.puts(unsafe { nil }) + C.close(1)\n}\n'
+	})
+	defer {
+		os.rmdir_all(root) or {}
+	}
+	g := build_graph(Options{ root: root })
+	calls := g.edges.filter(it.kind == .calls && it.from == 'demo.say')
+	assert calls.any(it.to == 'C.puts' && it.provenance != .undeclared), calls.map(it.to).str()
+	assert calls.any(it.to == 'C.close' && it.provenance == .undeclared), calls.map(it.to).str()
+}
+
+fn test_the_value_of_a_generated_enum_from_is_the_enum() {
+	// V generates `Colour.from(x)` for every enum, and it returns a Colour, so a method
+	// on its value is the enum's method
+	root := write_tree('enum_from_value', {
+		'demo.v': 'module demo\n\npub enum Colour as u8 {\n\tred\n}\n\npub fn (c Colour) size() int {\n\treturn 1\n}\n\npub fn pick() int {\n\tc := Colour.from(u8(1)) or { Colour.red }\n\treturn c.size()\n}\n'
+	})
+	defer {
+		os.rmdir_all(root) or {}
+	}
+	g := build_graph(Options{ root: root })
+	targets := g.edges.filter(it.kind == .calls && it.from == 'demo.pick').map(it.to)
+	assert 'demo.Colour.size' in targets, targets.str()
+}
+
+fn test_a_c_binding_declared_in_several_test_files_is_one_function() {
+	// each test file is its own build unit, so a V function of one name there is one
+	// per file; a C binding is one function, so the call in use.v reaches `C.puts`
+	root := write_tree('c_binding_copies', {
+		'a_test.v': 'module demo\n\nfn C.puts(s &char) int\n\nfn test_a() {\n\t_ = C.puts(unsafe { nil })\n}\n'
+		'b_test.v': 'module demo\n\nfn C.puts(s &char) int\n\nfn test_b() {\n\t_ = C.puts(unsafe { nil })\n}\n'
+		'use.v':    'module demo\n\npub fn use_it() int {\n\treturn C.puts(unsafe { nil })\n}\n'
+	})
+	defer {
+		os.rmdir_all(root) or {}
+	}
+	g := build_graph(Options{ root: root })
+	targets := g.edges.filter(it.kind == .calls && it.from == 'demo.use_it').map(it.to)
+	// the call reaches one copy of the binding, which may carry its file as a suffix
+	assert targets.any(it.all_before('@') == 'C.puts'), targets.str()
+}
+
+fn test_a_c_type_conversion_is_a_call_of_the_c_type() {
+	// `type C.DWORD = u32` is a C type, and `C.DWORD(x)` converts to it, so the call
+	// reaches the type rather than staying unresolved
+	root := write_tree('c_type_conversion', {
+		'demo.c.v': 'module demo\n\ntype C.DWORD = u32\n\npub fn conv() u32 {\n\treturn C.DWORD(3)\n}\n'
+	})
+	defer {
+		os.rmdir_all(root) or {}
+	}
+	g := build_graph(Options{ root: root })
+	assert g.symbols.any(it.id == 'C.DWORD' && it.kind == .type_alias), g.symbols.map(it.id).str()
+	targets := g.edges.filter(it.kind == .calls && it.from == 'demo.conv').map(it.to)
+	assert 'C.DWORD' in targets, targets.str()
 }

@@ -687,10 +687,15 @@ fn resolve_edges(mut g Graph) {
 	mut flag_in_mod := map[string]bool{}
 	// sym_ids holds every symbol id, to see whether an enum declares a method
 	mut sym_ids := map[string]bool{}
+	// c_declared holds the names of the C functions the program binds (`fn C.name`)
+	mut c_declared := map[string]bool{}
 	// a field's site is its struct, so a struct maps to its own module
 	mut struct_mod := map[string]string{}
 	for s in g.symbols {
 		sym_ids[s.id] = true
+		if (s.kind == .function || s.kind == .type_alias) && s.id.starts_with('C.') {
+			c_declared[s.id.all_before('@')] = true
+		}
 		if s.kind == .enum_ {
 			enum_names[s.parent + '\x00' + s.name] = true
 			flagged := s.signature.starts_with('@[flag]')
@@ -742,14 +747,26 @@ fn resolve_edges(mut g Graph) {
 			scope_of[s.file] = sc
 		}
 		if s.kind == .function || s.kind == .method {
-			by_name[s.name] << CallCand{
+			// a C binding is reached only as `C.name(...)`, so it is indexed under that
+			// name, where a bare `name(...)` does not find it
+			key := if s.id.starts_with('C.') { 'C.' + s.name } else { s.name }
+			by_name[key] << CallCand{
 				id:        s.id
 				is_method: s.kind == .method
 				mod:       s.parent // fn/method symbols hang off their module
 				file:      s.file
 			}
 		}
-		if s.kind == .type_alias {
+		if s.kind == .type_alias && s.id.starts_with('C.') {
+			// a C type is reached only as `C.name(x)`, a conversion, so it is indexed
+			// under that name, as a C function is (see c_binding_callee)
+			by_name['C.' + s.name] << CallCand{
+				id:   s.id
+				mod:  s.parent
+				file: s.file
+			}
+		}
+		if s.kind == .type_alias && !s.id.starts_with('C.') {
 			alias_by_name[s.name] << TypeCand{
 				id:   s.id
 				mod:  s.parent
@@ -806,7 +823,9 @@ fn resolve_edges(mut g Graph) {
 	// shared id addresses correctly.
 	mut unaddressable := map[string]bool{}
 	for id, n in id_count {
-		if n < 2 {
+		// a C binding's id names one C function, however many files declare it (C has
+		// one namespace), so the copies are one function, not separate programs
+		if n < 2 || id.starts_with('C.') {
 			continue
 		}
 		if id_main[id] {
@@ -1075,6 +1094,13 @@ fn resolve_edges(mut g Graph) {
 		// default build doesn't compile, and the arena hooks it calls through: a call of
 		// one that no program declaration resolves is into the runtime, not the program
 		if e.kind == .calls && e.to in runtime_helpers {
+			resolved << Edge{...e, provenance: .undeclared}
+			continue
+		}
+		// a call of a C function the program binds nowhere (`C.close`, `C.memcpy`) is one a
+		// system header declares, the same as a runtime helper; a binding that exists but
+		// does not resolve (two copies that differ) is still unresolved
+		if e.kind == .calls && e.to.starts_with('C.') && e.to.count('.') == 1 && e.to !in c_declared {
 			resolved << Edge{...e, provenance: .undeclared}
 			continue
 		}
@@ -1385,6 +1411,9 @@ fn resolve_by_receiver_type(e Edge, cands []CallCand, site_of map[string]DeclSit
 // this pass. A single fit is `extracted`, since the source itself named the
 // module and there was nothing left to choose between.
 fn resolve_qualified_callee(e Edge, by_name map[string][]CallCand, site_of map[string]DeclSite, scope_of map[string]FileScope) ?CallResolution {
+	if e.to.starts_with('C.') {
+		return c_binding_callee(e, by_name)
+	}
 	prefix := e.to.all_before_last('.')
 	cands := by_name[e.to.all_after_last('.')] or { return none }
 	file := if e.file != '' { e.file } else { (site_of[e.from] or { return none }).file }
@@ -1412,6 +1441,19 @@ fn resolve_qualified_callee(e Edge, by_name map[string][]CallCand, site_of map[s
 	id := only_id(if imported != '' { exact_calls(fits, imported) } else { fits })?
 	return CallResolution{
 		id:       id
+		inferred: false
+	}
+}
+
+// c_binding_callee resolves a call of a C binding, `C.name(...)`, to the function of
+// that name in the C namespace. A binding that more than one file declares is one
+// function when the copies share a base id; the call reaches each through variants_of.
+fn c_binding_callee(e Edge, by_name map[string][]CallCand) ?CallResolution {
+	cands := by_name[e.to] or { return none }
+	// every candidate is a declaration of the same C name, so they share one id, which
+	// names the function
+	return CallResolution{
+		id:       cands[0].id
 		inferred: false
 	}
 }
