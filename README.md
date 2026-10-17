@@ -572,18 +572,25 @@ v run bin/update-vlang-graph.vsh                  # pull both; extract if anythi
 v run bin/update-vlang-graph.vsh -NoPull          # pull neither, always re-extract
 v run bin/update-vlang-graph.vsh -Commit <sha>    # move up to that commit, not the newest
 v run bin/update-vlang-graph.vsh -NoBuild         # never rebuild graphify
+v run bin/update-vlang-graph.vsh -PrintStamp      # print the build stamp and stop
 ```
 
 The graph depends on graphify's own code and on the V parser it was compiled
 with, the `vlib` of the `v` on `PATH`, so a binary built before either one
 changed extracts a different graph. The script records what each build saw in
-`bin/.build-stamp` (graphify's commit and uncommitted changes, `v version`,
-and `vlib`'s git tree) and, after pulling, rebuilds `bin/graphify` and any
-`graphify-mcp` and `graphify-hook` beside it whenever that no longer matches.
-Each binary is built under a temporary name and swapped in, so an MCP server
-that is running it doesn't block the build on Windows. When the `v` on `PATH`
-is the vlang checkout being extracted, a pull that changes `vlib` triggers the
-rebuild by itself.
+`bin/.build-stamp` (graphify's commit and uncommitted changes, and the git
+tree of each `vlib/v` directory graphify compiles in, which `v -print-v-files`
+lists) and, after pulling, rebuilds `bin/graphify` and any `graphify-mcp` and
+`graphify-hook` beside it whenever that no longer matches. Each binary is built
+under a temporary name and swapped in, so an MCP server that is running it
+doesn't block the build on Windows. When the `v` on `PATH` is the vlang
+checkout being extracted, a pull that changes one of those directories (the
+parser: `flat`, `parser`, `scanner`, `token`, and a few helpers) triggers the
+rebuild by itself; a pull that only touches the rest of `vlib` (`os`,
+`strings`, ...) or rebuilds `v` does not, since it can't change the graph. If
+`v` isn't a git checkout, or the compiler can't list the directories, the stamp
+falls back to `v version` and the whole of `vlib`. `-PrintStamp` prints the
+stamp and stops.
 
 graphify's own checkout is fast-forwarded first, so a change merged to
 master reaches every machine on its next scheduled run. A checkout with

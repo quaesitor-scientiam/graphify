@@ -269,8 +269,8 @@ with the graphify CLI that would re-extract it; the CLI prints the note on
 stderr and the MCP server puts it at the top of a tool result, rechecking at
 most once a minute (one `git rev-parse` and one hash of the CLI). The MCP
 server also reloads `graph.json` when an extract replaces it, and
-`update-vlang-graph.vsh` rebuilds graphify when its code or V's `vlib`
-changed. Nothing re-extracts on its own: an automatic refresh would make a
+`update-vlang-graph.vsh` rebuilds graphify when its code or the `vlib/v`
+directories it compiles in changed. Nothing re-extracts on its own: an automatic refresh would make a
 read-only query pay for an extract.
 
 Still open: uncommitted edits aren't detected (they're the normal state of a

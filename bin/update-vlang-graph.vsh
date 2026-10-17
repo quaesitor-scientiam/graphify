@@ -9,12 +9,16 @@
 //   v run bin/update-vlang-graph.vsh -NoPull            # pull neither, always re-extract
 //   v run bin/update-vlang-graph.vsh -Commit <sha>      # move up to that commit, not the newest
 //   v run bin/update-vlang-graph.vsh -NoBuild           # never rebuild graphify
+//   v run bin/update-vlang-graph.vsh -PrintStamp        # print the build stamp and stop
 //
 // The graph depends on graphify's own code and on the V parser it was compiled
 // with (the vlib of the `v` on PATH), so a binary built before either changed
 // extracts a different graph. The script records what each build saw in
-// bin/.build-stamp and rebuilds bin/graphify (and graphify-mcp and
-// graphify-hook, when present) whenever that no longer matches.
+// bin/.build-stamp (graphify's commit and uncommitted changes, and the git
+// tree of each vlib/v directory graphify compiles in, found with
+// `v -print-v-files`) and rebuilds bin/graphify (and graphify-mcp and
+// graphify-hook, when present) whenever that no longer matches. A change to
+// the rest of vlib, such as os or strings, doesn't rebuild.
 //
 // -Commit makes two machines extract exactly the same source: it fast-forwards
 // the repo to that commit and never moves it back or off its branch.
@@ -37,9 +41,10 @@ struct Config {
 
 struct Options {
 mut:
-	no_pull  bool
-	no_build bool
-	commit   string
+	no_pull     bool
+	no_build    bool
+	print_stamp bool
+	commit      string
 }
 
 const stamp_name = '.build-stamp'
@@ -76,6 +81,9 @@ fn parse_args(args []string) !Options {
 			}
 			'-NoBuild' {
 				o.no_build = true
+			}
+			'-PrintStamp' {
+				o.print_stamp = true
 			}
 			'-Commit' {
 				if i + 1 >= args.len {
@@ -161,9 +169,34 @@ fn find_v() string {
 	return os.find_abs_path_of_executable('v') or { @VEXE }
 }
 
-// build_stamp names what a graphify build depends on: graphify's commit
-// (plus its uncommitted changes), the V compiler's version, and the vlib it
-// compiles against.
+// v_dirs_compiled_in lists the `vlib/v` directories (`v/flat`, `v/parser`, ...)
+// that graphify's programs compile in, as the V compiler reports them. The
+// rest of vlib (os, strings, ...) is compiled in too, but only these hold the
+// parser the graph is read through. Empty when the compiler can't say.
+fn v_dirs_compiled_in(graphify_root string, v_exe string) []string {
+	mut dirs := map[string]bool{}
+	for program in ['cmd/cli', 'cmd/mcp'] {
+		res := os.exec([v_exe, '-print-v-files', os.join_path(graphify_root, program)])
+		if res.exit_code != 0 {
+			return []
+		}
+		for line in res.output.split_into_lines() {
+			path := line.trim_space().replace('\\', '/')
+			i := path.last_index('/vlib/v/') or { continue }
+			rest := path[i + '/vlib/v/'.len..]
+			dirs[if rest.contains('/') { 'v/' + rest.all_before_last('/') } else { 'v' }] = true
+		}
+	}
+	mut out := dirs.keys()
+	out.sort()
+	return out
+}
+
+// build_stamp names what a graphify build depends on: graphify's commit (plus
+// its uncommitted changes) and the git tree of each vlib/v directory it
+// compiles in. A change elsewhere in vlib, or a rebuilt `v`, doesn't alter the
+// graph, so it doesn't count: most of vlang's pulls touch vlib, and a rebuild
+// and a cold re-extract after each is minutes of work.
 fn build_stamp(graphify_root string, v_exe string) !string {
 	v_root := os.dir(os.real_path(v_exe))
 	mut lines := []string{}
@@ -172,12 +205,26 @@ fn build_stamp(graphify_root string, v_exe string) !string {
 	if diff.output.trim_space() != '' {
 		lines << 'graphify-diff ${sha256.hexhash(diff.output)}'
 	}
+	mut trees := []string{}
+	for dir in v_dirs_compiled_in(graphify_root, v_exe) {
+		tree := git(v_root, 'rev-parse', 'HEAD:vlib/${dir}')
+		if tree.exit_code != 0 {
+			trees.clear()
+			break
+		}
+		trees << 'vlib/${dir} ${tree.output.trim_space()}'
+	}
+	if trees.len > 0 {
+		lines << trees
+		return lines.join('\n')
+	}
+	// the compiler couldn't say what is compiled in, or `v` isn't a git
+	// checkout: fall back to the compiler's version and the whole of vlib
 	lines << 'v ${os.exec([v_exe, 'version']).output.trim_space()}'
 	vlib := git(v_root, 'rev-parse', 'HEAD:vlib')
 	if vlib.exit_code == 0 {
 		lines << 'vlib ${vlib.output.trim_space()}'
 	} else {
-		// not a git checkout: the version line above is all there is
 		lines << 'vlib ${v_root}'
 	}
 	return lines.join('\n')
@@ -307,6 +354,13 @@ fn main() {
 	opts := parse_args(os.args[1..]) or {
 		eprintln('${err}')
 		exit(1)
+	}
+	if opts.print_stamp {
+		println(build_stamp(root, find_v()) or {
+			eprintln('${err}')
+			exit(1)
+		})
+		return
 	}
 
 	vlang := config.vlang_repo
