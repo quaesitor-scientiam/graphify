@@ -227,9 +227,16 @@ generic receivers paragraph leaves unresolved (`work D` in `crypto/hmac`, and
 `digest := h()` where `h fn () H` in `crypto/hkdf`), and JS declarations
 (`JS.Array.prototype.constructor()`). A multi-line chain is not the cause: 2 of
 the 3,368 bare-name calls sit on a continuation line of one. A string literal
-receiver is typed and resolves (`'Hello World!'.hex()`). Still open: values V
-infers in other ways (a comptime `for f in T.fields` variable, a receiver from a
-call with a computed argument), and a sum type's shared field.
+receiver is typed and resolves (`'Hello World!'.hex()`).
+
+Comptime field selectors (measured October 2026): 11 of the 354 unresolved calls
+go through a `$for` field, `x.$(field.name).m()`. Four are on a generic `A` in
+`veb/middleware.v`, which the generic receivers paragraph leaves unresolved, and
+seven are in vlang's comptime test fixtures. Resolving the rest would give one
+call an edge to the method of every field type that declares it. The
+one-edge-per-call model does not express that, so they stay unresolved. Still
+open: a receiver from a call with a computed argument, and a sum type's shared
+field.
 
 The raw edge is retained and `explain` reports ambiguous callers rather than
 inventing links. A future opt-in deep mode could run the checker over a whole
@@ -705,8 +712,10 @@ not stale. Breaking the carry-forward makes the test fail.
 ## 8. Extraction depends on the build host's OS and architecture
 
 Resolved in October 2026 by the V3 extractor, which keeps every branch of a
-platform conditional (see the end of this section); CI checks it. What
-follows describes the V 0.5.2 extractor, since removed.
+platform conditional (`extract_v3` sets `preserve_comptime_conditionals`; see
+the end of this section); CI checks that the Mac, Windows and Linux graphs
+match. The "Consequences" and "Options" below are from the V 0.5.2 extractor,
+since removed, and no longer apply.
 
 The same vlang commit can extract to different graphs on different hosts.
 Compared on vlang `1b4ecb9c05` (October 2026), an arm64 Mac against an x86_64
@@ -801,12 +810,12 @@ struct names without the path, and files walked and assembled in sorted
 order. The last also applies to the V1 extractor, whose graphs still differ
 by platform conditionals as described above.
 
-**V3 resolves this (October 2026 spike, §6).** V3's parser has a
-`preserve_comptime_conditionals` preference. With it set, every platform
-branch is kept, inside `comptime_if` nodes that carry the condition text
-(`windows`, `macos`), so a ported extractor can be host-independent and could
-record which platform a declaration belongs to. Without it, V3 evaluates
-conditionals against the host, as V1 does.
+**V3 resolves this (October 2026, §6).** V3's parser has a
+`preserve_comptime_conditionals` preference, and `extract_v3` sets it. Every
+platform branch is kept, inside `comptime_if` nodes that carry the condition
+text (`windows`, `macos`), so the graph does not depend on the host, and
+Linux-only code is in it: the vlang extract has 1,667 symbols in `*_linux*`
+files. The graph does not record which platform a declaration belongs to.
 
 The effect is larger than the Mac/Windows comparison suggests. On the Mac,
 V3's default mode hides 892 functions, 205 structs, 863 fields and 19,030
