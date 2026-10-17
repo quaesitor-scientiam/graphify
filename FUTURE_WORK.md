@@ -204,6 +204,17 @@ this, every one of the 5,324 calls was raw.
 A test copy of a binding in several files resolves to one of its copies, which may
 carry the file as a suffix.
 
+What is left of C is decided, not open (measured October 2026 on the full vlang
+tree, 158,767 symbols). Calls to C names: 5,806, of which 5,798 resolve to a
+binding or a C type. Type references to C names: 185, all resolved. The 8 that
+stay undeclared name nothing a V file declares. Two are functions declared in a
+C header in the repo (`add_two_numbers` and `hello_from_c`, in
+`vlib/v/tests/include_c_gen_fn_headers/cheader.h`), and three are valgrind macros
+(`VALGRIND_HG_DISABLE_CHECKING`, `ANNOTATE_HAPPENS_BEFORE`,
+`ANNOTATE_HAPPENS_AFTER`) from headers the repo does not hold. Resolving the two
+would take a parser for C headers, a backend this graph does not have (§3), and it
+would still leave the valgrind macros unresolved. They stay undeclared.
+
 Six receivers the source states were lost, in sum-type arms, method type parameters and array aliases. A `match` on a sum type narrowed its subject only for a capitalised name, so an arm that names a primitive (`i64 { val.str() }`), a module's type (`toml.Doc { doa.ast.table.str() }`) or an array (`[]int { ... }`) left its calls untyped (`match_pattern_type`, in backend_v.v). A method's own type parameter (`fn (d Doc) reflect[T]() T`) was not kept, so `x.reflect[User]()` returned an unknown `T`; a method now keeps its type parameters (`tparams`, which the batch protocol carries), and the type arguments the call writes stand for them (`p:` steps). An alias of an array (`type Sources = [2]Source`) took its element type by the alias's own name, so `source.map(it.value.str())` was lost; `[]`, `k`, and a method the alias doesn't have now unalias it first (`unalias`). A `map` whose closure states its return type is an array of that type (`mapto`). On the V compiler's tree that leaves 58 fewer unresolved calls (551 → 493): 43 now resolve, 4 are undeclared, and 11 merged into an identical edge of the same caller, which the resolver keeps once. Six of them are `str()` calls (41 → 35). The resolved edges that changed target, checked against the source by sample, each now name the type their receiver has in that arm: `Any.i8 → Any.i8` is `string.i8` in a string arm, and `hash.Hash.size` is `sha256.Digest.size` in its `sha256.Digest` arm.
 
 A C struct is one name for the whole program, but V's C declarations are not unique: `C.Event`, `C.KEY_EVENT_RECORD` and `C.uChar` are declared in the terminal UI's Windows files and again in vlib's compiler tests and in `vlib/term`. `c_struct` (in infer.v) gave up when a name had more than one declaration, so a field of `C.Event` in `parse_events` had no type and its `str()` stayed unresolved. It now takes the nearest declaration: the one in the field's own file, then in its module, then in the program, and declarations of one id are one struct, one per platform (as `C.addrinfo` is). On the V compiler's tree that resolves one call (`parse_events`'s `str()` is `rune.str`) and changes no other edge.
