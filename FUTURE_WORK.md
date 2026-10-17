@@ -304,33 +304,11 @@ The extractor (`backend_v.v`, since split into
 (vlang commit `2a7447b5e5`, #28556): `vlib/v/ast` no longer exists, and
 `v.parser`, `v.pref`, and `v.token` are now V3 modules with different APIs.
 
-Graphify still builds only through a pinned V 0.5.2 compatibility compiler,
-and only when that compiler is requested explicitly with `-old-compiler`
-(for example `v -old-compiler -prod -gc none -o bin/graphify cmd/cli`, and
-`v -old-compiler test .`). Since vlang #28772 the driver retries only C
-compilation errors with V 0.5.2; a V error such as the missing `v.ast` module
-is final, so a plain `v` build fails. To locate the compatibility compiler
-(`ensure_v1_fallback` in `cmd/v/v.v`), the driver looks for `v1_fallback` in
-the V source tree, then for a per-user cached copy, and otherwise runs
-`make v1` to download and SHA256-verify the V 0.5.2 release, or build it from
-source. This has
-consequences:
-
-- graphify builds only on machines where that fallback is installed or can be
-  installed automatically;
-- on Windows, the `v1` recipe is POSIX shell, and GNU make for Windows runs
-  recipes through `cmd.exe` when no `sh.exe` is on `PATH`, which fails with
-  "The system cannot find the path specified". Having `make` on `PATH` is not
-  sufficient; make also needs a POSIX `sh`, such as Git for Windows'
-  `usr\bin`;
-- V 0.5.2 cannot parse syntax V3 has added, and the vlang tree already uses
-  it. Extraction recovers past such errors and lists the affected files in the
-  manifest's `partial` list (see "Silent truncation" below), but whatever the
-  parser cannot read around an error is still lost, and new V3-only constructs
-  keep adding to it;
-- when upstream drops the fallback, graphify stops building on every
-  platform. In September 2026 the V maintainer said the fallback will stay
-  available for one year, so the port needs to land by about September 2027.
+Graphify no longer uses the V 0.5.2 fallback. It builds and tests with plain
+`v`, the CI workflow sets no `-old-compiler`, and the V 0.5.2 extractor is
+gone. The costs of that fallback no longer apply: a per-machine V 0.5.2
+install, the Windows `make v1` recipe, the V 0.5.2 parser's failure on newer
+syntax, and the September 2027 deadline by which the port had to land.
 
 The eventual fix is porting the extractor to V3's frontend. V3's parser
 produces a flat arena AST (`vlib/v/flat`: `NodeId` indices into a node array,
