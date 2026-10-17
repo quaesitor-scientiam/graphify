@@ -7101,6 +7101,19 @@ fn test_the_value_of_a_generated_enum_from_is_the_enum() {
 	assert 'demo.Colour.size' in targets, targets.str()
 }
 
+fn test_a_membership_test_is_a_bool_for_the_method_on_it() {
+	// `('a' in xs).describe()` is a method on a bool, the type of an `in` test
+	root := write_tree('membership_bool', {
+		'demo.v': 'module demo\n\nfn (b bool) describe() string {\n\treturn \'b\'\n}\n\npub fn check(xs []string) string {\n\treturn (\'a\' in xs).describe()\n}\n'
+	})
+	defer {
+		os.rmdir_all(root) or {}
+	}
+	g := build_graph(Options{ root: root })
+	targets := g.edges.filter(it.kind == .calls && it.from == 'demo.check').map(it.to)
+	assert 'demo.bool.describe' in targets, targets.str()
+}
+
 fn test_a_c_binding_result_type_picks_the_method_among_same_named_ones() {
 	// two types declare `size`, so only the result type of C.make_thing() can tell
 	// which one the call means

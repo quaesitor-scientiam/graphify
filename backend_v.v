@@ -1907,6 +1907,10 @@ fn (f &V3File) recipe(id flat.NodeId, ctx V3CallCtx) string {
 				}
 			}
 		}
+		.in_expr, .is_expr {
+			// `x in xs` and `x is T` are bools
+			return 't:bool'
+		}
 		.typeof_expr {
 			// `typeof(x)` is the name of x's type, a string
 			return 't:string'
@@ -2122,6 +2126,8 @@ fn (f &V3File) recipe(id flat.NodeId, ctx V3CallCtx) string {
 			}
 		}
 		.infix {
+			// a comparison, a logical operator, or a membership or type test (`x in xs`,
+			// `x is T`) is a bool, so a method on it (`('a' in xs).str()`) has that type
 			if n.op in [.eq, .ne, .lt, .gt, .le, .ge, .logical_and, .logical_or] {
 				return 't:bool'
 			}
