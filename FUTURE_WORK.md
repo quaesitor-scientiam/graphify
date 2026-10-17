@@ -211,10 +211,25 @@ Builtin declares `repeat` as returning an untyped `array`, as it does `map`, but
 
 A call through the name of the module the file is in (`semver.from(s)` inside `module semver`) was read as a method on a global of that name. `callee` (backend_v.v) now reads it as the module's own function, unless a local or a variable of the same name shadows it, the same way it reads a call through an import. On the V compiler's tree that resolves four `semver.from` calls, and a same-module call `same_module_type_name_fn.i64()` now goes to that module's `i64` instead of the builtin `string.i64` it had been linked to by name. The three `satisfies` calls on the result of `semver.from(...)` (a `Version`, whose `satisfies` is declared) stayed unresolved after that. The receiver's recipe named the callee by its module id (`c:vlib.semver.from`), and `resolve_qualified_callee` matched a prefix only against the module name as written (`semver`), so `call_result` found no `from` and the receiver had no type. A small fixture resolved only because its module had no other `satisfies`, so the name alone picked the method; the real `vlib/semver` also has `Range.satisfies`, `ComparatorSet.satisfies` and `Comparator.satisfies`. A prefix that is the file's module id now counts as its own module, and `test_a_method_on_a_module_call_result_is_typed_through_the_module_name` adds a second `satisfies` to the module, which fails without the fix. On the V compiler's tree at `c6bb06f5` unresolved calls go 381 → 378: the three `satisfies` edges go to `vlib.semver.Version.satisfies`, and no other edge changes.
 
-What remains is a long tail: values V infers in other ways (a comptime
-`for f in T.fields` variable, a receiver from a call with a computed argument),
-a sum type's shared field, function values the walk can't see are variables,
-and calls whose receiver the recipe doesn't cover (a multi-line chain).
+**Range loop variables (October 2026).** A `for c in a .. b` loop variable was
+typed `int` whatever its bounds. It now takes the type of the first bound that
+states one (`range_recipe`, in backend_v.v): `u8(0) .. 255` loops over u8, and
+`0 .. n` over n's type. On the V compiler's vlib tree, 3 `int.str` links are
+replaced by the `str` methods of the types they loop over (`u32`, `u64`, `i64`,
+`i32`), and `c.ascii_str().hex()` in `builtin/string_test.v` resolves. Unresolved
+calls: 355 to 354.
+
+What remains, measured on the vlib extract (October 2026, 272,668 calls): 354
+calls are unresolved, and 3,013 bare-name calls are already undeclared (function
+values, runtime helpers, `wait()` on a thread, and the rest of the rules above).
+The cases checked are method calls on values of a type parameter, which the
+generic receivers paragraph leaves unresolved (`work D` in `crypto/hmac`, and
+`digest := h()` where `h fn () H` in `crypto/hkdf`), and JS declarations
+(`JS.Array.prototype.constructor()`). A multi-line chain is not the cause: 2 of
+the 3,368 bare-name calls sit on a continuation line of one. A string literal
+receiver is typed and resolves (`'Hello World!'.hex()`). Still open: values V
+infers in other ways (a comptime `for f in T.fields` variable, a receiver from a
+call with a computed argument), and a sum type's shared field.
 
 The raw edge is retained and `explain` reports ambiguous callers rather than
 inventing links. A future opt-in deep mode could run the checker over a whole
