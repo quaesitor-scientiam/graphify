@@ -1534,7 +1534,7 @@ fn (mut f V3File) walk(id flat.NodeId, ctx V3CallCtx, mut edges []Edge, mut seen
 				mut recipes := []string{}
 				if iter.kind == .range {
 					names << f.node(kids[0]).value
-					recipes << 't:int'
+					recipes << range_recipe(f, kids[2], ctx)
 				} else if int(kids[1]) < 0 {
 					names << f.node(kids[0]).value
 					recipes << if r == '' { '' } else { r + recipe_sep + '[]' }
@@ -2173,6 +2173,22 @@ fn literal_map_type(f &V3File, kids []flat.NodeId) ?string {
 		return none
 	}
 	return 'map[${key}]${val}'
+}
+
+// range_recipe is the element type of `a .. b` in a for loop: the type of the
+// first bound that states one. An untyped number takes the other bound's type, so
+// `u8(0) .. 255` is u8 and `0 .. n` is n's type; int when neither bound says.
+fn range_recipe(f &V3File, range_id flat.NodeId, ctx V3CallCtx) string {
+	for b in f.kids(range_id) {
+		if f.node(b).kind == .int_literal {
+			continue
+		}
+		r := f.recipe(b, ctx)
+		if r != '' {
+			return r
+		}
+	}
+	return 't:int'
 }
 
 // map_entries_recipe is the recipe of a map literal that no entry-by-entry literal

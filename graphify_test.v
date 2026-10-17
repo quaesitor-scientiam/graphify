@@ -6918,3 +6918,18 @@ fn test_a_loaded_graph_notes_a_file_changed_since_its_manifest_was_written() {
 	os.write_file(os.join_path(root, 'a.v'), '// added\n${src}') or { panic(err) }
 	assert loaded.get_body('greet').starts_with('// a.v has changed since the graph was built'), loaded.get_body('greet')
 }
+
+fn test_a_for_loop_over_a_range_takes_the_type_of_its_typed_bound() {
+	// `u8(0) .. 255` loops over u8, and `0 .. n` takes n's type, so both reach the
+	// u8 method; a loop over `0 .. 10` is int, and reaches the int method
+	root := write_tree('range_loop_types', {
+		'demo.v': 'module demo\n\npub fn (b u8) twice() u8 {\n\treturn b * 2\n}\n\npub fn (i int) twice() int {\n\treturn i * 2\n}\n\npub fn sums() {\n\tfor c in u8(0) .. 255 {\n\t\t_ = c.twice()\n\t}\n\tn := u8(3)\n\tfor k in 0 .. n {\n\t\t_ = k.twice()\n\t}\n\tfor i in 0 .. 10 {\n\t\t_ = i.twice()\n\t}\n}\n'
+	})
+	defer {
+		os.rmdir_all(root) or {}
+	}
+	g := build_graph(Options{ root: root })
+	targets := g.edges.filter(it.kind == .calls && it.from == 'demo.sums').map(it.to)
+	assert 'demo.u8.twice' in targets, targets.str()
+	assert targets.filter(it == 'demo.int.twice').len == 1, targets.str()
+}
