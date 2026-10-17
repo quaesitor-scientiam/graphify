@@ -447,7 +447,7 @@ same server works with both Claude Code and Codex:
 | `overview` | body-less skeleton map of the whole codebase |
 | `query_graph(text, budget?, dfs?)` | token-bounded traversal from matching symbols |
 | `get_node(node)` | a symbol + its relationships (defines, references, embeds, calls), each with file:line |
-| `get_body(node)` | the source of ONE declaration by name (instead of reading its file) |
+| `get_body(node)` | the source of ONE declaration by name (instead of reading its file); notes when that file has changed since the graph was built |
 | `get_neighbors(node)` | names of all directly linked symbols |
 | `shortest_path(a, b)` | relationship path between two symbols |
 

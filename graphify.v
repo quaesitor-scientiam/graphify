@@ -115,11 +115,16 @@ pub fn build_graph_resilient(root string, worker_exe string, out_dir string) (Gr
 	// `files` order at the end, so which of two same-id declarations comes
 	// first doesn't depend on what was cached, retried or parsed when
 	mut by_rel := map[string]FileResult{}
+	// each file's text hash as this run read it, for get_body (Graph.file_hashes)
+	mut source_hashes := map[string]string{}
 
 	mut queue := []WorkItem{}
 	for path in files {
 		rel := rel_path(abs_root, path)
-		hash := file_hash(path)
+		hash := source_hash(path)
+		if hash != '' {
+			source_hashes[rel] = hash
+		}
 		if hash != '' && rel in old_cache && old_cache[rel].hash == hash {
 			// unchanged since the last extract — reuse its symbols/edges
 			// instead of spending a worker parsing it again.
@@ -250,6 +255,7 @@ pub fn build_graph_resilient(root string, worker_exe string, out_dir string) (Gr
 	disambiguate_ids(mut g)
 	separate_member_ids(mut g)
 	resolve_edges(mut g)
+	g.file_hashes = source_hashes
 	return g, ExtractReport{
 		binary_hash: bin_hash
 		failed:      failed
@@ -270,7 +276,8 @@ pub:
 pub fn build_graph(opts Options) Graph {
 	root := os.real_path(opts.root)
 	mut g := Graph{
-		root: root
+		root:        root
+		file_hashes: map[string]string{}
 	}
 
 	files := if os.is_dir(root) {
@@ -282,6 +289,10 @@ pub fn build_graph(opts Options) Graph {
 	for path in files {
 		rel := rel_path(root, path)
 		syms, edges := extract_v_file(path, rel)
+		h := source_hash(path)
+		if h != '' {
+			g.file_hashes[rel] = h
+		}
 
 		g.symbols << syms
 		if opts.with_calls {
