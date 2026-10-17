@@ -75,9 +75,11 @@ pub fn get_string_array() &&char {
 '
 	syms, _ := extract_v_text(src, 'demo.v')
 	fns := syms.filter(it.kind == .function)
-	assert fns.len == 1
-	assert fns[0].id == 'demo.get_string_array'
-	assert fns[0].name == 'get_string_array'
+	// the binding is a symbol of its own, under the C namespace, so the two ids differ
+	mut ids := fns.map(it.id)
+	ids.sort()
+	assert ids == ['C.get_string_array', 'demo.get_string_array'], ids.str()
+	assert fns.filter(it.id == 'demo.get_string_array')[0].name == 'get_string_array'
 }
 
 fn test_top_level_comptime_if_declarations_are_extracted() {
@@ -7052,4 +7054,20 @@ fn test_a_worker_crash_is_recovered_from_on_both_paths() {
 	worker := compile_crash_worker(dir)
 	check_carry_forward(worker, dir)
 	check_first_sighting(worker, dir)
+}
+
+fn test_a_c_function_binding_is_a_symbol_and_types_the_call_that_uses_it() {
+	// `fn C.name(...)` is a function of the C namespace: a symbol with id `C.name`,
+	// and a call of it has the result type its declaration gives
+	root := write_tree('c_extern_binding', {
+		'demo.v': 'module demo\n\npub struct Thing {\n}\n\npub fn (t Thing) size() int {\n\treturn 1\n}\n\nfn C.make_thing() Thing\n\nfn C.puts(s &char) int\n\npub fn use_it() int {\n\treturn C.make_thing().size() + C.puts(unsafe { nil })\n}\n'
+	})
+	defer {
+		os.rmdir_all(root) or {}
+	}
+	g := build_graph(Options{ root: root })
+	assert g.symbols.any(it.id == 'C.puts' && it.kind == .function), g.symbols.map(it.id).str()
+	assert g.symbols.any(it.id == 'C.make_thing' && it.signature == 'fn C.make_thing() Thing'), g.symbols.map(it.id).str()
+	assert g.edges.any(it.kind == .calls && it.from == 'demo.use_it' && it.to == 'C.puts'), g.edges.filter(it.from == 'demo.use_it').map(it.to).str()
+	assert g.edges.any(it.kind == .calls && it.from == 'demo.use_it' && it.to == 'demo.Thing.size'), g.edges.filter(it.from == 'demo.use_it').map(it.to).str()
 }

@@ -297,6 +297,14 @@ fn (f &V3File) declares_extern(line int) bool {
 	return t.contains('fn C.') || t.contains('fn JS.')
 }
 
+// declares_c_extern reports whether `line` declares a C binding, `fn C.name(...)`.
+fn (f &V3File) declares_c_extern(line int) bool {
+	if line < 1 || line > f.lines.len {
+		return false
+	}
+	return f.lines[line - 1].contains('fn C.')
+}
+
 // field_is_pub reports whether a struct field on `field_line` is public: under
 // a `pub:` or `pub mut:` label, or, in a C struct, under no label at all, as V
 // treats those.
@@ -743,10 +751,13 @@ fn (mut f V3File) extract_fn(id flat.NodeId, mut syms []Symbol, mut edges []Edge
 		// an extern binding; a method on a C type, `C.SSL.str`, is real V
 		return
 	}
-	if n.kind == .c_fn_decl && f.declares_extern(f.line_of(n.pos.offset)) {
-		// V3 parses both `fn C.puts(...)` and a body-less V declaration
-		// (`fn slopediv(num u32) int` in a .c.v file) as c_fn_decl, with the
-		// `C.` dropped from the name; only the source line tells them apart
+	// V3 parses both `fn C.puts(...)` and a body-less V declaration (`fn slopediv(num u32)
+	// int` in a .c.v file) as c_fn_decl, with the `C.` dropped from the name; only the
+	// source line tells them apart. A C binding is a function of the C namespace, with id
+	// `C.name`, so it cannot collide with a V function of the same name in its file.
+	c_extern := n.kind == .c_fn_decl && f.declares_c_extern(f.line_of(n.pos.offset))
+	if n.kind == .c_fn_decl && f.declares_extern(f.line_of(n.pos.offset)) && !c_extern {
+		// a `fn JS.name` binding: call resolution to it is not modelled
 		return
 	}
 	if v.starts_with('__v_') {
@@ -775,7 +786,16 @@ fn (mut f V3File) extract_fn(id flat.NodeId, mut syms []Symbol, mut edges []Edge
 		recv_typ = f.type_text(r.typ_text())
 		fid = '${f.mod_id}.${recv_typ.trim_left('&')}.${name}'
 	}
-	mut sig := if f.line_is_pub(line) { 'pub fn ' } else { 'fn ' }
+	if c_extern {
+		fid = 'C.${name}'
+	}
+	mut sig := if c_extern {
+		'fn C.'
+	} else if f.line_is_pub(line) {
+		'pub fn '
+	} else {
+		'fn '
+	}
 	if is_method {
 		sig += '(${recv_name} ${recv_typ}) '
 	}
