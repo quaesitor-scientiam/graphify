@@ -6943,14 +6943,13 @@ fn write_canned(tpl_dir string, root string, rel string) {
 	}
 }
 
-// crash_worker compiles a stand-in for `graphify _parse-batch LIST OUT` into
-// tpl_dir and returns its path. For each file in LIST it copies that file's canned
-// line (from tpl_dir, named by GRAPHIFY_TEST_CANNED) to OUT, except that while
-// `tpl_dir/crash_now` exists it panics on crash.v, as a parser that crashes would,
-// so the extract sees a worker that dies partway through its batch.
-fn crash_worker(tpl_dir string) string {
-	os.setenv('GRAPHIFY_TEST_CANNED', tpl_dir, true)
-	src := os.join_path(tpl_dir, 'fake_worker.v')
+// compile_crash_worker compiles a stand-in for `graphify _parse-batch LIST OUT`
+// into dir and returns its path. For each file in LIST it copies that file's
+// canned line (from the directory named by GRAPHIFY_TEST_CANNED) to OUT, except
+// that while `crash_now` exists there it panics on crash.v, as a parser that
+// crashes would, so the extract sees a worker that dies partway through its batch.
+fn compile_crash_worker(dir string) string {
+	src := os.join_path(dir, 'fake_worker.vsh')
 	os.write_file(src, "module main
 
 import os
@@ -6971,32 +6970,32 @@ fn main() {
 	out.close()
 }
 ") or { panic(err) }
-	exe := os.join_path(tpl_dir, 'fake_worker') + $if windows { '.exe' } $else { '' }
+	exe := os.join_path(dir, 'fake_worker') + $if windows { '.exe' } $else { '' }
 	vexe := @VEXE
-	res := os.execute('"${vexe}" -o "${exe}" "${src}"')
+	res := os.exec([vexe, '-o', exe, 'build', src])
 	assert res.exit_code == 0, res.output
 	return exe
 }
 
-fn test_a_worker_crash_carries_the_last_extract_forward_and_requeues_the_rest() {
-	// the crash path through a real child process that dies on crash.v
+// check_carry_forward runs a crash on crash.v after an extract that succeeded:
+// the crashed file keeps its last extract, and the file queued behind it is parsed.
+fn check_carry_forward(worker string, dir string) {
 	root := write_tree('worker_crash_carry', {
 		'a.v':     'module demo\n\npub fn a_fn() int {\n\treturn 1\n}\n'
 		'crash.v': 'module demo\n\npub fn crash_fn() int {\n\treturn 2\n}\n'
 		'z.v':     'module demo\n\npub fn z_fn() int {\n\treturn 3\n}\n'
 	})
-	tpl := root + '_tpl'
+	tpl := os.join_path(dir, 'carry')
 	out := root + '_out'
 	os.mkdir_all(tpl) or { panic(err) }
+	os.setenv('GRAPHIFY_TEST_CANNED', tpl, true)
 	defer {
 		os.rmdir_all(root) or {}
-		os.rmdir_all(tpl) or {}
 		os.rmdir_all(out) or {}
 	}
 	for rel in ['a.v', 'crash.v', 'z.v'] {
 		write_canned(tpl, root, rel)
 	}
-	worker := crash_worker(tpl)
 	// the first extract has nothing to fall back on, and every file parses
 	g1, r1 := build_graph_resilient(root, worker, out)
 	assert r1.failed.len == 0, r1.failed.str()
@@ -7020,23 +7019,37 @@ fn test_a_worker_crash_carries_the_last_extract_forward_and_requeues_the_rest() 
 	assert 'demo.a_fn' in ids, ids.str() // unchanged, reused from the cache
 }
 
-fn test_a_file_that_crashes_on_its_first_sighting_is_failed_and_has_no_symbols() {
+// check_first_sighting runs a crash on a file with nothing cached: it is failed,
+// has no symbols, and is not stale.
+fn check_first_sighting(worker string, dir string) {
 	// nothing cached yet, so the crash has no earlier extract to carry forward
 	root := write_tree('worker_crash_first', {
 		'crash.v': 'module demo\n\npub fn crash_fn() int {\n\treturn 2\n}\n'
 	})
-	tpl := root + '_tpl'
+	tpl := os.join_path(dir, 'first')
 	out := root + '_out'
 	os.mkdir_all(tpl) or { panic(err) }
+	os.setenv('GRAPHIFY_TEST_CANNED', tpl, true)
 	defer {
 		os.rmdir_all(root) or {}
-		os.rmdir_all(tpl) or {}
 		os.rmdir_all(out) or {}
 	}
 	os.write_file(os.join_path(tpl, 'crash_now'), '') or { panic(err) }
-	worker := crash_worker(tpl)
 	g, r := build_graph_resilient(root, worker, out)
 	assert 'crash.v' in r.failed, r.failed.str()
 	assert r.stale.len == 0, r.stale.str()
 	assert !g.symbols.any(it.id == 'demo.crash_fn'), g.symbols.map(it.id).str()
+}
+
+fn test_a_worker_crash_is_recovered_from_on_both_paths() {
+	// one compile of the stand-in serves both cases; the directory they share is
+	// removed at the end
+	dir := os.join_path(os.temp_dir(), 'graphify_crash_worker_${os.getpid()}')
+	os.mkdir_all(dir) or { panic(err) }
+	defer {
+		os.rmdir_all(dir) or {}
+	}
+	worker := compile_crash_worker(dir)
+	check_carry_forward(worker, dir)
+	check_first_sighting(worker, dir)
 }
