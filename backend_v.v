@@ -297,6 +297,14 @@ fn (f &V3File) declares_extern(line int) bool {
 	return t.contains('fn C.') || t.contains('fn JS.')
 }
 
+// declares_c_type reports whether `line` declares a C type, `type C.name = ...`.
+fn (f &V3File) declares_c_type(line int) bool {
+	if line < 1 || line > f.lines.len {
+		return false
+	}
+	return f.lines[line - 1].contains('type C.')
+}
+
 // declares_c_extern reports whether `line` declares a C binding, `fn C.name(...)`.
 fn (f &V3File) declares_c_extern(line int) bool {
 	if line < 1 || line > f.lines.len {
@@ -1124,8 +1132,11 @@ fn (mut f V3File) extract_type(id flat.NodeId, mut syms []Symbol, mut edges []Ed
 	if short == '' {
 		return
 	}
-	tid := '${f.mod_id}.${short}'
 	line := f.line_of(n.pos.offset)
+	// `type C.DWORD = u32` names a C type, one name for the program, as `fn C.name` names
+	// a C function, so its id is C.DWORD and a `C.DWORD(x)` conversion reaches it
+	c_type := f.declares_c_type(line)
+	tid := if c_type { 'C.${short}' } else { '${f.mod_id}.${short}' }
 	is_pub := f.line_is_pub(line)
 	mut parts := []string{}
 	mut rhs := ''
@@ -1147,7 +1158,7 @@ fn (mut f V3File) extract_type(id flat.NodeId, mut syms []Symbol, mut edges []Ed
 		id:        tid
 		name:      short
 		kind:      .type_alias
-		signature: (if is_pub { 'pub ' } else { '' }) + 'type ${short} = ${rhs}'
+		signature: (if is_pub { 'pub ' } else { '' }) + 'type ${if c_type { 'C.' } else { '' }}${short} = ${rhs}'
 		file:      f.rel
 		line:      line
 		end_line:  line

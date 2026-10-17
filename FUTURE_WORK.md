@@ -196,10 +196,11 @@ the old skip guarded against. A binding is indexed under `C.name`, so a bare
 `name(...)` never finds it, and `c_binding_callee` (graphify.v) resolves a
 `C.name(...)` call to the one function of that name. Copies of a binding declared in
 several files share one id, and the `unaddressable` rule does not apply to C ids,
-since C has one namespace. On the vlib extract, all 5,329 calls to `C.` functions
-now point at a binding: 5,234 at its id, and 95 are undeclared, since no
-declaration in the program binds their name, so they are into a system header as a
-runtime helper is into the runtime. Before this, every one of the 5,324 was raw.
+since C has one namespace. A `type C.X = ...` declaration is a C type with the same
+id form, and `C.X(v)` is a conversion to it, so it resolves as a call of the type.
+On the vlib extract, 5,321 of the 5,329 calls to `C.` names now point at a binding
+or a C type, and the 8 left undeclared name no declaration in the program. Before
+this, every one of the 5,324 calls was raw.
 A test copy of a binding in several files resolves to one of its copies, which may
 carry the file as a suffix.
 

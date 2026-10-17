@@ -7117,3 +7117,18 @@ fn test_a_c_binding_declared_in_several_test_files_is_one_function() {
 	// the call reaches one copy of the binding, which may carry its file as a suffix
 	assert targets.any(it.all_before('@') == 'C.puts'), targets.str()
 }
+
+fn test_a_c_type_conversion_is_a_call_of_the_c_type() {
+	// `type C.DWORD = u32` is a C type, and `C.DWORD(x)` converts to it, so the call
+	// reaches the type rather than staying unresolved
+	root := write_tree('c_type_conversion', {
+		'demo.c.v': 'module demo\n\ntype C.DWORD = u32\n\npub fn conv() u32 {\n\treturn C.DWORD(3)\n}\n'
+	})
+	defer {
+		os.rmdir_all(root) or {}
+	}
+	g := build_graph(Options{ root: root })
+	assert g.symbols.any(it.id == 'C.DWORD' && it.kind == .type_alias), g.symbols.map(it.id).str()
+	targets := g.edges.filter(it.kind == .calls && it.from == 'demo.conv').map(it.to)
+	assert 'C.DWORD' in targets, targets.str()
+}

@@ -693,7 +693,7 @@ fn resolve_edges(mut g Graph) {
 	mut struct_mod := map[string]string{}
 	for s in g.symbols {
 		sym_ids[s.id] = true
-		if s.kind == .function && s.id.starts_with('C.') {
+		if (s.kind == .function || s.kind == .type_alias) && s.id.starts_with('C.') {
 			c_declared[s.id.all_before('@')] = true
 		}
 		if s.kind == .enum_ {
@@ -757,7 +757,16 @@ fn resolve_edges(mut g Graph) {
 				file:      s.file
 			}
 		}
-		if s.kind == .type_alias {
+		if s.kind == .type_alias && s.id.starts_with('C.') {
+			// a C type is reached only as `C.name(x)`, a conversion, so it is indexed
+			// under that name, as a C function is (see c_binding_callee)
+			by_name['C.' + s.name] << CallCand{
+				id:   s.id
+				mod:  s.parent
+				file: s.file
+			}
+		}
+		if s.kind == .type_alias && !s.id.starts_with('C.') {
 			alias_by_name[s.name] << TypeCand{
 				id:   s.id
 				mod:  s.parent
