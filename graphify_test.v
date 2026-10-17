@@ -7086,3 +7086,17 @@ fn test_a_c_call_the_program_binds_nowhere_is_undeclared() {
 	assert calls.any(it.to == 'C.puts' && it.provenance != .undeclared), calls.map(it.to).str()
 	assert calls.any(it.to == 'C.close' && it.provenance == .undeclared), calls.map(it.to).str()
 }
+
+fn test_the_value_of_a_generated_enum_from_is_the_enum() {
+	// V generates `Colour.from(x)` for every enum, and it returns a Colour, so a method
+	// on its value is the enum's method
+	root := write_tree('enum_from_value', {
+		'demo.v': 'module demo\n\npub enum Colour as u8 {\n\tred\n}\n\npub fn (c Colour) size() int {\n\treturn 1\n}\n\npub fn pick() int {\n\tc := Colour.from(u8(1)) or { Colour.red }\n\treturn c.size()\n}\n'
+	})
+	defer {
+		os.rmdir_all(root) or {}
+	}
+	g := build_graph(Options{ root: root })
+	targets := g.edges.filter(it.kind == .calls && it.from == 'demo.pick').map(it.to)
+	assert 'demo.Colour.size' in targets, targets.str()
+}

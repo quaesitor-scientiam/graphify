@@ -463,6 +463,20 @@ fn (inf &Infer) follow_steps(e Edge, depth int) ?InferredType {
 // call_result is the return type of the call `to` made from e's file, its
 // generic arguments (the `p:` steps of `steps`) put in place of its parameters.
 fn (inf &Infer) call_result(e Edge, to string, steps []string) ?InferredType {
+	// V generates `T.from(x)` and `T.from_string(s)` for every enum T, and they return
+	// T (a result, which the recipe's `or` already drops), so the value is the enum
+	if to.ends_with('__static__from') || to.ends_with('__static__from_string') {
+		typ := to.all_before('__static__')
+		scope := inf.scope_of[e.file] or { FileScope{} }
+		enum_t := InferredType{
+			text: typ
+			mod:  scope.mod
+			file: e.file
+		}
+		if inf.is_enum(enum_t, e.file) {
+			return enum_t
+		}
+	}
 	call := Edge{
 		from: e.from
 		to:   to
