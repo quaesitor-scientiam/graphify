@@ -814,7 +814,9 @@ fn resolve_edges(mut g Graph) {
 	// shared id addresses correctly.
 	mut unaddressable := map[string]bool{}
 	for id, n in id_count {
-		if n < 2 {
+		// a C binding's id names one C function, however many files declare it (C has
+		// one namespace), so the copies are one function, not separate programs
+		if n < 2 || id.starts_with('C.') {
 			continue
 		}
 		if id_main[id] {
@@ -1439,12 +1441,8 @@ fn resolve_qualified_callee(e Edge, by_name map[string][]CallCand, site_of map[s
 // function when the copies share a base id; the call reaches each through variants_of.
 fn c_binding_callee(e Edge, by_name map[string][]CallCand) ?CallResolution {
 	cands := by_name[e.to] or { return none }
-	base := cands[0].id.all_before('@')
-	for c in cands[1..] {
-		if c.id.all_before('@') != base {
-			return none
-		}
-	}
+	// every candidate is a declaration of the same C name, so they share one id, which
+	// names the function
 	return CallResolution{
 		id:       cands[0].id
 		inferred: false

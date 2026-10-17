@@ -7100,3 +7100,20 @@ fn test_the_value_of_a_generated_enum_from_is_the_enum() {
 	targets := g.edges.filter(it.kind == .calls && it.from == 'demo.pick').map(it.to)
 	assert 'demo.Colour.size' in targets, targets.str()
 }
+
+fn test_a_c_binding_declared_in_several_test_files_is_one_function() {
+	// each test file is its own build unit, so a V function of one name there is one
+	// per file; a C binding is one function, so the call in use.v reaches `C.puts`
+	root := write_tree('c_binding_copies', {
+		'a_test.v': 'module demo\n\nfn C.puts(s &char) int\n\nfn test_a() {\n\t_ = C.puts(unsafe { nil })\n}\n'
+		'b_test.v': 'module demo\n\nfn C.puts(s &char) int\n\nfn test_b() {\n\t_ = C.puts(unsafe { nil })\n}\n'
+		'use.v':    'module demo\n\npub fn use_it() int {\n\treturn C.puts(unsafe { nil })\n}\n'
+	})
+	defer {
+		os.rmdir_all(root) or {}
+	}
+	g := build_graph(Options{ root: root })
+	targets := g.edges.filter(it.kind == .calls && it.from == 'demo.use_it').map(it.to)
+	// the call reaches one copy of the binding, which may carry its file as a suffix
+	assert targets.any(it.all_before('@') == 'C.puts'), targets.str()
+}
