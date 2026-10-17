@@ -136,6 +136,11 @@ pub mut:
 	// falls back to it whenever roots is empty, so existing single-source
 	// graph.json files keep working unchanged.
 	roots map[string]string
+	// file_hashes is each source file's text_hash at extraction, by its
+	// relative path, so get_body can tell when a file has changed since.
+	// Not in graph.json: load_graph reads it from manifest.json, and a
+	// merged graph (which has roots) carries none.
+	file_hashes map[string]string @[json: '-']
 }
 
 // add_symbol appends a symbol and returns its id for convenient edge wiring.

@@ -28,6 +28,30 @@ pub:
 	failed        []string
 	stale         []string
 	partial       []string
+	source_files  []SourceFile
+}
+
+// SourceFile is one source file's text hash as the extract read it, so
+// get_body can tell the file has changed since (Graph.file_hashes).
+pub struct SourceFile {
+pub:
+	path string
+	hash string
+}
+
+// source_files_of lists g.file_hashes by path, so manifest.json is the same
+// for the same extract.
+fn source_files_of(g Graph) []SourceFile {
+	mut paths := g.file_hashes.keys()
+	paths.sort()
+	mut out := []SourceFile{cap: paths.len}
+	for p in paths {
+		out << SourceFile{
+			path: p
+			hash: g.file_hashes[p]
+		}
+	}
+	return out
 }
 
 // load_manifest reads a manifest.json previously written by write_bundle.
@@ -124,6 +148,7 @@ pub fn (g Graph) manifest_json(report ExtractReport) string {
 	for s in g.symbols {
 		files[s.file] = true
 	}
+	source_files := source_files_of(g)
 	m := Manifest{
 		tool:          'graphify'
 		version:       '0.0.1'
@@ -137,6 +162,7 @@ pub fn (g Graph) manifest_json(report ExtractReport) string {
 		failed:        report.failed
 		stale:         report.stale
 		partial:       report.partial
+		source_files:  source_files
 	}
 	return json2.encode(m, prettify: true)
 }

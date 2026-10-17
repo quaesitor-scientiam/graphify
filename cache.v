@@ -48,6 +48,20 @@ fn file_hash(path string) string {
 	return sha256.hexhash(content)
 }
 
+// source_hash is a source file's text hash (text_hash), or '' if it can't be
+// read. Used for the extract's own files and the graph's record of them.
+fn source_hash(path string) string {
+	content := os.read_file(path) or { return '' }
+	return text_hash(content)
+}
+
+// text_hash hashes source text with CRLF line ends read as LF, so a checkout
+// with core.autocrlf hashes the same as one without. get_body compares the
+// text it reads with the hash the extract recorded.
+fn text_hash(text string) string {
+	return sha256.hexhash(text.replace('\r\n', '\n'))
+}
+
 // load_cache reads a previous run's cache file into rel_path -> CacheEntry.
 // A missing or unparseable cache is treated as empty (full reparse), not an
 // error — the cache is purely an optimization, never a correctness

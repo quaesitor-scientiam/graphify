@@ -6866,3 +6866,55 @@ fn run[T](val T) bool {
 	})
 	assert g.edges.any(it.kind == .calls && it.from == 'app.run' && it.to == 'vlib.builtin.int.str'), g.edges.filter(it.from == 'app.run').map(it.to).str()
 }
+
+fn test_get_body_notes_a_file_that_changed_since_the_extract() {
+	src := 'module demo\n\npub fn greet() string {\n\treturn "hi"\n}\n'
+	root := write_tree('get_body_drift', {
+		'a.v': src
+	})
+	defer {
+		os.rmdir_all(root) or {}
+	}
+	g := build_graph(Options{ root: root })
+	assert !g.get_body('greet').contains('has changed'), g.get_body('greet')
+	// a line added above moves the declaration, so the captured range is wrong
+	os.write_file(os.join_path(root, 'a.v'), '// added\n${src}') or { panic(err) }
+	assert g.get_body('greet').starts_with('// a.v has changed since the graph was built'), g.get_body('greet')
+	// put back, the file is clean again
+	os.write_file(os.join_path(root, 'a.v'), src) or { panic(err) }
+	assert !g.get_body('greet').contains('has changed'), g.get_body('greet')
+}
+
+fn test_get_body_of_a_crlf_checkout_is_not_reported_as_changed() {
+	// the same text with CRLF line ends (a Windows checkout) is the same file
+	assert text_hash('module demo\r\nfn a() {}\r\n') == text_hash('module demo\nfn a() {}\n')
+	lf := 'module demo\n\npub fn greet() string {\n\treturn "hi"\n}\n'
+	root := write_tree('get_body_crlf_drift', {
+		'a.v': lf.replace('\n', '\r\n')
+	})
+	defer {
+		os.rmdir_all(root) or {}
+	}
+	g := build_graph(Options{ root: root })
+	// the same file checked out with LF endings
+	os.write_file(os.join_path(root, 'a.v'), lf) or { panic(err) }
+	assert !g.get_body('greet').contains('has changed'), g.get_body('greet')
+}
+
+fn test_a_loaded_graph_notes_a_file_changed_since_its_manifest_was_written() {
+	src := 'module demo\n\npub fn greet() string {\n\treturn "hi"\n}\n'
+	root := write_tree('get_body_loaded', {
+		'a.v': src
+	})
+	out := root + '_out'
+	defer {
+		os.rmdir_all(root) or {}
+		os.rmdir_all(out) or {}
+	}
+	g := build_graph(Options{ root: root })
+	write_bundle(g, out, ExtractReport{}) or { panic(err) }
+	loaded := load_graph(os.join_path(out, 'graph.json')) or { panic(err) }
+	assert !loaded.get_body('greet').contains('has changed'), loaded.get_body('greet')
+	os.write_file(os.join_path(root, 'a.v'), '// added\n${src}') or { panic(err) }
+	assert loaded.get_body('greet').starts_with('// a.v has changed since the graph was built'), loaded.get_body('greet')
+}

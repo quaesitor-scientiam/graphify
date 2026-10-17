@@ -273,10 +273,19 @@ server also reloads `graph.json` when an extract replaces it, and
 directories it compiles in changed. Nothing re-extracts on its own: an automatic refresh would make a
 read-only query pay for an extract.
 
-Still open: uncommitted edits aren't detected (they're the normal state of a
-checkout being worked on, and hashing every file per query would cost more
-than the query), and there is no explicit check that a shared graph's
-`--source-dir` holds the same tree, beyond the commit comparison.
+**Source drift check (October 2026).** Each extract writes a text hash of
+every source file to `manifest.json` (`source_files`, with CRLF read as LF so a
+Windows checkout matches). `get_body` hashes the file it reads and, when that
+differs from the extract's hash, puts a note on the header line: the file has
+changed since the graph was built, or a `--source-dir` holds different text.
+Hashing one file per call is cheap next to the read `get_body` already does.
+Over the V compiler's `vlib` (7,845 files) every recorded hash matched the
+unchanged tree. A merged graph has no hashes and no check.
+
+Still open: the check covers only the file `get_body` reads. Uncommitted
+edits elsewhere aren't reported (they're the normal state of a checkout being
+worked on, and hashing every file per query would cost more than the query),
+and a query result names symbols from the graph, not their current text.
 
 ## 5. Large-graph visualization limits
 

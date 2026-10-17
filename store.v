@@ -70,7 +70,18 @@ fn atomic_replace(src string, dst string) ! {
 // load_graph reads a graph previously written by save_graph.
 pub fn load_graph(path string) !Graph {
 	content := os.read_file(path)!
-	return json2.decode[Graph](content)!
+	mut g := json2.decode[Graph](content)!
+	// the source hashes the extract wrote beside it; a merged graph has none
+	// that match its files, so it has no check
+	if g.roots.len == 0 {
+		if m := load_manifest(os.join_path(os.dir(path), 'manifest.json')) {
+			g.file_hashes = map[string]string{}
+			for f in m.source_files {
+				g.file_hashes[f.path] = f.hash
+			}
+		}
+	}
+	return g
 }
 
 // graph_to_json manually builds compact JSON for the graph. Every field write

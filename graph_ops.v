@@ -479,6 +479,14 @@ pub fn (g Graph) get_body(node string) string {
 	// leave a `\r` on every line, and the closing-brace checks below would
 	// never match
 	lines := src.replace('\r\n', '\n').split('\n')
+	// the file's text as the extract read it: a change since then means the
+	// captured line range may no longer be this declaration's
+	mut drift := ''
+	if recorded := g.file_hashes[s.file] {
+		if recorded != text_hash(src) {
+			drift = '// ${s.file} has changed since the graph was built, so this body may not match it\n'
+		}
+	}
 	start := if s.line > 0 { s.line - 1 } else { 0 }
 	mut end := if s.end_line > s.line { s.end_line } else { 0 }
 	if s.kind in [.function, .method] {
@@ -539,7 +547,7 @@ pub fn (g Graph) get_body(node string) string {
 	if start >= lines.len {
 		return '(no source)'
 	}
-	return '// ${s.file}:${s.line}-${end}\n' + lines[start..end].join('\n')
+	return drift + '// ${s.file}:${s.line}-${end}\n' + lines[start..end].join('\n')
 }
 
 // nested_decl_end finds where a declaration that is indented inside a block
