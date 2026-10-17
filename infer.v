@@ -772,7 +772,11 @@ fn (inf &Infer) same_return(ids []string) ?InferredType {
 
 fn (inf &Infer) returns(id string) ?InferredType {
 	sig := inf.sig_of[id] or { return none }
-	name := inf.name_of[id] or { return none }
+	mut name := inf.name_of[id] or { return none }
+	// a C binding's signature spells its name `C.name`, and it is indexed that way too
+	if id.starts_with('C.') {
+		name = 'C.' + name
+	}
 	ret := return_type(sig, name)
 	if ret == '' {
 		return none
