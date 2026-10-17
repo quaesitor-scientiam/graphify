@@ -196,9 +196,12 @@ the old skip guarded against. A binding is indexed under `C.name`, so a bare
 `name(...)` never finds it, and `c_binding_callee` (graphify.v) resolves a
 `C.name(...)` call to the one function of that name. On the vlib extract, 407
 calls to `C.` functions resolve that were unresolved before, and no resolved edge
-is lost. The 4,922 that stay are calls to libc functions vlib doesn't declare
-(`C.close`, `C.memcpy`, `C.fprintf`), which are declared in system headers the
-graph doesn't hold.
+is lost. The 4,827 raw `C.` calls that stay do have a declaration in the program,
+but its name is declared more than once: `C.close` has fourteen declarations in
+vlib, two of them in `builtin/cfns.c.v` under one id. The resolver leaves an edge
+raw when its target id addresses more than one declaration, so these stay
+unresolved. A call to a name that no declaration binds is undeclared instead (95
+calls): it is into a system header, as a runtime helper is into the runtime.
 
 Six receivers the source states were lost, in sum-type arms, method type parameters and array aliases. A `match` on a sum type narrowed its subject only for a capitalised name, so an arm that names a primitive (`i64 { val.str() }`), a module's type (`toml.Doc { doa.ast.table.str() }`) or an array (`[]int { ... }`) left its calls untyped (`match_pattern_type`, in backend_v.v). A method's own type parameter (`fn (d Doc) reflect[T]() T`) was not kept, so `x.reflect[User]()` returned an unknown `T`; a method now keeps its type parameters (`tparams`, which the batch protocol carries), and the type arguments the call writes stand for them (`p:` steps). An alias of an array (`type Sources = [2]Source`) took its element type by the alias's own name, so `source.map(it.value.str())` was lost; `[]`, `k`, and a method the alias doesn't have now unalias it first (`unalias`). A `map` whose closure states its return type is an array of that type (`mapto`). On the V compiler's tree that leaves 58 fewer unresolved calls (551 → 493): 43 now resolve, 4 are undeclared, and 11 merged into an identical edge of the same caller, which the resolver keeps once. Six of them are `str()` calls (41 → 35). The resolved edges that changed target, checked against the source by sample, each now name the type their receiver has in that arm: `Any.i8 → Any.i8` is `string.i8` in a string arm, and `hash.Hash.size` is `sha256.Digest.size` in its `sha256.Digest` arm.
 
