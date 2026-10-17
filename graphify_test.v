@@ -7143,6 +7143,37 @@ fn test_a_slice_parameter_takes_the_element_type_of_its_argument() {
 	assert 'demo.Node.weight' in targets, targets.str()
 }
 
+fn test_a_mut_parameter_takes_the_element_type_of_its_argument() {
+	// `push[T](mut q []T)` is written `q &[]T` in the signature, so its type is read past
+	// the `&`. `weight` is declared on two types, so only the instantiation can say
+	// which one the call means
+	root := write_tree('mut_slice_param_instantiation', {
+		'demo.v': 'module demo\n\npub struct Node {\n\tv int\n}\n\npub fn (n Node) weight() int {\n\treturn n.v\n}\n\npub struct Other {\n}\n\npub fn (o Other) weight() int {\n\treturn 2\n}\n\nfn push[T](mut q []T, x int) {\n\tfor e in q {\n\t\t_ = e.weight()\n\t}\n\t_ = x\n}\n\npub fn run() {\n\tmut q := []Node{}\n\tpush(mut q, 1)\n}\n'
+	})
+	defer {
+		os.rmdir_all(root) or {}
+	}
+	g := build_graph(Options{ root: root })
+	targets := g.edges.filter(it.kind == .calls && it.from == 'demo.push').map(it.to)
+	assert 'demo.Node.weight' in targets, targets.str()
+	assert 'demo.Other.weight' !in targets, targets.str()
+}
+
+fn test_a_mut_scalar_parameter_takes_the_type_of_its_argument() {
+	// `show[T](mut v T)` is written `v &T` in the signature, and `describe` is declared
+	// on two types, so only the argument's type can pick Box.describe
+	root := write_tree('mut_scalar_param_instantiation', {
+		'demo.v': 'module demo\n\npub struct Box {\n}\n\npub fn (b Box) describe() int {\n\treturn 1\n}\n\npub struct Pen {\n}\n\npub fn (p Pen) describe() int {\n\treturn 2\n}\n\nfn show[T](mut v T) int {\n\treturn v.describe()\n}\n\npub fn run() int {\n\tmut b := Box{}\n\treturn show(mut b)\n}\n'
+	})
+	defer {
+		os.rmdir_all(root) or {}
+	}
+	g := build_graph(Options{ root: root })
+	targets := g.edges.filter(it.kind == .calls && it.from == 'demo.show').map(it.to)
+	assert 'demo.Box.describe' in targets, targets.str()
+	assert 'demo.Pen.describe' !in targets, targets.str()
+}
+
 fn test_a_c_binding_result_type_picks_the_method_among_same_named_ones() {
 	// two types declare `size`, so only the result type of C.make_thing() can tell
 	// which one the call means

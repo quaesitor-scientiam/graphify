@@ -141,7 +141,8 @@ fn is_type_param_text(t string) bool {
 }
 
 // param_types are the type texts of a free function's parameters, read from its
-// signature: `pub fn f(a int, b []T) R` gives int and []T.
+// signature: `pub fn f(a int, b []T) R` gives int and []T. A `mut` parameter is
+// written with a leading `&` (`mut b []T` is `b &[]T`), which is not part of its type.
 fn param_types(sig string) []string {
 	open := sig.index('(') or { return []string{} }
 	mut depth := 0
@@ -176,9 +177,9 @@ fn param_types(sig string) []string {
 			}
 		}
 		if sp := t.index(' ') {
-			types << t[sp + 1..].trim_space()
+			types << t[sp + 1..].trim_space().trim_left('&')
 		} else {
-			types << t
+			types << t.trim_left('&')
 		}
 	}
 	return types
