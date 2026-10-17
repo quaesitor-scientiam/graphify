@@ -694,13 +694,13 @@ plus the audit command, are all implemented:
 
 The stale-carry-forward *wiring* inside `build_graph_resilient` is tested
 through a real child process that dies partway through its batch. The test
-passes a shell script as `worker_exe`: it copies each file's canned worker
-line to the output and kills itself on `crash.v`, so the extract's own spawn,
-harvest and recovery run unchanged. It checks three things: a crashed file
-carries its last extract forward marked stale, a file queued behind the crash
-is parsed in the next wave, and a file that crashes on its first sighting has
-no symbols and is not stale. Breaking the carry-forward makes the test fail.
-The test is Unix-only, since the stand-in is a shell script.
+passes a stand-in worker as `worker_exe`, a small V program the test compiles
+with `@VEXE`. It copies each file's canned worker line to the output and panics
+on `crash.v`, so the extract's own spawn, harvest and recovery run unchanged,
+on every platform. It checks three things: a crashed file carries its last
+extract forward marked stale, a file queued behind the crash is parsed in the
+next wave, and a file that crashes on its first sighting has no symbols and is
+not stale. Breaking the carry-forward makes the test fail.
 
 ## 8. Extraction depends on the build host's OS and architecture
 

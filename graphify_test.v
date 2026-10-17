@@ -6943,29 +6943,43 @@ fn write_canned(tpl_dir string, root string, rel string) {
 	}
 }
 
-// crash_worker writes a stand-in for `graphify _parse-batch LIST OUT`: it copies
-// each file's canned line to OUT, except that while `tpl_dir/crash_now` exists it
-// kills itself on crash.v, as a parser that crashes would, so the extract sees a
-// worker that dies partway through its batch. A shell script, so Unix only.
+// crash_worker compiles a stand-in for `graphify _parse-batch LIST OUT` into
+// tpl_dir and returns its path. For each file in LIST it copies that file's canned
+// line (from tpl_dir, named by GRAPHIFY_TEST_CANNED) to OUT, except that while
+// `tpl_dir/crash_now` exists it panics on crash.v, as a parser that crashes would,
+// so the extract sees a worker that dies partway through its batch.
 fn crash_worker(tpl_dir string) string {
-	script := os.join_path(tpl_dir, 'fake_worker.sh')
-	os.write_file(script, '#!/bin/sh
-while IFS="\t" read -r path rel || [ -n "\$rel" ]; do
-	if [ "\$rel" = "crash.v" ] && [ -f "${tpl_dir}/crash_now" ]; then
-		kill -9 \$\$
-	fi
-	cat "${tpl_dir}/\$rel.line" || exit 1
-done < "\$2" >> "\$3"
-') or { panic(err) }
-	os.chmod(script, 0o755) or { panic(err) }
-	return script
+	os.setenv('GRAPHIFY_TEST_CANNED', tpl_dir, true)
+	src := os.join_path(tpl_dir, 'fake_worker.v')
+	os.write_file(src, "module main
+
+import os
+
+fn main() {
+	tpl := os.getenv('GRAPHIFY_TEST_CANNED')
+	lines := os.read_lines(os.args[2]) or { exit(1) }
+	mut out := os.create(os.args[3]) or { exit(1) }
+	for line in lines {
+		rel := line.all_after(u8(9).ascii_str())
+		if rel == 'crash.v' && os.exists(os.join_path(tpl, 'crash_now')) {
+			panic('the parser crashed on crash.v')
+		}
+		canned := os.read_file(os.join_path(tpl, rel + '.line')) or { exit(1) }
+		out.writeln(canned.trim_right('\\r\\n')) or { exit(1) }
+		out.flush()
+	}
+	out.close()
+}
+") or { panic(err) }
+	exe := os.join_path(tpl_dir, 'fake_worker') + $if windows { '.exe' } $else { '' }
+	vexe := @VEXE
+	res := os.execute('"${vexe}" -o "${exe}" "${src}"')
+	assert res.exit_code == 0, res.output
+	return exe
 }
 
 fn test_a_worker_crash_carries_the_last_extract_forward_and_requeues_the_rest() {
 	// the crash path through a real child process that dies on crash.v
-	$if windows {
-		return
-	}
 	root := write_tree('worker_crash_carry', {
 		'a.v':     'module demo\n\npub fn a_fn() int {\n\treturn 1\n}\n'
 		'crash.v': 'module demo\n\npub fn crash_fn() int {\n\treturn 2\n}\n'
@@ -7008,9 +7022,6 @@ fn test_a_worker_crash_carries_the_last_extract_forward_and_requeues_the_rest() 
 
 fn test_a_file_that_crashes_on_its_first_sighting_is_failed_and_has_no_symbols() {
 	// nothing cached yet, so the crash has no earlier extract to carry forward
-	$if windows {
-		return
-	}
 	root := write_tree('worker_crash_first', {
 		'crash.v': 'module demo\n\npub fn crash_fn() int {\n\treturn 2\n}\n'
 	})
