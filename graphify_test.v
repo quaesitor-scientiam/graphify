@@ -6933,3 +6933,99 @@ fn test_a_for_loop_over_a_range_takes_the_type_of_its_typed_bound() {
 	assert 'demo.u8.twice' in targets, targets.str()
 	assert targets.filter(it == 'demo.int.twice').len == 1, targets.str()
 }
+
+// write_canned writes the line a worker prints for `rel` as the file is now, to
+// `tpl_dir/<rel>.line`, for crash_worker to copy out.
+fn write_canned(tpl_dir string, root string, rel string) {
+	fr := extract_v_file_result(os.join_path(root, rel), rel)
+	os.write_file(os.join_path(tpl_dir, '${rel}.line'), encode_file_result(fr) + '\n') or {
+		panic(err)
+	}
+}
+
+// crash_worker writes a stand-in for `graphify _parse-batch LIST OUT`: it copies
+// each file's canned line to OUT, except that while `tpl_dir/crash_now` exists it
+// kills itself on crash.v, as a parser that crashes would, so the extract sees a
+// worker that dies partway through its batch. A shell script, so Unix only.
+fn crash_worker(tpl_dir string) string {
+	script := os.join_path(tpl_dir, 'fake_worker.sh')
+	os.write_file(script, '#!/bin/sh
+while IFS="\t" read -r path rel || [ -n "\$rel" ]; do
+	if [ "\$rel" = "crash.v" ] && [ -f "${tpl_dir}/crash_now" ]; then
+		kill -9 \$\$
+	fi
+	cat "${tpl_dir}/\$rel.line" || exit 1
+done < "\$2" >> "\$3"
+') or { panic(err) }
+	os.chmod(script, 0o755) or { panic(err) }
+	return script
+}
+
+fn test_a_worker_crash_carries_the_last_extract_forward_and_requeues_the_rest() {
+	// the crash path through a real child process that dies on crash.v
+	$if windows {
+		return
+	}
+	root := write_tree('worker_crash_carry', {
+		'a.v':     'module demo\n\npub fn a_fn() int {\n\treturn 1\n}\n'
+		'crash.v': 'module demo\n\npub fn crash_fn() int {\n\treturn 2\n}\n'
+		'z.v':     'module demo\n\npub fn z_fn() int {\n\treturn 3\n}\n'
+	})
+	tpl := root + '_tpl'
+	out := root + '_out'
+	os.mkdir_all(tpl) or { panic(err) }
+	defer {
+		os.rmdir_all(root) or {}
+		os.rmdir_all(tpl) or {}
+		os.rmdir_all(out) or {}
+	}
+	for rel in ['a.v', 'crash.v', 'z.v'] {
+		write_canned(tpl, root, rel)
+	}
+	worker := crash_worker(tpl)
+	// the first extract has nothing to fall back on, and every file parses
+	g1, r1 := build_graph_resilient(root, worker, out)
+	assert r1.failed.len == 0, r1.failed.str()
+	assert 'demo.crash_fn' in g1.symbols.map(it.id), g1.symbols.map(it.id).str()
+	// the next run changes crash.v and z.v, and the worker dies on crash.v, first in
+	// the batch, so z.v is queued behind it and parsed in the next wave
+	os.write_file(os.join_path(root, 'crash.v'), 'module demo\n\npub fn crash_fn() int {\n\treturn 4\n}\n') or {
+		panic(err)
+	}
+	os.write_file(os.join_path(root, 'z.v'), 'module demo\n\npub fn z_fn_v2() int {\n\treturn 5\n}\n') or {
+		panic(err)
+	}
+	write_canned(tpl, root, 'z.v')
+	os.write_file(os.join_path(tpl, 'crash_now'), '') or { panic(err) }
+	g2, r2 := build_graph_resilient(root, worker, out)
+	assert 'crash.v' in r2.failed, r2.failed.str()
+	assert 'crash.v' in r2.stale, r2.stale.str()
+	ids := g2.symbols.map(it.id)
+	assert 'demo.crash_fn' in ids, ids.str() // the last good extract, carried forward
+	assert 'demo.z_fn_v2' in ids, ids.str() // queued behind the crash, then parsed
+	assert 'demo.a_fn' in ids, ids.str() // unchanged, reused from the cache
+}
+
+fn test_a_file_that_crashes_on_its_first_sighting_is_failed_and_has_no_symbols() {
+	// nothing cached yet, so the crash has no earlier extract to carry forward
+	$if windows {
+		return
+	}
+	root := write_tree('worker_crash_first', {
+		'crash.v': 'module demo\n\npub fn crash_fn() int {\n\treturn 2\n}\n'
+	})
+	tpl := root + '_tpl'
+	out := root + '_out'
+	os.mkdir_all(tpl) or { panic(err) }
+	defer {
+		os.rmdir_all(root) or {}
+		os.rmdir_all(tpl) or {}
+		os.rmdir_all(out) or {}
+	}
+	os.write_file(os.join_path(tpl, 'crash_now'), '') or { panic(err) }
+	worker := crash_worker(tpl)
+	g, r := build_graph_resilient(root, worker, out)
+	assert 'crash.v' in r.failed, r.failed.str()
+	assert r.stale.len == 0, r.stale.str()
+	assert !g.symbols.any(it.id == 'demo.crash_fn'), g.symbols.map(it.id).str()
+}
