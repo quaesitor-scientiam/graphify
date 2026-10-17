@@ -687,10 +687,15 @@ fn resolve_edges(mut g Graph) {
 	mut flag_in_mod := map[string]bool{}
 	// sym_ids holds every symbol id, to see whether an enum declares a method
 	mut sym_ids := map[string]bool{}
+	// c_declared holds the names of the C functions the program binds (`fn C.name`)
+	mut c_declared := map[string]bool{}
 	// a field's site is its struct, so a struct maps to its own module
 	mut struct_mod := map[string]string{}
 	for s in g.symbols {
 		sym_ids[s.id] = true
+		if s.kind == .function && s.id.starts_with('C.') {
+			c_declared[s.id.all_before('@')] = true
+		}
 		if s.kind == .enum_ {
 			enum_names[s.parent + '\x00' + s.name] = true
 			flagged := s.signature.starts_with('@[flag]')
@@ -1078,6 +1083,13 @@ fn resolve_edges(mut g Graph) {
 		// default build doesn't compile, and the arena hooks it calls through: a call of
 		// one that no program declaration resolves is into the runtime, not the program
 		if e.kind == .calls && e.to in runtime_helpers {
+			resolved << Edge{...e, provenance: .undeclared}
+			continue
+		}
+		// a call of a C function the program binds nowhere (`C.close`, `C.memcpy`) is one a
+		// system header declares, the same as a runtime helper; a binding that exists but
+		// does not resolve (two copies that differ) is still unresolved
+		if e.kind == .calls && e.to.starts_with('C.') && e.to.count('.') == 1 && e.to !in c_declared {
 			resolved << Edge{...e, provenance: .undeclared}
 			continue
 		}

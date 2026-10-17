@@ -7071,3 +7071,18 @@ fn test_a_c_function_binding_is_a_symbol_and_types_the_call_that_uses_it() {
 	assert g.edges.any(it.kind == .calls && it.from == 'demo.use_it' && it.to == 'C.puts'), g.edges.filter(it.from == 'demo.use_it').map(it.to).str()
 	assert g.edges.any(it.kind == .calls && it.from == 'demo.use_it' && it.to == 'demo.Thing.size'), g.edges.filter(it.from == 'demo.use_it').map(it.to).str()
 }
+
+fn test_a_c_call_the_program_binds_nowhere_is_undeclared() {
+	// `C.puts` is bound in the program, so its call resolves; `C.close` is declared
+	// only by a system header, so its call is undeclared, as a runtime helper's is
+	root := write_tree('c_call_undeclared', {
+		'demo.v': 'module demo\n\nfn C.puts(s &char) int\n\npub fn say() int {\n\treturn C.puts(unsafe { nil }) + C.close(1)\n}\n'
+	})
+	defer {
+		os.rmdir_all(root) or {}
+	}
+	g := build_graph(Options{ root: root })
+	calls := g.edges.filter(it.kind == .calls && it.from == 'demo.say')
+	assert calls.any(it.to == 'C.puts' && it.provenance != .undeclared), calls.map(it.to).str()
+	assert calls.any(it.to == 'C.close' && it.provenance == .undeclared), calls.map(it.to).str()
+}
