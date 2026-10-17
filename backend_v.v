@@ -1496,7 +1496,7 @@ fn (mut f V3File) walk(id flat.NodeId, ctx V3CallCtx, mut edges []Edge, mut seen
 	match n.kind {
 		.call {
 			if kids.len > 0 {
-				f.record_call(kids[0], ctx, mut edges, mut seen)
+				f.record_call(kids[0], kids[1..], ctx, mut edges, mut seen)
 				callee := f.node(kids[0])
 				ck := f.kids(kids[0])
 				if callee.kind == .selector && ck.len > 0
@@ -2443,7 +2443,7 @@ fn (f &V3File) callee(callee_id flat.NodeId, ctx V3CallCtx) (string, bool, flat.
 // callee). A method call carries its receiver's type when the code writes it
 // (recv_type), and otherwise the recipe for working it out (recv_recipe), so
 // `a.len()` and `b.len()` on different types are separate edges.
-fn (mut f V3File) record_call(callee_id flat.NodeId, ctx V3CallCtx, mut edges []Edge, mut seen map[string]bool) {
+fn (mut f V3File) record_call(callee_id flat.NodeId, args []flat.NodeId, ctx V3CallCtx, mut edges []Edge, mut seen map[string]bool) {
 	name, is_method, target_id := f.callee(callee_id, ctx)
 	mut rt := ''
 	mut recipe := ''
@@ -2475,7 +2475,14 @@ fn (mut f V3File) record_call(callee_id flat.NodeId, ctx V3CallCtx, mut edges []
 	// `f()` where `f` is a variable or parameter calls a function value
 	value_call := !is_method && name in ctx.vars
 	key := '${name}\x00${rt}\x00${recipe}\x00${value_call}'
+	// a non-method call keeps its argument recipes, one site at a time, since a generic
+	// callee's type parameters come from every call site; a repeat call merges into the
+	// edge its first call made
+	site := if is_method { '' } else { f.arg_site(args, ctx) }
 	if key in seen {
+		if !is_method {
+			add_arg_site(mut edges, ctx.from, name, site)
+		}
 		return
 	}
 	seen[key] = true
@@ -2488,5 +2495,33 @@ fn (mut f V3File) record_call(callee_id flat.NodeId, ctx V3CallCtx, mut edges []
 		recv_recipe: recipe
 		file:        ctx.file
 		provenance:  if value_call { EdgeProvenance.undeclared } else { .extracted }
+		arg_sites:   if is_method { '' } else { site + arg_site_end }
+	}
+}
+
+// arg_site_end ends each call site's argument recipes in an edge's arg_sites.
+const arg_site_end = '\x08'
+
+// arg_site is the recipes of a call's arguments, joined by \x0b. One with no
+// recipe is ''.
+fn (mut f V3File) arg_site(args []flat.NodeId, ctx V3CallCtx) string {
+	mut parts := []string{}
+	for a in args {
+		parts << f.recipe(a, ctx)
+	}
+	return parts.join('\x0b')
+}
+
+// add_arg_site records one more call site of the non-method call of `to` from `from`,
+// on the edge that first recorded that call in this body.
+fn add_arg_site(mut edges []Edge, from string, to string, site string) {
+	for i := edges.len - 1; i >= 0 && edges[i].from == from; i-- {
+		if edges[i].to == to && edges[i].kind == .calls && !edges[i].is_method {
+			edges[i] = Edge{
+				...edges[i]
+				arg_sites: edges[i].arg_sites + site + arg_site_end
+			}
+			return
+		}
 	}
 }

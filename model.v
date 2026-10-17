@@ -98,6 +98,11 @@ pub:
 	// trim_space's return type". Empty when the receiver's origin is unknown.
 	// Like is_method, it is extraction-only and not persisted.
 	recv_recipe string
+	// arg_sites holds, for a non-method call, the argument recipes of each call site
+	// it stands for: a site's arguments are joined by \x0b, sites by \x07. A generic
+	// callee's type parameters are found from them (see instantiations in infer.v).
+	// Extraction-only and not persisted.
+	arg_sites string @[json: '-']
 	// file is the path of the file that emitted this edge — populated for
 	// `calls`/`embeds`/`references` edges, whose `from` is the id of a
 	// declaration that may need disambiguating (see disambiguate_ids in

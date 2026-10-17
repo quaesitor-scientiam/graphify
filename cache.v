@@ -38,7 +38,7 @@ const cache_file_name = '.gf_cache.ndjson'
 // fix shipped, on a completely unchanged corpus, because only the source
 // files' own hashes were ever checked. This marker now only guards the
 // envelope itself from being misparsed by an older/newer build.
-const cache_format = 'graphify-cache-v5'
+const cache_format = 'graphify-cache-v6'
 
 // file_hash returns the hex SHA256 of a file's content, or '' if it can't be
 // read (the caller then treats the file as uncached and reparses it). Also
