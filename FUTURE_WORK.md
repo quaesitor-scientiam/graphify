@@ -692,13 +692,15 @@ plus the audit command, are all implemented:
   is the audit trail, and it does cover losses beyond a merge, such as a
   walker or skip-list change.
 
-Known gap left from this work: the stale-carry-forward *wiring* inside
-`build_graph_resilient` has no test that triggers a real worker crash —
-vlang's own permanently-unparseable files have never succeeded even once, so
-there's nothing for them to fall back to, and constructing a reliable
-artificial crash is fragile. The pure decision helpers are unit-tested
-directly instead; the wiring is covered by review, the full test suite, and
-a real full-corpus run, not a targeted crash-injection test.
+The stale-carry-forward *wiring* inside `build_graph_resilient` is tested
+through a real child process that dies partway through its batch. The test
+passes a stand-in worker as `worker_exe`, a small V program the test compiles
+with `@VEXE`. It copies each file's canned worker line to the output and panics
+on `crash.v`, so the extract's own spawn, harvest and recovery run unchanged,
+on every platform. It checks three things: a crashed file carries its last
+extract forward marked stale, a file queued behind the crash is parsed in the
+next wave, and a file that crashes on its first sighting has no symbols and is
+not stale. Breaking the carry-forward makes the test fail.
 
 ## 8. Extraction depends on the build host's OS and architecture
 

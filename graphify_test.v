@@ -6933,3 +6933,123 @@ fn test_a_for_loop_over_a_range_takes_the_type_of_its_typed_bound() {
 	assert 'demo.u8.twice' in targets, targets.str()
 	assert targets.filter(it == 'demo.int.twice').len == 1, targets.str()
 }
+
+// write_canned writes the line a worker prints for `rel` as the file is now, to
+// `tpl_dir/<rel>.line`, for crash_worker to copy out.
+fn write_canned(tpl_dir string, root string, rel string) {
+	fr := extract_v_file_result(os.join_path(root, rel), rel)
+	os.write_file(os.join_path(tpl_dir, '${rel}.line'), encode_file_result(fr) + '\n') or {
+		panic(err)
+	}
+}
+
+// compile_crash_worker compiles a stand-in for `graphify _parse-batch LIST OUT`
+// into dir and returns its path. For each file in LIST it copies that file's
+// canned line (from the directory named by GRAPHIFY_TEST_CANNED) to OUT, except
+// that while `crash_now` exists there it panics on crash.v, as a parser that
+// crashes would, so the extract sees a worker that dies partway through its batch.
+fn compile_crash_worker(dir string) string {
+	src := os.join_path(dir, 'fake_worker.vsh')
+	os.write_file(src, "module main
+
+import os
+
+fn main() {
+	tpl := os.getenv('GRAPHIFY_TEST_CANNED')
+	lines := os.read_lines(os.args[2]) or { exit(1) }
+	mut out := os.create(os.args[3]) or { exit(1) }
+	for line in lines {
+		rel := line.all_after(u8(9).ascii_str())
+		if rel == 'crash.v' && os.exists(os.join_path(tpl, 'crash_now')) {
+			panic('the parser crashed on crash.v')
+		}
+		canned := os.read_file(os.join_path(tpl, rel + '.line')) or { exit(1) }
+		out.writeln(canned.trim_right('\\r\\n')) or { exit(1) }
+		out.flush()
+	}
+	out.close()
+}
+") or { panic(err) }
+	exe := os.join_path(dir, 'fake_worker') + $if windows { '.exe' } $else { '' }
+	vexe := @VEXE
+	res := os.exec([vexe, '-o', exe, 'build', src])
+	assert res.exit_code == 0, res.output
+	return exe
+}
+
+// check_carry_forward runs a crash on crash.v after an extract that succeeded:
+// the crashed file keeps its last extract, and the file queued behind it is parsed.
+fn check_carry_forward(worker string, dir string) {
+	root := write_tree('worker_crash_carry', {
+		'a.v':     'module demo\n\npub fn a_fn() int {\n\treturn 1\n}\n'
+		'crash.v': 'module demo\n\npub fn crash_fn() int {\n\treturn 2\n}\n'
+		'z.v':     'module demo\n\npub fn z_fn() int {\n\treturn 3\n}\n'
+	})
+	tpl := os.join_path(dir, 'carry')
+	out := root + '_out'
+	os.mkdir_all(tpl) or { panic(err) }
+	os.setenv('GRAPHIFY_TEST_CANNED', tpl, true)
+	defer {
+		os.rmdir_all(root) or {}
+		os.rmdir_all(out) or {}
+	}
+	for rel in ['a.v', 'crash.v', 'z.v'] {
+		write_canned(tpl, root, rel)
+	}
+	// the first extract has nothing to fall back on, and every file parses
+	g1, r1 := build_graph_resilient(root, worker, out)
+	assert r1.failed.len == 0, r1.failed.str()
+	assert 'demo.crash_fn' in g1.symbols.map(it.id), g1.symbols.map(it.id).str()
+	// the next run changes crash.v and z.v, and the worker dies on crash.v, first in
+	// the batch, so z.v is queued behind it and parsed in the next wave
+	os.write_file(os.join_path(root, 'crash.v'), 'module demo\n\npub fn crash_fn() int {\n\treturn 4\n}\n') or {
+		panic(err)
+	}
+	os.write_file(os.join_path(root, 'z.v'), 'module demo\n\npub fn z_fn_v2() int {\n\treturn 5\n}\n') or {
+		panic(err)
+	}
+	write_canned(tpl, root, 'z.v')
+	os.write_file(os.join_path(tpl, 'crash_now'), '') or { panic(err) }
+	g2, r2 := build_graph_resilient(root, worker, out)
+	assert 'crash.v' in r2.failed, r2.failed.str()
+	assert 'crash.v' in r2.stale, r2.stale.str()
+	ids := g2.symbols.map(it.id)
+	assert 'demo.crash_fn' in ids, ids.str() // the last good extract, carried forward
+	assert 'demo.z_fn_v2' in ids, ids.str() // queued behind the crash, then parsed
+	assert 'demo.a_fn' in ids, ids.str() // unchanged, reused from the cache
+}
+
+// check_first_sighting runs a crash on a file with nothing cached: it is failed,
+// has no symbols, and is not stale.
+fn check_first_sighting(worker string, dir string) {
+	// nothing cached yet, so the crash has no earlier extract to carry forward
+	root := write_tree('worker_crash_first', {
+		'crash.v': 'module demo\n\npub fn crash_fn() int {\n\treturn 2\n}\n'
+	})
+	tpl := os.join_path(dir, 'first')
+	out := root + '_out'
+	os.mkdir_all(tpl) or { panic(err) }
+	os.setenv('GRAPHIFY_TEST_CANNED', tpl, true)
+	defer {
+		os.rmdir_all(root) or {}
+		os.rmdir_all(out) or {}
+	}
+	os.write_file(os.join_path(tpl, 'crash_now'), '') or { panic(err) }
+	g, r := build_graph_resilient(root, worker, out)
+	assert 'crash.v' in r.failed, r.failed.str()
+	assert r.stale.len == 0, r.stale.str()
+	assert !g.symbols.any(it.id == 'demo.crash_fn'), g.symbols.map(it.id).str()
+}
+
+fn test_a_worker_crash_is_recovered_from_on_both_paths() {
+	// one compile of the stand-in serves both cases; the directory they share is
+	// removed at the end
+	dir := os.join_path(os.temp_dir(), 'graphify_crash_worker_${os.getpid()}')
+	os.mkdir_all(dir) or { panic(err) }
+	defer {
+		os.rmdir_all(dir) or {}
+	}
+	worker := compile_crash_worker(dir)
+	check_carry_forward(worker, dir)
+	check_first_sighting(worker, dir)
+}
