@@ -227,9 +227,16 @@ generic receivers paragraph leaves unresolved (`work D` in `crypto/hmac`, and
 `digest := h()` where `h fn () H` in `crypto/hkdf`), and JS declarations
 (`JS.Array.prototype.constructor()`). A multi-line chain is not the cause: 2 of
 the 3,368 bare-name calls sit on a continuation line of one. A string literal
-receiver is typed and resolves (`'Hello World!'.hex()`). Still open: values V
-infers in other ways (a comptime `for f in T.fields` variable, a receiver from a
-call with a computed argument), and a sum type's shared field.
+receiver is typed and resolves (`'Hello World!'.hex()`).
+
+Comptime field selectors (measured October 2026): 11 of the 354 unresolved calls
+go through a `$for` field, `x.$(field.name).m()`. Four are on a generic `A` in
+`veb/middleware.v`, which the generic receivers paragraph leaves unresolved, and
+seven are in vlang's comptime test fixtures. Resolving the rest would give one
+call an edge to the method of every field type that declares it. The
+one-edge-per-call model does not express that, so they stay unresolved. Still
+open: a receiver from a call with a computed argument, and a sum type's shared
+field.
 
 The raw edge is retained and `explain` reports ambiguous callers rather than
 inventing links. A future opt-in deep mode could run the checker over a whole
