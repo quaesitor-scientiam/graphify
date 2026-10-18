@@ -204,6 +204,56 @@ fn test_a_method_of_a_js_binding_type_that_a_v_wrapper_declares_links_to_the_wra
 	assert 'JS.WebGLRenderingContext.clear' !in targets, targets.str()
 }
 
+fn test_a_function_typed_parameter_takes_the_type_its_function_returns() {
+	// `new_hmac[D]` calls its `h fn () D`, and the function it is passed returns a Digest, so D
+	// is a Digest and the call reaches Digest.block_size(). Other has one too, which a call
+	// matched by name alone could take
+	root := write_tree('function_typed_parameter', {
+		'demo.v': 'module demo\n\npub struct Digest {\n}\n\npub fn (d &Digest) block_size() int {\n\treturn 64\n}\n\npub struct Other {\n}\n\npub fn (o &Other) block_size() int {\n\treturn 1\n}\n\npub fn new_digest() &Digest {\n\treturn &Digest{}\n}\n\npub fn new_hmac[D](h fn () D) int {\n\tdigest := h()\n\treturn digest.block_size()\n}\n\npub fn run() int {\n\treturn new_hmac(new_digest)\n}\n'
+	})
+	defer {
+		os.rmdir_all(root) or {}
+	}
+	g := build_graph(Options{ root: root })
+	targets := g.edges.filter(it.kind == .calls && it.from == 'demo.new_hmac').map(it.to)
+	assert 'demo.Digest.block_size' in targets, targets.str()
+	assert 'demo.Other.block_size' !in targets, targets.str()
+}
+
+fn test_a_function_named_through_an_import_takes_its_return_type() {
+	// `sha1.new` is named through `import crypto.sha1`, and the module of a file under vlib is
+	// `vlib.crypto.sha1`, so the function is found under that id. md5 has a block_size() too, which
+	// a call matched by name alone could take
+	root := write_tree('function_through_import', {
+		'vlib/crypto/sha1/sha1.v': 'module sha1\n\npub struct Digest {\n}\n\npub fn (d &Digest) block_size() int {\n\treturn 64\n}\n\npub fn new() &Digest {\n\treturn &Digest{}\n}\n'
+		'vlib/crypto/md5/md5.v':   'module md5\n\npub struct Digest {\n}\n\npub fn (d &Digest) block_size() int {\n\treturn 1\n}\n'
+		'vlib/crypto/hmac/hmac.v': 'module hmac\n\npub fn new_hmac[D](h fn () D) int {\n\tdigest := h()\n\treturn digest.block_size()\n}\n'
+		'demo/demo.v':             'module demo\n\nimport crypto.hmac\nimport crypto.sha1\n\npub fn run() int {\n\treturn hmac.new_hmac(sha1.new)\n}\n'
+	})
+	defer {
+		os.rmdir_all(root) or {}
+	}
+	g := build_graph(Options{ root: root })
+	targets := g.edges.filter(it.kind == .calls && it.from == 'vlib.crypto.hmac.new_hmac').map(it.to)
+	assert 'vlib.crypto.sha1.Digest.block_size' in targets, targets.str()
+	assert 'vlib.crypto.md5.Digest.block_size' !in targets, targets.str()
+}
+
+fn test_a_method_on_a_field_of_a_generic_struct_takes_the_instance_the_struct_has() {
+	// `reset` calls block_size() on the field `work`, of type D. The `Hmac[D]` that new_hmac builds
+	// is instantiated with the Digest its function returns, so reset() reaches Digest's method
+	root := write_tree('generic_struct_field_owner', {
+		'demo.v': 'module demo\n\npub struct Digest {\n}\n\npub fn (d &Digest) block_size() int {\n\treturn 64\n}\n\npub struct Other {\n}\n\npub fn (o &Other) block_size() int {\n\treturn 1\n}\n\npub fn new_digest() &Digest {\n\treturn &Digest{}\n}\n\npub struct Hmac[D] {\n\twork D\n}\n\npub fn (m &Hmac[D]) reset() int {\n\treturn m.work.block_size()\n}\n\npub fn new_hmac[D](h fn () D) int {\n\tm := &Hmac[D]{\n\t\twork: h()\n\t}\n\treturn m.work.block_size()\n}\n\npub fn run() int {\n\treturn new_hmac(new_digest)\n}\n'
+	})
+	defer {
+		os.rmdir_all(root) or {}
+	}
+	g := build_graph(Options{ root: root })
+	targets := g.edges.filter(it.kind == .calls && it.from == 'demo.Hmac[D].reset').map(it.to)
+	assert 'demo.Digest.block_size' in targets, targets.str()
+	assert 'demo.Other.block_size' !in targets, targets.str()
+}
+
 fn test_literal_receiver_types_the_call() {
 	src := 'module demo
 

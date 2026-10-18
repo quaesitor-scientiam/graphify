@@ -277,6 +277,20 @@ stay unresolved: `reduce` on `[]int`, whose `array.reduce` is declared in module
 `JS.Array.prototype.constructor()`, which has no type; and `concat` on a `js'...'`
 string literal, which is not typed as a JS string.
 
+Function-typed parameters (October 2026). A parameter `h fn () D` of a generic function
+takes D from the function its argument names: a function-typed variable, or a function named
+as a value. A function named as a value is found by its id: `sha1.new`, recorded as
+`g:crypto.sha1.new`, is matched with the vlib prefix an import path leaves out
+(`import_names`), and a function of the caller's module is found by its own module
+(`fn_value_type`, in generics.v). A method on a field of a generic struct instance,
+`m.work.block_size()` on an `m` that is a `Hmac[D]`, names that instance too, through the
+field's owner, the prefix of the recipe (`expand_type_param_calls`). On the vlang tree the
+hkdf and hmac calls resolve: unresolved calls go from 309 to 297, 18 links are added, and
+none is lost. The instances are the ones the extraction can see. `new_digest` in
+`prekeyed_hmac` is a local `if` over function values, which has no recipe, so
+`Hmac[D].reset` links to sha1's `copy_from` only, not to sha224's or sha256's. Not examined:
+the `test_digest_implements_hash` calls in the crypto tests (`free`, `size`), and veb.
+
 Comptime field selectors (measured October 2026): 11 of the 354 unresolved calls
 go through a `$for` field, `x.$(field.name).m()`. Four are on a generic `A` in
 `veb/middleware.v`, which the generic receivers paragraph leaves unresolved, and
