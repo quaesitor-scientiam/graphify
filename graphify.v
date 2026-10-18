@@ -1113,15 +1113,19 @@ fn resolve_edges(mut g Graph) {
 		resolved << e
 	}
 	// a method call on a type parameter is linked to the methods of the types its
-	// generic function is called with (generics.v); only functions with type parameters
-	// carry a recipe
+	// generic function, or its generic struct, is instantiated with (generics.v); only
+	// functions and methods with type parameters carry a recipe
 	mut generic_funcs := map[string]Symbol{}
+	mut generic_fields := []Symbol{}
 	for s in g.symbols {
-		if s.kind == .function && s.recipe != '' {
+		if (s.kind == .function || s.kind == .method || s.kind == .struct_) && s.recipe != '' {
 			generic_funcs[s.id] = s
 		}
+		if s.kind == .field && s.signature.contains('[') {
+			generic_fields << s
+		}
 	}
-	g.edges = expand_type_param_calls(resolved, mut inf, generic_funcs)
+	g.edges = expand_type_param_calls(resolved, g.edges, generic_fields, mut inf, generic_funcs)
 }
 
 // runtime_helpers are the names of V's runtime helpers, as the bare builtin declares
