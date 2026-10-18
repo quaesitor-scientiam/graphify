@@ -347,7 +347,7 @@ fn (inf &Infer) follow_steps(e Edge, depth int) ?InferredType {
 	}
 	rest := steps[1..]
 	for si, step in rest {
-		if step.starts_with('p:') || step.starts_with('mapto:') {
+		if step.starts_with('p:') || step.starts_with('mapto:') || step.starts_with('mapit:') {
 			continue
 		}
 		if step == 'th' {
@@ -373,6 +373,19 @@ fn (inf &Infer) follow_steps(e Edge, depth int) ?InferredType {
 			// of an array or map (`type Sources = [2]Source`) otherwise has its methods
 			if (inf.method_on(t, name, e.file, 0) or { '' }) == '' {
 				t = inf.unalias(t, e.file)
+			}
+			// `xs.map(it.trim_left(' '))`: the array of what that method returns for each element
+			if name == 'map' && t.text.starts_with('[') && si + 1 < rest.len
+				&& rest[si + 1].starts_with('mapit:') {
+				elem := elem_type(t.text)?
+				found := inf.method_on(InferredType{ text: elem, mod: t.mod, file: t.file }, rest[si + 1][6..], e.file, 0)?
+				ret := inf.returns(found)?
+				t = InferredType{
+					text: '[]' + ret.text
+					mod:  ret.mod
+					file: ret.file
+				}
+				continue
 			}
 			if name == 'map' && t.text.starts_with('[') && si + 1 < rest.len
 				&& rest[si + 1].starts_with('mapto:') {
