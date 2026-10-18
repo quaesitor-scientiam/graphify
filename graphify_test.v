@@ -7207,6 +7207,80 @@ fn test_a_generic_struct_in_a_field_type_instantiates_its_type_parameter() {
 	assert 'demo.Other.weight' !in targets, targets.str()
 }
 
+fn test_a_static_generic_call_with_a_type_argument_types_its_result() {
+	// `Box.new[Pen](...)` is a generic static method, and its result is Box[Pen], so
+	// `item` is a Pen; weight() is declared on two types, so only that can say which
+	root := write_tree('static_generic_call', {
+		'demo.v': 'module demo\n\npub struct Pen {\n}\n\npub fn (p Pen) weight() int {\n\treturn 2\n}\n\npub struct Other {\n}\n\npub fn (o Other) weight() int {\n\treturn 3\n}\n\npub struct Box[T] {\n\titem T\n}\n\npub fn Box.new[T](item T) Box[T] {\n\treturn Box[T]{\n\t\titem: item\n\t}\n}\n\npub fn run() int {\n\ty := Box.new[Pen](Pen{})\n\treturn y.item.weight()\n}\n'
+	})
+	defer {
+		os.rmdir_all(root) or {}
+	}
+	g := build_graph(Options{ root: root })
+	targets := g.edges.filter(it.kind == .calls && it.from == 'demo.run').map(it.to)
+	assert 'demo.Pen.weight' in targets, targets.str()
+	assert 'demo.Other.weight' !in targets, targets.str()
+}
+
+fn test_a_bare_call_in_a_method_names_the_receivers_method() {
+	// `describe(1)` in `implicit` names no function, so it is the receiver's describe(),
+	// as V calls it; a free function of the same name would win, as the callee shows
+	root := write_tree('implicit_receiver_call', {
+		'demo.v': 'module demo\n\npub struct Box[T] {\n\titem T\n}\n\npub fn (b Box[T]) describe(v int) int {\n\treturn v\n}\n\npub fn (b Box[T]) implicit() int {\n\treturn describe(1)\n}\n'
+	})
+	defer {
+		os.rmdir_all(root) or {}
+	}
+	g := build_graph(Options{ root: root })
+	targets := g.edges.filter(it.kind == .calls && it.from == 'demo.Box[T].implicit').map(it.to)
+	assert 'demo.Box[T].describe' in targets, targets.str()
+}
+
+fn test_a_generic_struct_built_by_a_generic_function_takes_its_types() {
+	// `build[T]` makes a Ctx[T] whose items are T, and build() is called with a Pen, so
+	// the Ctx's first() reaches Pen.weight(), not Other.weight()
+	root := write_tree('nested_generic_instantiation', {
+		'demo.v': 'module demo\n\npub struct Pen {\n}\n\npub fn (p Pen) weight() int {\n\treturn 2\n}\n\npub struct Other {\n}\n\npub fn (o Other) weight() int {\n\treturn 3\n}\n\npub struct Ctx[T] {\n\titems []T\n}\n\npub fn (c Ctx[T]) first() int {\n\treturn c.items[0].weight()\n}\n\npub fn build[T](x T) int {\n\tc := &Ctx[T]{\n\t\titems: [x]\n\t}\n\treturn c.first()\n}\n\npub fn run() int {\n\treturn build(Pen{})\n}\n'
+	})
+	defer {
+		os.rmdir_all(root) or {}
+	}
+	g := build_graph(Options{ root: root })
+	targets := g.edges.filter(it.kind == .calls && it.from == 'demo.Ctx[T].first').map(it.to)
+	assert 'demo.Pen.weight' in targets, targets.str()
+	assert 'demo.Other.weight' !in targets, targets.str()
+}
+
+fn test_a_call_of_a_function_field_of_a_generic_struct_is_a_value_call() {
+	// `func T` holds a function once FnHolder is instantiated with a function type, so
+	// `self.func(a)` calls that value and names no method
+	root := write_tree('function_field_value_call', {
+		'demo.v': 'module demo\n\nfn neg(a int) int {\n\treturn -a\n}\n\npub struct FnHolder[T] {\n\tfunc T\n}\n\npub fn (self FnHolder[T]) call(a int) int {\n\treturn self.func(a)\n}\n\npub fn run() int {\n\treturn FnHolder[fn (int) int]{\n\t\tfunc: neg\n\t}.call(4)\n}\n'
+	})
+	defer {
+		os.rmdir_all(root) or {}
+	}
+	g := build_graph(Options{ root: root })
+	calls := g.edges.filter(it.kind == .calls && it.from == 'demo.FnHolder[T].call' && it.to == 'func')
+	assert calls.len == 1, g.edges.map(it.to).str()
+	assert calls[0].provenance == .undeclared, calls[0].provenance.str()
+}
+
+fn test_a_call_on_the_result_of_a_type_parameter_call_takes_that_result_type() {
+	// `el.tag().size()` where el is T: tag() returns Tag, so size() is Tag's, and not
+	// Other's, which the same name also has
+	root := write_tree('chained_type_param_call', {
+		'demo.v': 'module demo\n\npub struct Tag {\n\tn int\n}\n\npub fn (t Tag) size() int {\n\treturn t.n\n}\n\npub struct Other {\n}\n\npub fn (o Other) size() int {\n\treturn 2\n}\n\npub struct Aa {\n\ta string\n}\n\npub fn (a Aa) tag() Tag {\n\treturn Tag{\n\t\tn: 1\n\t}\n}\n\npub struct Choi[T] {\n\tsrc []T\n}\n\npub fn (c Choi[T]) content() int {\n\tmut n := 0\n\tfor el in c.src {\n\t\tn += el.tag().size()\n\t}\n\treturn n\n}\n\npub struct Holder {\n\tc Choi[Aa]\n}\n'
+	})
+	defer {
+		os.rmdir_all(root) or {}
+	}
+	g := build_graph(Options{ root: root })
+	targets := g.edges.filter(it.kind == .calls && it.from == 'demo.Choi[T].content').map(it.to)
+	assert 'demo.Tag.size' in targets, targets.str()
+	assert 'demo.Other.size' !in targets, targets.str()
+}
+
 fn test_a_c_binding_result_type_picks_the_method_among_same_named_ones() {
 	// two types declare `size`, so only the result type of C.make_thing() can tell
 	// which one the call means

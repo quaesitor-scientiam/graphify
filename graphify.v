@@ -1110,6 +1110,14 @@ fn resolve_edges(mut g Graph) {
 			resolved << Edge{...e, provenance: .undeclared}
 			continue
 		}
+		// a bare call in a method that no function of the module has is the receiver's
+		// method of that name, which V calls without the receiver (`describe(b.value)`)
+		if e.kind == .calls && !e.is_method && !e.to.contains('.') {
+			if id := implicit_receiver_call(e, by_name) {
+				resolved << Edge{...e, to: id, is_method: true, provenance: .inferred}
+				continue
+			}
+		}
 		resolved << e
 	}
 	// a method call on a type parameter is linked to the methods of the types its
@@ -1126,6 +1134,21 @@ fn resolve_edges(mut g Graph) {
 		}
 	}
 	g.edges = expand_type_param_calls(resolved, g.edges, generic_fields, mut inf, generic_funcs)
+}
+
+// implicit_receiver_call is the id of the method, of the struct the calling method
+// belongs to, that a bare call of `name` in that method names. none when the caller
+// is not a method, or the struct has no method of that name.
+fn implicit_receiver_call(e Edge, by_name map[string][]CallCand) ?string {
+	base := e.from.all_before('@')
+	dot := base.last_index('.') or { return none }
+	want := strip_generic_args(base[..dot]) + '.' + e.to
+	for c in by_name[e.to] or { []CallCand{} } {
+		if c.is_method && strip_generic_args(c.id.all_before('@')) == want {
+			return c.id
+		}
+	}
+	return none
 }
 
 // runtime_helpers are the names of V's runtime helpers, as the bare builtin declares
