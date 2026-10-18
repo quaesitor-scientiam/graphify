@@ -626,6 +626,19 @@ fn (inf &Infer) comptime_recipe(recipe string, file string) string {
 	return alts.join(recipe_alt)
 }
 
+// declared_file is the file that declares the type `short` in module `mod`, when only one
+// does, or `fallback`. An instance's own file is the one of the call that made it, which
+// may be another file than the declaration, a test-only one, say
+fn (inf &Infer) declared_file(short string, mod string, fallback string) string {
+	mut files := []string{}
+	for c in inf.by_type_name[short] or { []TypeCand{} } {
+		if c.mod == mod && c.file !in files {
+			files << c.file
+		}
+	}
+	return if files.len == 1 { files[0] } else { fallback }
+}
+
 // comptime_sites is `sites` (arg_sites) with comptime_recipe applied to each argument's recipe.
 // A `ta:` site names explicit type arguments, which have no narrowed step
 fn (inf &Infer) comptime_sites(sites string, file string) string {
