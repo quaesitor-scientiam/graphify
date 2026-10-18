@@ -300,11 +300,28 @@ in order. The call records them as a site of their own, `ta:` (`type_arg_site`, 
 backend_v.v), and each is an instance in the caller's module. An instance's name is written
 with its module (`vlib.veb.tests.Context`), and the walk drops the module, since the instance's
 own file gives the name its scope (`path_method_ids`). On the vlang tree unresolved calls go
-from 297 to 284, 21 links are added, and none is lost. Still unresolved in veb: a tuple from a
-`match` (`compressed, ext := match ...`, `bytestr` in send_compressed_response and
-serve_compressed_static), a comptime name check (`$if field.name == 'Middleware'` on
-`app.$(field.name)`, four calls), `clone` in check_duplicate_routes_in_controllers and
-run_new, `trim` in parse_form_from_request, and `set` in Throttle.acquire, not traced.
+from 297 to 284, 21 links are added, and none is lost.
+
+A tuple from an `if` or `match` (`compressed, ext := match n { ... c, '.zst' }`) gave each
+name the first value's recipe with `#i` after it, and that value's `c` is declared inside its
+branch, so no name got a type. Now each name takes the first branch's own value for its
+position, read after the branch's `:=` names are declared (`tuple_recipes` and `branch_values`,
+in backend_v.v). On the vlang tree unresolved calls go from 288 to 283: `bytestr` in
+serve_compressed_static and send_compressed_response, `lock` and `unlock` in
+channel_select_priv, and `bytes` in parse_memory_limit. The links are the methods of the
+types those values have, and no call changes its target.
+
+Still unresolved in veb, nine calls. `clone` in check_duplicate_routes_in_controllers is on a
+field of `global_app`, which `$if T is ControllerInterface` retypes to the interface. infer.v
+(`comptime_type`) refuses an interface, so the call loses the instance path that resolves the
+same field without the check. `trim` and `to_lower` in parse_form_from_request follow a
+`.map(it.trim_left(' \t'))`, whose element type the map recipe does not give. `set` in the
+closure of Throttle.acquire is on `ctx.res.header`, of a closure type parameter. The four
+`app.$(field.name)` calls in veb/middleware.v sit under `$if field.name == 'Middleware'`, and
+a pin that names the field resolves them in a test tree, but on the tree their instances come
+through veb.v's generic callers two levels up, so the pin changes nothing there yet. `clone` in
+run_new is on `static_files` through the embedded StaticHandler, and resolves in a test tree but
+not on the tree.
 
 Comptime field selectors (measured October 2026): 11 of the 354 unresolved calls
 go through a `$for` field, `x.$(field.name).m()`. Four are on a generic `A` in
