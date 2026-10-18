@@ -2478,7 +2478,31 @@ fn (f &V3File) callee(callee_id flat.NodeId, ctx V3CallCtx) (string, bool, flat.
 		&& target.value !in ctx.locals {
 		return '${target.value}__static__${c.value}', false, flat.NodeId(-1)
 	}
+	// a static member of a JS binding, `JS.Promise.race(p)` or `JS.Array.prototype.constructor()`,
+	// is a call into the JS host as `JS.parseInt` is, so its full path is its name
+	if js := f.js_path(ks[0]) {
+		return '${js}.${c.value}', false, flat.NodeId(-1)
+	}
 	return c.value, true, ks[0]
+}
+
+// js_path is the dotted path of a selector chain that starts at the `JS` binding:
+// `JS.Array.prototype` for the target of `JS.Array.prototype.constructor()`. none for any
+// other chain.
+fn (f &V3File) js_path(id flat.NodeId) ?string {
+	n := f.node(id)
+	if n.kind == .ident {
+		if n.value == 'JS' {
+			return 'JS'
+		}
+		return none
+	}
+	ks := f.kids(id)
+	if n.kind != .selector || ks.len == 0 {
+		return none
+	}
+	root := f.js_path(ks[0]) or { return none }
+	return '${root}.${n.value}'
 }
 
 // record_call adds one `calls` edge per distinct callee in a body (see
