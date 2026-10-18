@@ -1371,8 +1371,9 @@ fn retype_recipe(recipe string, name string, typ string) string {
 		mut steps := []string{}
 		for step in alt.split(recipe_sep) {
 			if step.starts_with('t:') && subst_word(step[2..], name, typ) != step[2..] {
-				// a type that names the parameter: narrowed, so an interface is not taken (see infer.v's ct:)
-				steps << 'ct:' + subst_word(step[2..], name, typ)
+				// a type that names the parameter, narrowed to `typ`: both are kept, since whether
+				// `typ` is an interface, which keeps the parameter, is known only to resolve_edges
+				steps << 'ctp:' + step[2..] + ':' + subst_word(step[2..], name, typ)
 			} else if step.starts_with('p:') {
 				steps << 'p:' + subst_word(step[2..], name, typ)
 			} else {

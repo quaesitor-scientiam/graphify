@@ -598,6 +598,58 @@ fn unsigned_of(t string) ?string {
 	return unsigned_counterparts[t] or { return none }
 }
 
+// comptime_recipe is `recipe` with each comptime-narrowed type parameter settled. A `$if T is X`
+// block sees T as X (retype_recipe keeps both as `ctp:T:X`), and that is `ct:X` when X is a
+// concrete type. When X is an interface, V compiles the block for each instance that implements
+// it and the value keeps the instance's type, so the step is the parameter itself, `t:T`, which
+// the instances resolve (see expand_type_param_calls)
+fn (inf &Infer) comptime_recipe(recipe string, file string) string {
+	mut alts := []string{}
+	for alt in recipe.split(recipe_alt) {
+		mut steps := []string{}
+		for step in alt.split(recipe_sep) {
+			if step.starts_with('ctp:') {
+				parts := step[4..].split(':')
+				if parts.len == 2 && inf.names_interface(parts[1], file) {
+					steps << 't:' + parts[0]
+				} else if parts.len == 2 {
+					steps << 'ct:' + parts[1]
+				} else {
+					steps << step
+				}
+			} else {
+				steps << step
+			}
+		}
+		alts << steps.join(recipe_sep)
+	}
+	return alts.join(recipe_alt)
+}
+
+// names_interface reports whether `t`, with its `&` and `[]` taken off, names an interface
+fn (inf &Infer) names_interface(t string, file string) bool {
+	scope := inf.scope_of[file] or { FileScope{} }
+	mut base := t
+	for {
+		if base.starts_with('&') {
+			base = base[1..]
+		} else if base.starts_with('[]') {
+			base = base[2..]
+		} else {
+			break
+		}
+	}
+	if base in primitive_types {
+		return false
+	}
+	short := base.all_after_last('.')
+	qual := if base.contains('.') { base.all_before_last('.') } else { '' }
+	decl := inf.find_type(short, qual, InferredType{ mod: scope.mod, file: file }, file) or {
+		return false
+	}
+	return decl.id in inf.iface_ids
+}
+
 // comptime_type is the type a `$if T is X` block takes T to be, `name` read in
 // `file`, where X may be wrapped as `&X` or `[]X`. Not when X is an interface:
 // V's `T is Iface` holds for any T implementing it, so the block's T is not the

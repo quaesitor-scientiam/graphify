@@ -7540,3 +7540,20 @@ fn test_a_map_of_a_method_on_each_element_types_the_elements_by_that_method() {
 	assert 'vlib.builtin.string.trim' in targets, targets.str()
 	assert 'vlib.builtin.string.to_lower' in targets, targets.str()
 }
+
+fn test_a_comptime_check_against_an_interface_keeps_the_instance_for_its_fields() {
+	// `$if T is ControllerInterface` compiles the block for each instance that implements the
+	// interface, and global_app is still that instance, so `controllers` is the Ctl's field, an
+	// array. string has a clone() too, so only the field's type names the array's
+	root := write_tree('comptime_interface', {
+		'vlib/builtin/array.v':  'module builtin\n\npub fn (a array) clone() array {\n\treturn a\n}\n'
+		'vlib/builtin/string.v': 'module builtin\n\npub fn (s string) clone() string {\n\treturn s\n}\n'
+		'vlib/veb/controller.v': 'module veb\n\npub struct ControllerPath {\npub:\n\tpath string\n}\n\npub interface ControllerInterface {\n\tcontrollers []&ControllerPath\n}\n\nfn check_duplicate_routes[T](global_app &T) []&ControllerPath {\n\tmut controllers_sorted := []&ControllerPath{}\n\t$if T is ControllerInterface {\n\t\tcontrollers_sorted = global_app.controllers.clone()\n\t}\n\treturn controllers_sorted\n}\n\npub struct Ctl {\npub mut:\n\tcontrollers []&ControllerPath\n}\n\npub fn run_check(app &Ctl) []&ControllerPath {\n\treturn check_duplicate_routes[Ctl](app)\n}\n'
+	})
+	defer {
+		os.rmdir_all(root) or {}
+	}
+	g := build_graph(Options{ root: root })
+	targets := g.edges.filter(it.kind == .calls && it.from == 'vlib.veb.check_duplicate_routes').map(it.to)
+	assert 'vlib.builtin.array.clone' in targets, targets.str()
+}

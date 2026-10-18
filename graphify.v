@@ -946,6 +946,14 @@ fn resolve_edges(mut g Graph) {
 		generics_of:  generics_of
 		tparams_of:   tparams_of
 	}
+	// a comptime-narrowed type parameter is settled now that the interfaces are known (see
+	// comptime_recipe), before any edge is followed, the expansion's sources included
+	for i in 0 .. g.edges.len {
+		e := g.edges[i]
+		if e.recv_recipe.contains('ctp:') {
+			g.edges[i] = Edge{ ...e, recv_recipe: inf.comptime_recipe(e.recv_recipe, e.file) }
+		}
+	}
 	mut resolved := []Edge{cap: g.edges.len}
 	// variants_of maps each platform copy of a function or method to all of its
 	// copies: the same id before the `@file`, in the same module.
