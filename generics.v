@@ -10,8 +10,12 @@ module graphify
 // expand_type_param_calls returns the edges with each method call on a type
 // parameter replaced by the methods of the types its function is called with, as
 // `inferred` edges. A call with no such type stays as it was. `funcs` holds the
-// free functions that have type parameters, by id.
-fn expand_type_param_calls(edges []Edge, mut inf Infer, funcs map[string]Symbol) []Edge {
+// generic free functions and the methods of generic structs, by id. A method of a
+// generic struct, `Box[T].show`, is called on the types its struct is instantiated
+// with, at the receivers of its methods (`sources`, the edges as the extraction
+// recorded them, since a resolved edge drops its receiver) and in the types of the
+// struct fields that are generic instances (`fields`).
+fn expand_type_param_calls(edges []Edge, sources []Edge, fields []Symbol, mut inf Infer, funcs map[string]Symbol) []Edge {
 	// the types each type parameter of a generic function was given at its call
 	// sites, by `<function id>\x00<type parameter>`
 	mut types := map[string][]InferredType{}
@@ -20,6 +24,9 @@ fn expand_type_param_calls(edges []Edge, mut inf Infer, funcs map[string]Symbol)
 			continue
 		}
 		callee := funcs[e.to] or { continue }
+		if callee.kind != .function {
+			continue
+		}
 		tps := generic_params(callee)
 		if tps.len == 0 {
 			continue
@@ -69,7 +76,23 @@ fn expand_type_param_calls(edges []Edge, mut inf Infer, funcs map[string]Symbol)
 			}
 		}
 	}
-	if types.len == 0 {
+	// the types each type parameter of a generic struct was instantiated with, by
+	// `<struct id>\x00<position of the parameter>`: at the receivers of its methods, and
+	// in the type of a field, `c Choi[Aa]`
+	mut owner_types := map[string][]InferredType{}
+	for e in sources {
+		if e.kind != .calls || !e.is_method {
+			continue
+		}
+		recv := inf.receiver(e) or { continue }
+		add_owner_types(mut owner_types, recv.text, recv.mod, recv.file, generic_params(funcs[e.from] or { Symbol{} }))
+	}
+	for f in fields {
+		// a field's type is written in its struct's module, and a type parameter of its
+		// struct is not an instance of anything
+		add_owner_types(mut owner_types, f.signature.all_after(' '), f.parent.all_before_last('.'), f.file, generic_params(funcs[f.parent] or { Symbol{} }))
+	}
+	if types.len == 0 && owner_types.len == 0 {
 		return edges
 	}
 	mut out := []Edge{cap: edges.len}
@@ -91,14 +114,34 @@ fn expand_type_param_calls(edges []Edge, mut inf Infer, funcs map[string]Symbol)
 			out << e
 			continue
 		}
-		recv_text := bare_type(recv.text)
+		mut recv_text := bare_type(recv.text)
+		// a field or element typed by its owner's type parameter comes back qualified by
+		// the module, `demo.T` for `T`, which is still the parameter
+		if recv.mod != '' && recv_text.starts_with(recv.mod + '.')
+			&& recv_text[recv.mod.len + 1..] in tps {
+			recv_text = recv_text[recv.mod.len + 1..]
+		}
 		if recv_text !in tps {
 			out << e
 			continue
 		}
-		insts := types[caller.id + '\x00' + recv_text] or {
-			out << e
-			continue
+		mut insts := []InferredType{}
+		if caller.kind == .method {
+			mut pos := 0
+			for i, tp in tps {
+				if tp == recv_text {
+					pos = i
+				}
+			}
+			insts = owner_types[method_owner(caller) + '\x00' + pos.str()] or {
+				out << e
+				continue
+			}
+		} else {
+			insts = types[caller.id + '\x00' + recv_text] or {
+				out << e
+				continue
+			}
 		}
 		mut ids := []string{}
 		for t in insts {
@@ -125,13 +168,49 @@ fn expand_type_param_calls(edges []Edge, mut inf Infer, funcs map[string]Symbol)
 	return out
 }
 
-// generic_params are a free function's type parameters, which its symbol records
-// comma-separated in its recipe; none for a function that has none, or a method.
+// add_owner_types records one instance of a generic struct, `Box[Pen]` written in
+// module `mod`, under the struct and the position of each type argument. An argument
+// in `skip`, a type parameter of the enclosing declaration, is not a type.
+fn add_owner_types(mut owner_types map[string][]InferredType, text string, mod string, file string, skip []string) {
+	args := split_type_args(text)
+	if args.len == 0 {
+		return
+	}
+	owner := qualify_type_names(strip_generic_args(bare_type(text)), mod)
+	for i, arg in args {
+		arg_text := bare_type(arg)
+		if arg_text == '' || arg_text in skip {
+			continue
+		}
+		key := owner + '\x00' + i.str()
+		existing := owner_types[key] or { []InferredType{} }
+		if !existing.any(it.text == arg_text) {
+			mut known := existing.clone()
+			known << InferredType{
+				text: arg_text
+				mod:  mod
+				file: file
+			}
+			owner_types[key] = known
+		}
+	}
+}
+
+// generic_params are a generic function's type parameters, a method's receiver type
+// parameters, `T` in `fn (b Box[T]) show()`, or a generic struct's own, which the
+// symbol records comma-separated in its recipe; none for one that has none.
 fn generic_params(s Symbol) []string {
-	if s.kind != .function || s.recipe == '' {
+	if (s.kind != .function && s.kind != .method && s.kind != .struct_) || s.recipe == '' {
 		return []string{}
 	}
 	return s.recipe.split(',')
+}
+
+// method_owner is the id of the struct a method belongs to, `mod.Box` for
+// `mod.Box[T].show` (or `mod.Box[T].show@file`).
+fn method_owner(s Symbol) string {
+	id := s.id.all_before('@')
+	return strip_generic_args(id[..id.len - s.name.len - 1])
 }
 
 // is_type_param_text reports whether a type text is a single capital letter, as a

@@ -7174,6 +7174,39 @@ fn test_a_mut_scalar_parameter_takes_the_type_of_its_argument() {
 	assert 'demo.Pen.describe' !in targets, targets.str()
 }
 
+fn test_a_method_of_a_generic_struct_links_its_type_parameter_to_each_instantiation() {
+	// `total` calls weight() on its item, of type T, and Box is instantiated with a Node
+	// and a Pen, so the call reaches the weight() of each. weight() is declared on three
+	// types, so only the instantiations can say which ones the call means
+	root := write_tree('generic_struct_instantiation', {
+		'demo.v': 'module demo\n\npub struct Node {\n\tv int\n}\n\npub fn (n Node) weight() int {\n\treturn n.v\n}\n\npub struct Pen {\n}\n\npub fn (p Pen) weight() int {\n\treturn 2\n}\n\npub struct Other {\n}\n\npub fn (o Other) weight() int {\n\treturn 3\n}\n\npub struct Box[T] {\n\titem T\n}\n\npub fn (b Box[T]) total() int {\n\treturn b.item.weight()\n}\n\npub fn run() int {\n\ta := Box[Node]{item: Node{v: 1}}\n\tp := Box[Pen]{item: Pen{}}\n\treturn a.total() + p.total()\n}\n'
+	})
+	defer {
+		os.rmdir_all(root) or {}
+	}
+	g := build_graph(Options{ root: root })
+	targets := g.edges.filter(it.kind == .calls && it.from == 'demo.Box[T].total').map(it.to)
+	assert 'demo.Node.weight' in targets, targets.str()
+	assert 'demo.Pen.weight' in targets, targets.str()
+	assert 'demo.Other.weight' !in targets, targets.str()
+}
+
+fn test_a_generic_struct_in_a_field_type_instantiates_its_type_parameter() {
+	// Holder has a field of type Box[Pen], and no call on a Box receives a Pen, so the
+	// field's type is the only instantiation of Box; weight() is declared on two types,
+	// so only that instantiation can say which one the call means
+	root := write_tree('generic_struct_field_instantiation', {
+		'demo.v': 'module demo\n\npub struct Pen {\n}\n\npub fn (p Pen) weight() int {\n\treturn 2\n}\n\npub struct Other {\n}\n\npub fn (o Other) weight() int {\n\treturn 3\n}\n\npub struct Box[T] {\n\titem T\n}\n\npub fn (b Box[T]) total() int {\n\treturn b.item.weight()\n}\n\npub struct Holder {\n\tbox Box[Pen]\n}\n'
+	})
+	defer {
+		os.rmdir_all(root) or {}
+	}
+	g := build_graph(Options{ root: root })
+	targets := g.edges.filter(it.kind == .calls && it.from == 'demo.Box[T].total').map(it.to)
+	assert 'demo.Pen.weight' in targets, targets.str()
+	assert 'demo.Other.weight' !in targets, targets.str()
+}
+
 fn test_a_c_binding_result_type_picks_the_method_among_same_named_ones() {
 	// two types declare `size`, so only the result type of C.make_thing() can tell
 	// which one the call means
