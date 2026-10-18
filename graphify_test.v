@@ -7296,6 +7296,23 @@ fn test_a_type_passed_through_two_generic_functions_reaches_the_struct_it_builds
 	assert 'demo.Other.weight' in targets, targets.str()
 }
 
+fn test_a_call_in_a_comptime_branch_on_a_type_parameter_links_only_the_instances_it_compiles_for() {
+	// `v.area()` is compiled only for an interface instance, and `v.release()` only for
+	// the others, so the struct Pen, which the interface branch never compiles for, does not
+	// reach Pen.area()
+	root := write_tree('comptime_branch_guard', {
+		'demo.v': 'module demo\n\npub interface Shape {\n\tarea() int\n}\n\npub struct Pen {\n}\n\npub fn (p Pen) area() int {\n\treturn 1\n}\n\npub fn (p Pen) release() int {\n\treturn 3\n}\n\npub fn use_it[T](v T) int {\n\t$if T.unaliased_typ is $interface {\n\t\treturn v.area()\n\t} $else {\n\t\treturn v.release()\n\t}\n}\n\npub fn run() int {\n\treturn use_it(Pen{})\n}\n\npub fn run_shape(s Shape) int {\n\treturn use_it(s)\n}\n'
+	})
+	defer {
+		os.rmdir_all(root) or {}
+	}
+	g := build_graph(Options{ root: root })
+	targets := g.edges.filter(it.kind == .calls && it.from == 'demo.use_it').map(it.to)
+	assert 'demo.Pen.release' in targets, targets.str()
+	assert 'demo.Pen.area' !in targets, targets.str()
+	assert 'demo.Shape.area' in targets, targets.str()
+}
+
 fn test_a_c_binding_result_type_picks_the_method_among_same_named_ones() {
 	// two types declare `size`, so only the result type of C.make_thing() can tell
 	// which one the call means

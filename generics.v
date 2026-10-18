@@ -177,7 +177,8 @@ fn expand_type_param_calls(edges []Edge, sources []Edge, fields []Symbol, mut in
 			out << e
 			continue
 		}
-		insts := instances[instance_key(caller, recv_text)] or {
+		insts := guarded_instances(instances[instance_key(caller, recv_text)] or { []InferredType{} }, e.guards, recv_text, mut inf)
+		if insts.len == 0 {
 			out << e
 			continue
 		}
@@ -316,7 +317,7 @@ fn chained_call_ids(e Edge, caller Symbol, tps []string, instances map[string][]
 	tp := plain_param(prefix.text, prefix.mod, tps) or { return []string{} }
 	method := steps[steps.len - 1][2..]
 	mut ids := []string{}
-	for t in instances[instance_key(caller, tp)] or { []InferredType{} } {
+	for t in guarded_instances(instances[instance_key(caller, tp)] or { []InferredType{} }, e.guards, tp, mut inf) {
 		result_id := inf.method_on(t, method, e.file, 0) or { continue }
 		result := inf.returns(result_id) or { continue }
 		id := inf.method_on(result, e.to, e.file, 0) or { continue }
@@ -383,4 +384,108 @@ fn param_types(sig string) []string {
 		}
 	}
 	return types
+}
+
+// guarded_instances keeps the instances of the type parameter `tp` that the comptime
+// conditions of a call (`guards`, see V3CallCtx.guarded) let the call compile for. A
+// condition on another type parameter does not apply, and a test that type_is does not
+// decide keeps the instance.
+fn guarded_instances(insts []InferredType, guards string, tp string, mut inf Infer) []InferredType {
+	if guards == '' {
+		return insts
+	}
+	mut out := insts.clone()
+	for g in guards.split(recipe_sep) {
+		if g.len < 3 {
+			continue
+		}
+		parts := g[1..].trim_space().split(' ')
+		if parts.len != 3 || parts[1] != 'is' {
+			continue
+		}
+		unaliased := parts[0].ends_with('.unaliased_typ')
+		name := if unaliased { parts[0][..parts[0].len - '.unaliased_typ'.len] } else { parts[0] }
+		if name != tp {
+			continue
+		}
+		positive := g[0] == `+`
+		mut kept := []InferredType{}
+		for t in out {
+			holds := type_is(t, parts[2], unaliased, mut inf) or {
+				kept << t
+				continue
+			}
+			if holds == positive {
+				kept << t
+			}
+		}
+		out = kept.clone()
+	}
+	return out
+}
+
+// type_is reports whether the type an instance stands for meets a comptime test: a
+// kind (`$interface`, `$option`, `$array_dynamic`, `$array_fixed`, `$map`, `$enum`,
+// `$sumtype`, `$int`, `$float`, `$bool`, `$string`) or a type's name. none for a test
+// it does not decide, such as `$struct`, or a type that no declaration names.
+fn type_is(t InferredType, test string, unaliased bool, mut inf Infer) ?bool {
+	u := if unaliased { inf.unalias(t, t.file) } else { t }
+	raw := u.text.trim_space()
+	text := bare_type(raw)
+	if !test.starts_with('$') {
+		// an interface, or a generic one, is met by a type that has its methods, which is
+		// not read here, so such a test keeps every instance
+		if test.contains('[') {
+			return none
+		}
+		test_short := test.all_after_last('.')
+		test_qual := if test.contains('.') { test.all_before_last('.') } else { '' }
+		if decl := inf.find_type(test_short, test_qual, u, t.file) {
+			if inf.iface_ids[decl.id] {
+				return none
+			}
+		}
+		return text.all_after_last('.') == test_short
+	}
+	match test {
+		'$option' {
+			return raw.starts_with('?')
+		}
+		'$array_dynamic' {
+			return text.starts_with('[]')
+		}
+		'$array_fixed' {
+			return text.starts_with('[') && !text.starts_with('[]')
+		}
+		'$map' {
+			return text.starts_with('map[')
+		}
+		'$int' {
+			return text in ['int', 'i8', 'i16', 'i32', 'i64', 'u8', 'u16', 'u32', 'u64', 'isize',
+				'usize', 'byte', 'rune']
+		}
+		'$float' {
+			return text in ['f32', 'f64']
+		}
+		'$bool' {
+			return text == 'bool'
+		}
+		'$string' {
+			return text == 'string'
+		}
+		'$interface', '$enum', '$sumtype' {
+			named := strip_generic_args(text)
+			short := named.all_after_last('.')
+			qual := if named.contains('.') { named.all_before_last('.') } else { '' }
+			decl := inf.find_type(short, qual, u, t.file) or { return none }
+			return match test {
+				'$interface' { inf.iface_ids[decl.id] }
+				'$enum' { inf.enum_ids[decl.id] }
+				else { inf.dynamic_ids[decl.id] && !inf.iface_ids[decl.id] }
+			}
+		}
+		else {
+			return none
+		}
+	}
 }

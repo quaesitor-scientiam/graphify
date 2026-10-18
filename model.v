@@ -103,6 +103,12 @@ pub:
 	// callee's type parameters are found from them (see instantiations in infer.v).
 	// Extraction-only and not persisted.
 	arg_sites string @[json: '-']
+	// guards holds, for a method call, the comptime conditions on a type parameter
+	// around it that the call is compiled under: each is `+` for the block it is in
+	// or `-` for an `$else`, joined by \x05 (see V3CallCtx.guarded). An instance of the
+	// parameter must meet them for the call to reach its method (see generics.v).
+	// Extraction-only and not persisted.
+	guards string @[json: '-']
 	// file is the path of the file that emitted this edge — populated for
 	// `calls`/`embeds`/`references` edges, whose `from` is the id of a
 	// declaration that may need disambiguating (see disambiguate_ids in
