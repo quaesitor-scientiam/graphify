@@ -55,16 +55,22 @@ fn expand_type_param_calls(edges []Edge, sources []Edge, fields []Symbol, mut in
 					continue
 				}
 				for tp in tps {
-					if ptypes[j] != tp && ptypes[j] != '[]' + tp {
+					// a function-typed parameter, `h fn () H`, is typed by what the function its argument
+					// names returns: the argument is a function-typed value, or a function named as a value
+					returns_tp := (fn_return(ptypes[j]) or { '' }) == tp
+					if ptypes[j] != tp && ptypes[j] != '[]' + tp && !returns_tp {
 						continue
 					}
-					t := inf.follow(Edge{
+					edge := Edge{
 						from:        e.from
 						file:        e.file
 						recv_recipe: recipe
-					}) or { continue }
+					}
+					t := inf.follow(edge) or { inf.fn_value_type(e, recipe) or { continue } }
 					mut text := bare_type(t.text)
-					if ptypes[j] != tp {
+					if returns_tp {
+						text = bare_type(fn_return(text) or { continue })
+					} else if ptypes[j] != tp {
 						if !text.starts_with('[]') {
 							continue
 						}
@@ -102,6 +108,18 @@ fn expand_type_param_calls(edges []Edge, sources []Edge, fields []Symbol, mut in
 		recv := inf.receiver(e) or { continue }
 		caller := funcs[e.from] or { Symbol{} }
 		add_owner_instances(mut instances, mut flows, recv.text, recv.mod, recv.file, caller)
+		// a method on a field of a generic struct, `m.work.block_size()` on an `m` that is a
+		// `Hmac[D]`, names the struct's instance too: the field's owner is the recipe's prefix
+		steps := e.recv_recipe.split(recipe_sep)
+		if steps.len > 1 && steps[steps.len - 1].starts_with('f:') {
+			if owner := inf.follow(Edge{
+				from:        e.from
+				file:        e.file
+				recv_recipe: steps[..steps.len - 1].join(recipe_sep)
+			}) {
+				add_owner_instances(mut instances, mut flows, owner.text, owner.mod, owner.file, caller)
+			}
+		}
 	}
 	for f in fields {
 		// a field's type is written in its struct's module, and the struct's own type
@@ -268,6 +286,31 @@ fn add_owner_instances(mut instances map[string][]InferredType, mut flows []Flow
 			mod:  mod
 			file: file
 		})
+	}
+}
+
+// fn_value_type is the type of a function named as a value and passed to a function-typed
+// parameter: `sha256.new`, recorded as the recipe `g:crypto.sha256.new`, or `new_digest`, a
+// function of the caller's module, recorded as `g:new_digest`. Its type is `fn () <return
+// type>`, with the module the function is declared in. none when the recipe names no function.
+fn (inf &Infer) fn_value_type(e Edge, recipe string) ?InferredType {
+	if !recipe.starts_with('g:') {
+		return none
+	}
+	name := recipe[2..]
+	mut id := name
+	if !name.contains('.') {
+		id = (inf.scope_of[e.file] or { return none }).mod + '.' + name
+	} else if name !in inf.sig_of {
+		// an import is named as written, `crypto.sha1.new`, and the module of a file in vlib is
+		// `vlib.crypto.sha1` (import_names)
+		id = 'vlib.' + name
+	}
+	ret := inf.returns(id)?
+	return InferredType{
+		text: 'fn () ' + ret.text
+		mod:  ret.mod
+		file: ret.file
 	}
 }
 
