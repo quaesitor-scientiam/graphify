@@ -2547,7 +2547,7 @@ fn (mut f V3File) record_call(callee_id flat.NodeId, args []flat.NodeId, ctx V3C
 	// a non-method call keeps its argument recipes, one site at a time, since a generic
 	// callee's type parameters come from every call site; a repeat call merges into the
 	// edge its first call made
-	site := if is_method { '' } else { f.arg_site(args, ctx) }
+	site := if is_method { '' } else { f.type_arg_site(callee_id) + f.arg_site(args, ctx) }
 	if key in seen {
 		if !is_method {
 			add_arg_site(mut edges, ctx.from, name, site)
@@ -2580,6 +2580,27 @@ fn (mut f V3File) arg_site(args []flat.NodeId, ctx V3CallCtx) string {
 		parts << f.recipe(a, ctx)
 	}
 	return parts.join('\x0b')
+}
+
+// type_arg_site is the explicit type arguments of a generic call, `decode_gzip[Context]()`:
+// a site of its own, `ta:` and the names joined by \x0b, ended by arg_site_end, before the
+// argument recipes. '' when the call names none, or none that can be named.
+fn (f &V3File) type_arg_site(callee_id flat.NodeId) string {
+	if f.node(callee_id).kind != .index {
+		return ''
+	}
+	ks := f.kids(callee_id)
+	if ks.len < 2 {
+		return ''
+	}
+	mut names := []string{}
+	for ta in ks[1..] {
+		names << f.type_arg(ta) or { '' }
+	}
+	if names.all(it == '') {
+		return ''
+	}
+	return 'ta:' + names.join('\x0b') + arg_site_end
 }
 
 // add_arg_site records one more call site of the non-method call of `to` from `from`,

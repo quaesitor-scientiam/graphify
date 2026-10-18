@@ -291,6 +291,21 @@ none is lost. The instances are the ones the extraction can see. `new_digest` in
 `Hmac[D].reset` links to sha1's `copy_from` only, not to sha224's or sha256's. Not examined:
 the `test_digest_implements_hash` calls in the crypto tests (`free`, `size`), and veb.
 
+Fields of a type parameter, and explicit type arguments (October 2026). A method on a field
+of a type parameter, `ctx.req.header.get()` on a `ctx T`, takes that field of each instance of
+T: the recipe `t:T | f:req | f:header` is walked from each instance in place of T, in the file
+the instance is written in (`path_method_ids`, in generics.v). A generic function called with
+explicit type arguments, `decode_gzip[Context]()`, names the instances of its type parameters
+in order. The call records them as a site of their own, `ta:` (`type_arg_site`, in
+backend_v.v), and each is an instance in the caller's module. An instance's name is written
+with its module (`vlib.veb.tests.Context`), and the walk drops the module, since the instance's
+own file gives the name its scope (`path_method_ids`). On the vlang tree unresolved calls go
+from 297 to 284, 21 links are added, and none is lost. Still unresolved in veb: a tuple from a
+`match` (`compressed, ext := match ...`, `bytestr` in send_compressed_response and
+serve_compressed_static), a comptime name check (`$if field.name == 'Middleware'` on
+`app.$(field.name)`, four calls), `clone` in check_duplicate_routes_in_controllers and
+run_new, `trim` in parse_form_from_request, and `set` in Throttle.acquire, not traced.
+
 Comptime field selectors (measured October 2026): 11 of the 354 unresolved calls
 go through a `$for` field, `x.$(field.name).m()`. Four are on a generic `A` in
 `veb/middleware.v`, which the generic receivers paragraph leaves unresolved, and

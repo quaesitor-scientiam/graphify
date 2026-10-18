@@ -49,6 +49,33 @@ fn expand_type_param_calls(edges []Edge, sources []Edge, fields []Symbol, mut in
 			if si == sites.len - 1 || site == '' {
 				continue
 			}
+			if site.starts_with('ta:') {
+				// explicit type arguments, `f[Context]()`, name the types of f's type parameters in
+				// order, as written in the caller's module
+				mod := (inf.scope_of[e.file] or { FileScope{} }).mod
+				for j, name in site[3..].split('\x0b') {
+					if j >= tps.len || name == '' {
+						continue
+					}
+					dst := callee.id + '\x00' + tps[j]
+					if passed := plain_param(name, mod, caller_tps) {
+						flows << Flow{
+							dst: dst
+							src: instance_key(caller, passed)
+						}
+						continue
+					}
+					if is_type_param_text(name) {
+						continue
+					}
+					put_instance(mut instances, dst, InferredType{
+						text: bare_type(name)
+						mod:  mod
+						file: e.file
+					})
+				}
+				continue
+			}
 			args := site.split('\x0b')
 			for j, recipe in args {
 				if recipe == '' || j >= ptypes.len {
@@ -161,9 +188,13 @@ fn expand_type_param_calls(edges []Edge, sources []Edge, fields []Symbol, mut in
 			continue
 		}
 		recv := inf.receiver(e) or {
-			// a call on the result of a call on a type parameter, `el.tag().bytes()`, is a
-			// call on what each instance's tag() returns
-			chained := chained_call_ids(e, caller, tps, instances, mut inf)
+			// a method on a field of a type parameter, `ctx.req.header.get()` on a `ctx T`, is a
+			// call on that field of each instance; a call on the result of a call on a type
+			// parameter, `el.tag().bytes()`, is a call on what each instance's tag() returns
+			mut chained := path_method_ids(e, caller, tps, instances, mut inf)
+			if chained.len == 0 {
+				chained = chained_call_ids(e, caller, tps, instances, mut inf)
+			}
 			if chained.len == 0 {
 				out << e
 			}
@@ -364,6 +395,39 @@ fn chained_call_ids(e Edge, caller Symbol, tps []string, instances map[string][]
 		result_id := inf.method_on(t, method, e.file, 0) or { continue }
 		result := inf.returns(result_id) or { continue }
 		id := inf.method_on(result, e.to, e.file, 0) or { continue }
+		if id !in ids {
+			ids << id
+		}
+	}
+	return ids
+}
+
+// path_method_ids are the methods a call reaches through a field, or a call, of a type
+// parameter's instances: `ctx.req.header.get()` on a `ctx T` walks the recipe `t:T | f:req |
+// f:header` from each instance of T in place of T, in the file the instance is written in,
+// and finds `get` on the header the instance's field has. Empty unless the recipe starts at a
+// type parameter and has steps after it.
+fn path_method_ids(e Edge, caller Symbol, tps []string, instances map[string][]InferredType, mut inf Infer) []string {
+	steps := e.recv_recipe.split(recipe_sep)
+	if steps.len < 2 || !steps[0].starts_with('t:') {
+		return []string{}
+	}
+	tp := plain_param(steps[0][2..], '', tps) or { return []string{} }
+	rest := steps[1..].join(recipe_sep)
+	mut ids := []string{}
+	for t in guarded_instances(instances[instance_key(caller, tp)] or { []InferredType{} }, e.guards, tp, mut inf) {
+		// the instance as its own module writes it: the qualified `vlib.veb.tests.Context` does not
+		// find its fields, the name in the instance's file does
+		mut name := t.text
+		if t.mod != '' && name.starts_with(t.mod + '.') {
+			name = name[t.mod.len + 1..]
+		}
+		recv := inf.follow_steps(Edge{
+			from:        e.from
+			file:        t.file
+			recv_recipe: 't:' + name + recipe_sep + rest
+		}, 0) or { continue }
+		id := inf.method_on(recv, e.to, e.file, 0) or { continue }
 		if id !in ids {
 			ids << id
 		}

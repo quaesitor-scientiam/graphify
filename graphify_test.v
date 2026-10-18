@@ -254,6 +254,52 @@ fn test_a_method_on_a_field_of_a_generic_struct_takes_the_instance_the_struct_ha
 	assert 'demo.Other.block_size' !in targets, targets.str()
 }
 
+fn test_a_method_on_a_field_of_a_type_parameter_takes_the_field_of_each_instance() {
+	// `handle` calls touch() on the `req` field of its `ctx T`, and T is the Context that run()
+	// passes. Other has a touch() too, which a call matched by name alone could take
+	root := write_tree('field_of_type_parameter', {
+		'demo.v': 'module demo\n\npub struct Request {\npub mut:\n\tdata string\n}\n\npub fn (r Request) touch() int {\n\treturn 1\n}\n\npub struct Other {\n}\n\npub fn (o Other) touch() int {\n\treturn 2\n}\n\npub struct Context {\npub mut:\n\treq Request\n}\n\npub fn handle[T](ctx T) int {\n\treturn ctx.req.touch()\n}\n\npub fn run(c Context) int {\n\treturn handle(c)\n}\n'
+	})
+	defer {
+		os.rmdir_all(root) or {}
+	}
+	g := build_graph(Options{ root: root })
+	targets := g.edges.filter(it.kind == .calls && it.from == 'demo.handle').map(it.to)
+	assert 'demo.Request.touch' in targets, targets.str()
+	assert 'demo.Other.touch' !in targets, targets.str()
+}
+
+fn test_a_method_on_a_field_of_a_type_parameter_takes_the_explicit_type_argument() {
+	// `make[Context]()` names T, so the closure's ctx is a Context, and its req field's touch() is
+	// Request's, not Other's
+	root := write_tree('explicit_type_argument', {
+		'demo.v': 'module demo\n\npub struct Request {\npub mut:\n\tdata string\n}\n\npub fn (r Request) touch() int {\n\treturn 1\n}\n\npub struct Other {\n}\n\npub fn (o Other) touch() int {\n\treturn 2\n}\n\npub struct Context {\npub mut:\n\treq Request\n}\n\npub fn make[T]() fn (T) int {\n\treturn fn [T](ctx T) int {\n\t\treturn ctx.req.touch()\n\t}\n}\n\npub fn run() int {\n\tf := make[Context]()\n\treturn f(Context{})\n}\n'
+	})
+	defer {
+		os.rmdir_all(root) or {}
+	}
+	g := build_graph(Options{ root: root })
+	targets := g.edges.filter(it.kind == .calls && it.from == 'demo.make').map(it.to)
+	assert 'demo.Request.touch' in targets, targets.str()
+	assert 'demo.Other.touch' !in targets, targets.str()
+}
+
+fn test_an_explicit_type_argument_of_a_module_struct_finds_the_fields_of_its_embedded_struct() {
+	// `Context` in the tests module embeds veb2's Context, and decode[Context]() names it through
+	// that module, so the instance's name is qualified there: its req field is found all the same
+	root := write_tree('explicit_type_argument_embedded', {
+		'vlib/veb2/veb2.v':        'module veb2\n\npub struct Request {\npub mut:\n\tdata string\n}\n\npub fn (r Request) touch() int {\n\treturn 1\n}\n\npub struct Other {\n}\n\npub fn (o Other) touch() int {\n\treturn 2\n}\n\npub struct Context {\npub mut:\n\treq Request\n}\n\npub fn decode[T]() fn (mut T) int {\n\treturn fn [T](mut ctx T) int {\n\t\treturn ctx.req.touch()\n\t}\n}\n'
+		'vlib/veb2/tests/tests.v': 'module tests\n\nimport veb2\n\npub struct Context {\n\tveb2.Context\npub mut:\n\tcounter int\n}\n\npub fn run() int {\n\tf := veb2.decode[Context]()\n\tmut c := Context{}\n\treturn f(mut c)\n}\n'
+	})
+	defer {
+		os.rmdir_all(root) or {}
+	}
+	g := build_graph(Options{ root: root })
+	targets := g.edges.filter(it.kind == .calls && it.from == 'vlib.veb2.decode').map(it.to)
+	assert 'vlib.veb2.Request.touch' in targets, targets.str()
+	assert 'vlib.veb2.Other.touch' !in targets, targets.str()
+}
+
 fn test_literal_receiver_types_the_call() {
 	src := 'module demo
 
