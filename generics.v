@@ -422,9 +422,11 @@ fn path_method_ids(e Edge, caller Symbol, tps []string, instances map[string][]I
 		if t.mod != '' && name.starts_with(t.mod + '.') {
 			name = name[t.mod.len + 1..]
 		}
+		// the instance is read in the file that declares its type: the file of the call that made
+		// it is not one a test-only declaration is visible from (see declared_file)
 		recv := inf.follow_steps(Edge{
 			from:        e.from
-			file:        t.file
+			file:        inf.declared_file(strip_generic_args(name).all_after_last('.'), t.mod, t.file)
 			recv_recipe: 't:' + name + recipe_sep + rest
 		}, 0) or { continue }
 		id := inf.method_on(recv, e.to, e.file, 0) or { continue }

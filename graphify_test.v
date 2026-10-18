@@ -7557,3 +7557,37 @@ fn test_a_comptime_check_against_an_interface_keeps_the_instance_for_its_fields(
 	targets := g.edges.filter(it.kind == .calls && it.from == 'vlib.veb.check_duplicate_routes').map(it.to)
 	assert 'vlib.builtin.array.clone' in targets, targets.str()
 }
+
+fn test_a_method_on_a_field_of_a_closure_type_parameter_takes_the_field_of_the_receivers_instance() {
+	// the closure's `ctx T` is the T of Throttle[T], so `ctx.res.header` is the Header of the Context
+	// the throttle is made for. Other has a set() too, which the name alone would leave ambiguous
+	root := write_tree('closure_type_parameter', {
+		'vlib/veb/throttle.v': "module veb\n\npub struct Header {\n}\n\npub fn (h Header) set(key string, value string) {\n}\n\npub struct Response {\npub mut:\n\theader Header\n}\n\npub struct Base {\npub mut:\n\tres Response\n}\n\npub struct Context {\n\tBase\n}\n\npub struct Other {\n}\n\npub fn (o Other) set() {\n}\n\npub struct Throttle[T] {\npub:\n\twait int\n}\n\npub struct MiddlewareOptions[T] {\npub:\n\thandler fn (mut T) bool\n}\n\npub fn (t Throttle[T]) acquire() MiddlewareOptions[T] {\n\treturn MiddlewareOptions[T]{\n\t\thandler: fn [t] [T](mut ctx T) bool {\n\t\t\tctx.res.header.set('a', 'b')\n\t\t\treturn true\n\t\t}\n\t}\n}\n\npub fn throttle[T](wait int) Throttle[T] {\n\treturn Throttle[T]{\n\t\twait: wait\n\t}\n}\n\npub fn run() MiddlewareOptions[Context] {\n\tth := throttle[Context](1)\n\treturn th.acquire()\n}\n"
+	})
+	defer {
+		os.rmdir_all(root) or {}
+	}
+	g := build_graph(Options{ root: root })
+	targets := g.edges.filter(it.kind == .calls && it.from == 'vlib.veb.Throttle[T].acquire').map(it.to)
+	assert 'vlib.veb.Header.set' in targets, targets.str()
+	assert 'vlib.veb.Other.set' !in targets, targets.str()
+}
+
+fn test_an_embedded_type_is_the_one_its_file_sees_not_a_test_only_one_of_the_same_name() {
+	// ThrottleContext, in a test file, embeds Context, and other_test.v has its own Context that no
+	// file but other_test.v sees. So the embed is veb's Context and its res reaches the Header's set()
+	root := write_tree('embedded_test_private', {
+		'vlib/veb/context.v':       'module veb\n\npub struct Response {\npub mut:\n\theader Header\n}\n\npub struct Header {\n}\n\npub fn (h Header) set(key string, value string) {\n}\n\npub struct Context {\npub mut:\n\tres Response\n}\n'
+		'vlib/veb/other_test.v':    'module veb\n\npub struct Context {\n}\n'
+		'vlib/veb/other.v':         'module veb\n\npub struct Other {\n}\n\npub fn (o Other) set() {\n}\n'
+		'vlib/veb/throttle.v':      "module veb\n\npub struct Throttle[T] {\npub:\n\twait int\n}\n\npub struct MiddlewareOptions[T] {\npub:\n\thandler fn (mut T) bool\n}\n\npub fn (t Throttle[T]) acquire() MiddlewareOptions[T] {\n\treturn MiddlewareOptions[T]{\n\t\thandler: fn [t] [T](mut ctx T) bool {\n\t\t\tctx.res.header.set('a', 'b')\n\t\t\treturn true\n\t\t}\n\t}\n}\n\npub fn throttle[T](wait int) Throttle[T] {\n\treturn Throttle[T]{\n\t\twait: wait\n\t}\n}\n"
+		'vlib/veb/throttle_test.v': 'module veb\n\nstruct ThrottleContext {\n\tContext\n}\n\npub fn make() MiddlewareOptions[ThrottleContext] {\n\tth := throttle[ThrottleContext](1)\n\treturn th.acquire()\n}\n'
+	})
+	defer {
+		os.rmdir_all(root) or {}
+	}
+	g := build_graph(Options{ root: root })
+	targets := g.edges.filter(it.kind == .calls && it.from == 'vlib.veb.Throttle[T].acquire').map(it.to)
+	assert 'vlib.veb.Header.set' in targets, targets.str()
+	assert 'vlib.veb.Other.set' !in targets, targets.str()
+}
