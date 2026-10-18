@@ -1058,7 +1058,7 @@ fn resolve_edges(mut g Graph) {
 			}
 		}
 		if e.kind == .calls {
-			key := '${e.from}\x00${e.to}'
+			key := if e.guards == '' { '${e.from}\x00${e.to}' } else { '${e.from}\x00${e.to}\x00${e.guards}' }
 			if key in seen_call {
 				continue
 			}

@@ -1224,6 +1224,9 @@ struct V3CallCtx {
 	// tparams are the type parameters of the enclosing function, or of its
 	// receiver's generic type, `T` in `fn encode[T](v T)`
 	tparams []string
+	// guards are the comptime conditions on a type parameter that the block being walked
+	// is compiled under, each `+cond` or `-cond` (see guarded)
+	guards []string
 mut:
 	locals map[string]string
 	vars   map[string]string
@@ -1306,6 +1309,30 @@ fn comptime_type_is(cond string) (string, string) {
 // is_tparam_recipe reports whether a recipe is exactly a type parameter, `t:T`.
 fn is_tparam_recipe(recipe string, tparams []string) bool {
 	return recipe.starts_with('t:') && recipe[2..] in tparams
+}
+
+// guarded is `ctx` with the comptime condition `cond` known to hold (`+`) or to fail
+// (`-`) in the block it walks: a `$if` block holds its condition, and the `$else`
+// blocks after it fail it.
+fn (ctx V3CallCtx) guarded(sign string, cond string) V3CallCtx {
+	mut guards := ctx.guards.clone()
+	guards << sign + cond
+	return V3CallCtx{
+		...ctx
+		guards: guards
+	}
+}
+
+// comptime_guard_tparam reports whether a `$if` condition tests a type parameter, `T is X`
+// or `T.unaliased_typ is X`, so that its blocks are compiled only for some instances of T.
+fn comptime_guard_tparam(cond string, tparams []string) bool {
+	parts := cond.trim_space().split(' ')
+	if parts.len != 3 || parts[1] != 'is' {
+		return false
+	}
+	lhs := parts[0]
+	name := if lhs.ends_with('.unaliased_typ') { lhs[..lhs.len - '.unaliased_typ'.len] } else { lhs }
+	return name in tparams
 }
 
 // retyped is `ctx` with the type parameter `name` taken to be `typ`, in each
@@ -1531,7 +1558,7 @@ fn (mut f V3File) walk(id flat.NodeId, ctx V3CallCtx, mut edges []Edge, mut seen
 				name, typ := comptime_type_is(n.value)
 				if name != '' && name in ctx.tparams {
 					f.walk(kids[0], ctx.retyped(name, f.type_text(typ)), mut edges, mut seen)
-					f.walk_list(kids[1..], ctx, mut edges, mut seen)
+					f.walk_list(kids[1..], ctx.guarded('-', n.value), mut edges, mut seen)
 					return ctx
 				}
 				// `$if data is bool` on a variable of type T: `data` is a bool in the block
@@ -1540,6 +1567,14 @@ fn (mut f V3File) walk(id flat.NodeId, ctx V3CallCtx, mut edges []Edge, mut seen
 					f.walk_list(kids[1..], ctx, mut edges, mut seen)
 					return ctx
 				}
+			}
+			// `$if T.unaliased_typ is string { ... }` in a generic function: the block is
+			// compiled only for the instances of T that meet the condition, so its calls
+			// carry it as a guard, and the blocks after it carry the negation
+			if kids.len >= 1 && comptime_guard_tparam(n.value, ctx.tparams) {
+				f.walk(kids[0], ctx.guarded('+', n.value), mut edges, mut seen)
+				f.walk_list(kids[1..], ctx.guarded('-', n.value), mut edges, mut seen)
+				return ctx
 			}
 			// `$if field.typ is int { x.$(field.name) }` in a field loop: the
 			// block's selector is an int (see comptime_pin). The branches after
@@ -2481,7 +2516,10 @@ fn (mut f V3File) record_call(callee_id flat.NodeId, args []flat.NodeId, ctx V3C
 	}
 	// `f()` where `f` is a variable or parameter calls a function value
 	value_call := !is_method && name in ctx.vars
-	key := '${name}\x00${rt}\x00${recipe}\x00${value_call}'
+	// a method call keeps the comptime conditions it is under (see guarded), so calls
+	// under different ones are different edges
+	guards := if is_method { ctx.guards.join(recipe_sep) } else { '' }
+	key := '${name}\x00${rt}\x00${recipe}\x00${value_call}\x00${guards}'
 	// a non-method call keeps its argument recipes, one site at a time, since a generic
 	// callee's type parameters come from every call site; a repeat call merges into the
 	// edge its first call made
@@ -2503,6 +2541,7 @@ fn (mut f V3File) record_call(callee_id flat.NodeId, args []flat.NodeId, ctx V3C
 		file:        ctx.file
 		provenance:  if value_call { EdgeProvenance.undeclared } else { .extracted }
 		arg_sites:   if is_method { '' } else { site + arg_site_end }
+		guards:      guards
 	}
 }
 
