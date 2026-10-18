@@ -1434,6 +1434,9 @@ fn (ctx V3CallCtx) with_vars(names []string, recipes []string) V3CallCtx {
 // comptime_field_pin and comptime_ret_pin) and the recipe of the type. A test
 // that names no one type (`$map`, `!is`, a compound condition) fixes nothing.
 fn comptime_pin(cond string) ?(string, string) {
+	if key, step := comptime_name_pin(cond) {
+		return key, step
+	}
 	idx := cond.index(' is ') or { return none }
 	lhs := cond[..idx].trim_space()
 	rhs := cond[idx + 4..].trim_space()
@@ -1453,6 +1456,40 @@ fn comptime_pin(cond string) ?(string, string) {
 		return none
 	}
 	return key, 't:' + rhs
+}
+
+// comptime_name_pin is the pin a `$if field.name == 'x'` makes in a field loop: the loop's
+// `y.$(field.name)` in its block is the field `x` of `y`, so the pin is that step
+fn comptime_name_pin(cond string) ?(string, string) {
+	idx := cond.index(' == ') or { return none }
+	lhs := cond[..idx].trim_space()
+	rhs := cond[idx + 4..].trim_space()
+	if !lhs.ends_with('.name') || rhs.len < 3 || !rhs.starts_with("'") || !rhs.ends_with("'") {
+		return none
+	}
+	name := rhs[1..rhs.len - 1]
+	if !name.bytes().all(it.is_alnum() || it == `_`) {
+		return none
+	}
+	return 'name:' + lhs[..lhs.len - 5], 'f:' + name
+}
+
+// comptime_name_step is the field step of `x.$(field.name)`, the selector `sel`, when a
+// `$if field.name == 'x'` around it names the field: `f:x`, or '' when none does.
+fn (f &V3File) comptime_name_step(sel flat.NodeId, ctx V3CallCtx) string {
+	ks := f.kids(sel)
+	if ks.len != 2 {
+		return ''
+	}
+	inner := f.node(ks[1])
+	ik := f.kids(ks[1])
+	if inner.kind != .selector || inner.value != 'name' || ik.len != 1 {
+		return ''
+	}
+	if f.node(ik[0]).kind != .ident {
+		return ''
+	}
+	return ctx.pins['name:' + f.node(ik[0]).value] or { '' }
 }
 
 // comptime_field_pin is the recipe of `x.$(field.name)`, the selector `sel`
@@ -2114,7 +2151,13 @@ fn (f &V3File) recipe(id flat.NodeId, ctx V3CallCtx) string {
 		}
 		.selector {
 			if n.value == '$' && kids.len == 2 {
-				// `x.$(field.name)` has the type an enclosing `$if` fixes its field to
+				// `x.$(field.name)` is the field an enclosing `$if field.name == 'x'` names, of
+				// x's type, or else has the type an enclosing `$if` fixes its field to
+				step := f.comptime_name_step(id, ctx)
+				if step != '' {
+					base := f.recipe(kids[0], ctx)
+					return if base == '' { '' } else { base + recipe_sep + step }
+				}
 				return f.comptime_field_pin(id, ctx)
 			}
 			if n.value in ['len', 'cap'] {

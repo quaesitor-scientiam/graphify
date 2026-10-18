@@ -7573,6 +7573,22 @@ fn test_a_method_on_a_field_of_a_closure_type_parameter_takes_the_field_of_the_r
 	assert 'vlib.veb.Other.set' !in targets, targets.str()
 }
 
+fn test_a_call_with_an_argument_narrowed_to_an_interface_passes_the_instance_on() {
+	// handle_route calls app_global_handlers(app) only in a `$if A is Handlers` block, so its app is
+	// the interface, which the instance keeps. Other has the same method name, which the name alone
+	// would leave ambiguous
+	root := write_tree('narrowed_argument', {
+		'vlib/veb/middleware.v': "module veb\n\npub struct Middleware[T] {\npub mut:\n\thandlers []voidptr\n}\n\npub fn (m &Middleware[T]) get_global_handlers() []voidptr {\n\treturn m.handlers\n}\n\npub interface Handlers {\n\tget_global_handlers() []voidptr\n}\n\npub struct Other {\n}\n\npub fn (o &Other) get_global_handlers() []voidptr {\n\treturn []voidptr{}\n}\n\npub struct Context {\n}\n\npub struct App {\n\tMiddleware[Context]\n}\n\nfn app_global_handlers[A](app &A) []voidptr {\n\t$if A is $struct {\n\t\t$for field in A.fields {\n\t\t\t$if field.is_embed {\n\t\t\t\t$if field.name == 'Middleware' {\n\t\t\t\t\treturn app.$(field.name).get_global_handlers()\n\t\t\t\t}\n\t\t\t}\n\t\t}\n\t}\n\treturn []voidptr{}\n}\n\nfn handle_route[A](mut app A) []voidptr {\n\t$if A is Handlers {\n\t\treturn app_global_handlers(app)\n\t}\n\treturn []voidptr{}\n}\n\nfn run_new[A](mut app A) []voidptr {\n\treturn handle_route[A](mut app)\n}\n\npub fn run_at[A](mut app A) []voidptr {\n\treturn run_new[A](mut app)\n}\n\npub fn serve() []voidptr {\n\tmut app := App{}\n\treturn run_at[App](mut app)\n}\n"
+	})
+	defer {
+		os.rmdir_all(root) or {}
+	}
+	g := build_graph(Options{ root: root })
+	targets := g.edges.filter(it.kind == .calls && it.from == 'vlib.veb.app_global_handlers').map(it.to)
+	assert 'vlib.veb.Middleware[T].get_global_handlers' in targets, targets.str()
+	assert 'vlib.veb.Other.get_global_handlers' !in targets, targets.str()
+}
+
 fn test_an_embedded_type_is_the_one_its_file_sees_not_a_test_only_one_of_the_same_name() {
 	// ThrottleContext, in a test file, embeds Context, and other_test.v has its own Context that no
 	// file but other_test.v sees. So the embed is veb's Context and its res reaches the Header's set()
@@ -7590,4 +7606,20 @@ fn test_an_embedded_type_is_the_one_its_file_sees_not_a_test_only_one_of_the_sam
 	targets := g.edges.filter(it.kind == .calls && it.from == 'vlib.veb.Throttle[T].acquire').map(it.to)
 	assert 'vlib.veb.Header.set' in targets, targets.str()
 	assert 'vlib.veb.Other.set' !in targets, targets.str()
+}
+
+fn test_a_field_named_by_a_comptime_check_in_a_field_loop_is_the_field_the_call_is_on() {
+	// `app.$(field.name)` is the embedded Middleware in the block of `$if field.name == 'Middleware'`,
+	// so the call is Middleware's method. Other has a method of the same name that is not embedded,
+	// which the name alone would leave ambiguous
+	root := write_tree('field_name_pin', {
+		'vlib/veb/middleware.v': "module veb\n\npub struct Middleware {\npub mut:\n\thandlers []voidptr\n}\n\npub fn (m &Middleware) get_global_handlers() []voidptr {\n\treturn m.handlers\n}\n\npub struct Other {\n}\n\npub fn (o &Other) get_global_handlers() []voidptr {\n\treturn []voidptr{}\n}\n\npub struct App {\n\tMiddleware\n}\n\nfn app_global_handlers[A](app &A) []voidptr {\n\t$if A is $struct {\n\t\t$for field in A.fields {\n\t\t\t$if field.is_embed {\n\t\t\t\t$if field.name == 'Middleware' {\n\t\t\t\t\treturn app.$(field.name).get_global_handlers()\n\t\t\t\t}\n\t\t\t}\n\t\t}\n\t}\n\treturn []voidptr{}\n}\n\npub fn run(app &App) []voidptr {\n\treturn app_global_handlers[App](app)\n}\n"
+	})
+	defer {
+		os.rmdir_all(root) or {}
+	}
+	g := build_graph(Options{ root: root })
+	targets := g.edges.filter(it.kind == .calls && it.from == 'vlib.veb.app_global_handlers').map(it.to)
+	assert 'vlib.veb.Middleware.get_global_handlers' in targets, targets.str()
+	assert 'vlib.veb.Other.get_global_handlers' !in targets, targets.str()
 }
