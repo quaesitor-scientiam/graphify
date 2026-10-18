@@ -311,22 +311,110 @@ serve_compressed_static and send_compressed_response, `lock` and `unlock` in
 channel_select_priv, and `bytes` in parse_memory_limit. The links are the methods of the
 types those values have, and no call changes its target.
 
-Still unresolved in veb, nine calls. `clone` in check_duplicate_routes_in_controllers is on a
-field of `global_app`, which `$if T is ControllerInterface` retypes to the interface. infer.v
-(`comptime_type`) refuses an interface, so the call loses the instance path that resolves the
-same field without the check. `trim` and `to_lower` in parse_form_from_request follow a
-`.map(it.trim_left(' \t'))`, whose element type the map recipe does not give. `set` in the
-closure of Throttle.acquire is on `ctx.res.header`, of a closure type parameter. The four
-`app.$(field.name)` calls in veb/middleware.v sit under `$if field.name == 'Middleware'`, and
-a pin that names the field resolves them in a test tree, but on the tree their instances come
-through veb.v's generic callers two levels up, so the pin changes nothing there yet. `clone` in
-run_new is on `static_files` through the embedded StaticHandler, and resolves in a test tree but
-not on the tree.
+The nine veb calls left unresolved after that all resolve now (October 2026, #74 to #77).
+`trim` and `to_lower` in parse_form_from_request follow a `.map(it.trim_left(' \t'))`, whose
+recipe now carries the method called on `it` (`mapit:`), so the array's element type is that
+method's return type. The two `clone` calls, in check_duplicate_routes_in_controllers and
+run_new, sit under `$if T is ControllerInterface`, which retyped T to the interface and lost
+the instance path. The check now keeps both (`ctp:T:X`), and resolve_edges settles it to the
+parameter's instances when X is an interface (`comptime_recipe`). The four `app.$(field.name)`
+calls in veb/middleware.v are pinned to the field that `$if field.name == 'Middleware'` names
+(`comptime_name_pin`), and an argument narrowed by `$if A is I` passes its instance on to the
+callee (`comptime_sites`). `set` in the closure of Throttle.acquire reads the instance
+`ThrottleContext` in the test file that declares it, not in throttle.v, which can't see it
+(`declared_file`). On vlang `4413ab4aaa` 271 calls are unresolved.
+
+**Type references (October 2026).** On vlang `4413ab4aaa` 808 type references were
+unresolved, besides the 47,959 to primitives, and most were not ambiguous names. A `C.` or
+`JS.` type lost its qualifier: `C.Window` was recorded as `Window` and `JS.Number` as
+`Number`, so it was matched by name against V types: it took a V struct `Cursor` for
+`C.Cursor` when that was the only `Cursor`, and the 346 references in vlib/js/dom to
+`JS.Number`, `JS.String`, `JS.Boolean`, `JS.Any` and `JS.Array` stayed ambiguous among
+same-named V types, although vlib/builtin/js declares each one (`pub interface JS.Number`). `type_ref`
+(backend_v.v) now keeps the qualifier, and a JS declaration keeps its `JS.` on its signature,
+as a C struct keeps `C.`. `resolve_type_ref` (graphify.v) then names only a C or JS
+declaration: the nearest one, in the referencing file, its module, a module it can see, then
+the program (`nearest_type`, which `c_struct` in infer.v uses too). A bare name is a V type,
+so a C or JS declaration is no longer a candidate for it: the bare `Window` in
+`sokol/sapp/sapp_linux.c.v` had been ambiguous with `type C.Window`. A C or JS type that
+nothing in the program declares is marked undeclared and counted as external
+(`host_type_undeclared`). One that is declared in several modules, where the nearest scope
+can't pick, stays unresolved, as an ambiguous C binding does: `C.timespec` is declared by os,
+sync, time and sokol.sapp. `u128` and `i128`, V3's 128-bit integers, are counted as
+primitives.
+
+The 46 references to `string` itself that stayed unresolved had four causes. A type declared
+once per platform (`gg.Config` in gg.c.v and gg.js.v) had no site, since only a function or
+method got its per-file site back, so its references had no locality to pick builtin's
+`string` by. A type now gets one too, and so does an id whose copies are all in one file (a
+function in each branch of a top-level `$if` in a test). `import wasm` reached
+vlib/builtin/wasm by its last segment as well as vlib/wasm, so the wasm builtin's `string`
+competed with builtin's. A bare type name is now the caller's module's, or else builtin's,
+before imports are looked at (`type_in_scope`). A global that shares its id with colliding
+functions (`__global value` in a test) kept its id but had its edges renamed to an `id@file`
+that named nothing. Only a renamed declaration's edges move now (`disambiguate_ids`).
+
+On the same tree unresolved references go from 808 to 104: 635 more resolve, 36 are
+external, and 35 more are primitives. No reference changes its target. Eleven lose one:
+the ten typed arrays' `every(JS.EveryFn)` in vlib/builtin/js, which name the V alias `EveryFn`
+through `JS.` (V3 keeps `C.` and `JS.` names in their own namespace, so they are external
+now), and `&SSL` in net/openssl's `openssl_openbsd.c.v`, where only `struct C.SSL` is
+declared. Calls are unchanged.
+
+The 104 left come down to 18 (October 2026, same tree):
+
+- An anonymous `struct { ... }` or `union { ... }` is named by V3 after its file and a
+  counter that starts again in each file (`register_anonymous_aggregate_type`, in
+  vlib/v/parser), so `_VAnonStruct1` was a different struct in each of 21 files, and a
+  reference to it named no declaration. The declaration that writes one now references the
+  types of its fields instead, nested ones included (`add_type_ref`, in backend_v.v):
+  `cli.Command` references `cli.Defaults` and `cli.CommandFlag` through its anonymous
+  `defaults` field, which nothing recorded before. 32 references go and 27 are added, 19 of
+  them to primitives.
+- A named variant, `type Expr = IntLit(int) | Void`, is a struct V3 declares for the sum
+  type, `Expr@variant@IntLit { payload int }`. `@` can't be written in a source name
+  (`named_variant_marker`, in vlib/v/flat), and elsewhere the variant is written
+  `Expr.IntLit`, never by its name alone. The reference kept only `IntLit`, which nothing
+  declares, or named another type of that name. `base_name` and `type_text` now read the
+  struct's name whole, so the sum type references each variant's struct, and the struct
+  references its payload's type. 33 resolve, and 4 that went to a wrong type are corrected:
+  `Void` had gone to the alias `type Void = int` beside it, `Ref` to a `type Ref` in another
+  program, and `Nil` to the checker's `v.types.Nil`.
+- A C struct had the id of a V type of its name, `<module>.name`, so `type Size = C.Size`
+  beside `struct C.Size` was one id for two declarations, which a test program couldn't
+  address, and the alias referenced itself. Nine ids were shared this way on the tree,
+  `vlib.builtin.IError` (the interface and `struct C.IError`) and `vlib.os.stat` (the
+  function and `struct C.stat`) among them. A C struct's id is now `<module>.C.name`, as its
+  methods' ids already were (`extract_struct`), and `find_type` (infer.v) takes a name
+  qualified `C` only for a C declaration, as resolve_type_ref does. The 602 C structs and
+  their fields change id, and the 329 edges that went to a shared id now go to the
+  declaration they name: 216 references to `IError` go to the interface and 60 calls to
+  `os.stat` go to the function. An id whose copies are all of one kind in one file of a
+  program, one per branch of a top-level `$if`, is addressable now (`resolve_edges`), which
+  also resolves the three `ret()` calls in the comptime_if_top tests: unresolved calls go
+  from 271 to 268. 13 references resolve. A generic struct instance in a field of a struct
+  whose id is told apart by file took its module from that id up to the last dot, which is
+  in the file name (`struct_module`, in generics.v); that changes nothing on the tree.
+- A variadic `...JS.Any` left its dots on the qualifier, so it was read as the bare `Any`
+  and could go to `json2.Any` (`type_ref`). 7 resolve.
+- A `module main` directory with no `fn main` is one program for type references too, as it
+  already was for alias conversions, since `v test` builds such a directory together
+  (`type_in_scope`): `Country` in vlib/v/tests/generic_calls resolves. With it, 15 `string`
+  references in vlib/builtin/js's own `*_test.js.v` files go to the JS builtin's `string`,
+  which their module declares, as the module's other files' references already do.
+
+No reference or call loses its target. What remains is 18 references. Ten are C types that
+several modules declare and the referencing file can't choose between (`C.timespec`,
+`C.timeval`, `C.XEvent`). One is a type declared once per platform in one program
+(`ToolCacheEntryDir` in cmd/v). Three name modules that are not in the tree (`js.promise`,
+vdoc's `markdown`). One is a bare `SSL` where only `struct C.SSL` is declared, and three are
+the checker's unknown-type fixture. A JS binding type still shares the id of a V type of its
+name in two places (`vlib.builtin.js.Error`, `vlib.builtin.js.Promise`).
 
 Comptime field selectors (measured October 2026): 11 of the 354 unresolved calls
 go through a `$for` field, `x.$(field.name).m()`. Four are on a generic `A` in
-`veb/middleware.v`, which the generic receivers paragraph leaves unresolved, and
-seven are in vlang's comptime test fixtures. Resolving the rest would give one
+`veb/middleware.v`, which resolve now (see the veb paragraph above), and seven are
+in vlang's comptime test fixtures. Resolving the rest would give one
 call an edge to the method of every field type that declares it. The
 one-edge-per-call model does not express that, so they stay unresolved. Still
 open: a receiver from a call with a computed argument, and a sum type's shared

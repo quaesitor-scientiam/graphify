@@ -1123,14 +1123,16 @@ fn owner_matches(decl_owner string, decl_mod string, text string, sc FileScope) 
 }
 
 // find_type is the declaration of the type named `short`, qualified by `qual`,
-// as seen from `t`'s scope.
+// as seen from `t`'s scope. Only a C declaration is a type qualified by `C`, and
+// it is none of a name without that qualifier, as in resolve_type_ref: the alias
+// `type Counter = C.Counter` is `Counter`, not the C struct beside it.
 fn (inf &Infer) find_type(short string, qual string, t InferredType, file string) ?TypeCand {
 	cands := inf.by_type_name[short] or { return none }
 	mut same_file := []TypeCand{}
 	mut own_mod := []TypeCand{}
 	mut reachable := []TypeCand{}
 	for c in cands {
-		if test_private(c.file, file) {
+		if test_private(c.file, file) || c.declares_host('C') != (qual == 'C') {
 			continue
 		}
 		if qual == '' && c.file == t.file {
@@ -1249,36 +1251,8 @@ fn (inf &Infer) field_of(t InferredType, name string, file string, depth int) ?I
 // program. Declarations of one id in that scope are one struct, one per platform;
 // two ids leave it unknown, and a V struct of that name is none of it.
 fn (inf &Infer) c_struct(name string, t InferredType) ?TypeCand {
-	mut same_file := []TypeCand{}
-	mut own_mod := []TypeCand{}
-	mut all := []TypeCand{}
-	for c in inf.by_type_name[name] or { return none } {
-		if !c.c {
-			continue
-		}
-		all << c
-		if c.file == t.file {
-			same_file << c
-		}
-		if c.mod == t.mod {
-			own_mod << c
-		}
-	}
-	for tier in [same_file, own_mod, all] {
-		mut ids := []string{}
-		for c in tier {
-			if c.id !in ids {
-				ids << c.id
-			}
-		}
-		if ids.len == 1 {
-			return tier[0]
-		}
-		if ids.len > 1 {
-			return none
-		}
-	}
-	return none
+	cs := (inf.by_type_name[name] or { return none }).filter(it.c)
+	return nearest_type(cs.filter(it.file == t.file), cs.filter(it.mod == t.mod), cs)
 }
 
 // js_host_type names the JS binding type a receiver's type text is, `JS.Promise` for a

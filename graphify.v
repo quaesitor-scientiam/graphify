@@ -511,11 +511,14 @@ fn disambiguate_ids(mut g Graph) {
 	}
 
 	// Rename the colliding declarations themselves -- unambiguous, since
-	// each Symbol carries its own file.
+	// each Symbol carries its own file. renamed_at keeps which (id, file)
+	// was renamed, for the edges below.
+	mut renamed_at := map[string]bool{}
 	for i in 0 .. g.symbols.len {
 		s := g.symbols[i]
 		if s.kind in kinds && collides[s.id] {
 			g.symbols[i].id = '${s.id}@${s.file}'
+			renamed_at[site_key(s.id, s.file)] = true
 		}
 	}
 	// Cascade to field symbols, whose id/parent embed their struct's old id
@@ -550,10 +553,13 @@ fn disambiguate_ids(mut g Graph) {
 	// symbols don't need, since they carry `file` directly) to know which
 	// of the several now-differently-renamed declarations a given edge
 	// actually belongs to. Edge's fields are all `pub:` (read-only), so a
-	// changed edge is a new value, same as resolve_edges builds below.
+	// changed edge is a new value, same as resolve_edges builds below. Only
+	// a renamed declaration's edges move: a global that shares a colliding
+	// function's id keeps its id, and its edges keep it too.
 	mut with_from_renamed := []Edge{cap: g.edges.len}
 	for e in g.edges {
-		if (e.kind == .calls || e.kind == .embeds || e.kind == .references) && collides[e.from] {
+		if (e.kind == .calls || e.kind == .embeds || e.kind == .references)
+			&& renamed_at[site_key(e.from, e.file)] {
 			with_from_renamed << Edge{
 				...e
 				from: '${e.from}@${e.file}'
@@ -614,6 +620,15 @@ struct TypeCand {
 	file string
 	// c is set for a C struct, `struct C.name` (see extract_struct)
 	c bool
+	// js is set for a JS binding type, `interface JS.name` or `struct JS.name`
+	js bool
+}
+
+// declares_host reports whether the candidate declares a type of the host
+// `C` or `JS` names: a C struct, a C type `type C.name` (whose id is
+// `C.name`), or a JS binding type.
+fn (c TypeCand) declares_host(host string) bool {
+	return if host == 'C' { c.c || c.id.starts_with('C.') } else { c.js }
 }
 
 // only_type_id is only_id's counterpart for TypeCand -- V has no lightweight
@@ -719,6 +734,10 @@ fn resolve_edges(mut g Graph) {
 	mains := main_unit_files(g)
 	mut id_main := map[string]bool{}
 	mut id_files := map[string][]string{}
+	// id_kind is the kind of an id's first declaration, and id_mixed is set when another
+	// is of a different kind: such copies are different declarations wherever they are
+	mut id_kind := map[string]SymbolKind{}
+	mut id_mixed := map[string]bool{}
 	mut imports_of := map[string][]string{} // file -> modules it imports
 	mut scope_of := map[string]FileScope{} // file -> what a callee prefix can name
 	for s in g.symbols {
@@ -779,6 +798,7 @@ fn resolve_edges(mut g Graph) {
 				mod:  s.parent
 				file: s.file
 				c:    s.signature.contains('struct C.')
+				js:   s.signature.contains('interface JS.') || s.signature.contains('struct JS.')
 			}
 		}
 		// site_of answers "where does this edge's `from` live", so it only
@@ -812,6 +832,13 @@ fn resolve_edges(mut g Graph) {
 				id_main[s.id] = true
 			}
 			id_files[s.id] << s.file
+			if k := id_kind[s.id] {
+				if k != s.kind {
+					id_mixed[s.id] = true
+				}
+			} else {
+				id_kind[s.id] = s.kind
+			}
 		}
 	}
 	// An id names more than one real function only when its declarations sit in
@@ -828,12 +855,19 @@ fn resolve_edges(mut g Graph) {
 		if n < 2 || id.starts_with('C.') {
 			continue
 		}
+		files := id_files[id] or { []string{} }
 		if id_main[id] {
+			// copies of one kind in one file are one declaration in each branch of a
+			// top-level `$if`, as copies in an ordinary module's files are one per platform;
+			// disambiguate_ids leaves them one id, as it can't tell them apart by file
+			if !id_mixed[id] && files.all(it == files[0]) {
+				continue
+			}
 			unaddressable[id] = true
 			continue
 		}
 		mut tests := []string{}
-		for f in id_files[id] or { []string{} } {
+		for f in files {
 			if f.ends_with('_test.v') && f !in tests {
 				tests << f
 			}
@@ -854,9 +888,15 @@ fn resolve_edges(mut g Graph) {
 	}
 	// An id repeated within one module names per-platform variants of one
 	// function (see above), and a call edge says which file it is in, so
-	// that variant's location is known: keyed by id and file (site_key).
+	// that variant's location is known: keyed by id and file (site_key). The
+	// same holds for a type declared once per platform (`gg.Config` in gg.c.v
+	// and gg.js.v), whose references say their file too, and for an id that
+	// can't address one declaration but whose copies are all in one file (a
+	// function in each branch of a top-level `$if` in a test).
 	for s in g.symbols {
-		if s.kind in [SymbolKind.function, .method] && id_count[s.id] > 1 && !unaddressable[s.id] {
+		if s.kind in [SymbolKind.function, .method, .struct_, .interface_, .type_alias]
+			&& id_count[s.id] > 1
+			&& (!unaddressable[s.id] || (id_files[s.id] or { []string{} }).all(it == s.file)) {
 			site_of[site_key(s.id, s.file)] = DeclSite{
 				mod:     s.parent
 				file:    s.file
@@ -1067,6 +1107,13 @@ fn resolve_edges(mut g Graph) {
 					}
 					continue
 				}
+			}
+			// a C or JS type that no `struct C.`, `type C.` or `JS.` declaration
+			// names is in a system header or the JS host, as an unbound C function
+			// is; one that is declared but doesn't resolve stays unresolved
+			if host_type_undeclared(e.to, by_type_name) {
+				resolved << Edge{...e, provenance: .undeclared}
+				continue
 			}
 		}
 		if e.kind == .calls {
@@ -1534,10 +1581,36 @@ fn importable(id string, decl_file string, caller_file string, site_of map[strin
 // shortcut, which are calls-specific: a type name carries no notion of
 // "method vs function", and there is no receiver to type without inference.
 fn resolve_type_ref(e Edge, by_type_name map[string][]TypeCand, site_of map[string]DeclSite, imports_of map[string][]string) ?CallResolution {
-	cands := by_type_name[e.to.all_after_last('.')] or { return none }
-	if cands.len == 0 {
+	named := by_type_name[e.to.all_after_last('.')] or { return none }
+	if named.len == 0 {
 		return none
 	}
+	host := e.to.all_before('.')
+	if host in ['C', 'JS'] && e.to.count('.') == 1 {
+		// `C.Window` or `JS.Number`: a C or JS type is one name for the whole
+		// program, so the nearest declaration of that host is the one: in the
+		// referencing file, its module, a module it can see, then the program. A
+		// V type of the same name is none of it, `EveryFn` for `JS.EveryFn`
+		// included. With no such declaration the edge keeps its name and is
+		// undeclared (host_type_undeclared); with two in the nearest scope that
+		// has any, it stays unresolved.
+		hosts := named.filter(it.declares_host(host))
+		site := caller_site(e, site_of) or { DeclSite{
+			file: e.file
+		} }
+		imports := imports_of[site.file] or { []string{} }
+		c := nearest_type(hosts.filter(it.file == site.file), hosts.filter(it.mod == site.mod),
+			hosts.filter(visible_from(it.mod, site, imports)), hosts)?
+		// one declaration in the program is a unique name; several, a locality pick
+		unique := if _ := only_type_id(hosts) { true } else { false }
+		return CallResolution{
+			id:       c.id
+			inferred: !unique
+		}
+	}
+	// any other name is a V type: a C or JS declaration is named only with its
+	// qualifier, which type_ref keeps
+	cands := named.filter(!it.declares_host('C') && !it.declares_host('JS'))
 	if e.to.contains('.') {
 		// named through its module (embed_name in backend_v.v): that
 		// module's type, never a local one of the same name
@@ -1561,15 +1634,17 @@ fn resolve_type_ref(e Edge, by_type_name map[string][]TypeCand, site_of map[stri
 	// no known site for the referencing declaration means no locality signal
 	// is trustworthy, so stop here rather than guess
 	caller := caller_site(e, site_of) or { return none }
-	return type_in_scope(cands, caller, imports_of, false)
+	return type_in_scope(cands, caller, imports_of)
 }
 
 // type_in_scope picks the one candidate a name in the caller's scope refers to, by
-// locality: the caller's own file, then its module, then what its imports reach.
-// none when no candidate is in scope or a step stays ambiguous. mains_share lets a
-// caller in a module with no `fn main` see its module's files as one program, which
-// only a conversion to a type alias needs (see alias_conversion).
-fn type_in_scope(cands []TypeCand, caller DeclSite, imports_of map[string][]string, mains_share bool) ?CallResolution {
+// locality: the caller's own file, then its module, then builtin when the module
+// declares none, then what its imports reach.
+// none when no candidate is in scope or a step stays ambiguous. A caller in a
+// `module main` directory with no `fn main` sees its module's files as one program,
+// since `v test` builds such a directory together: `Country` in country.v is the
+// type `fn Country.cases() []Country` in country_cases.v names.
+fn type_in_scope(cands []TypeCand, caller DeclSite, imports_of map[string][]string) ?CallResolution {
 	mut same_file := []TypeCand{}
 	for c in cands {
 		if c.file == caller.file {
@@ -1579,7 +1654,7 @@ fn type_in_scope(cands []TypeCand, caller DeclSite, imports_of map[string][]stri
 	if id := only_type_id(same_file) {
 		return CallResolution{ id: id, inferred: true }
 	}
-	if caller.mod != '' && (!caller.is_main || caller.solo || (mains_share && caller.no_main)) {
+	if caller.mod != '' && (!caller.is_main || caller.solo || caller.no_main) {
 		mut same_mod := []TypeCand{}
 		for c in cands {
 			if c.mod == caller.mod && !test_private(c.file, caller.file) {
@@ -1587,6 +1662,26 @@ fn type_in_scope(cands []TypeCand, caller DeclSite, imports_of map[string][]stri
 			}
 		}
 		if id := only_type_id(same_mod) {
+			return CallResolution{ id: id, inferred: true }
+		}
+	}
+	// a bare type name is the caller's module's or builtin's, as V reads it:
+	// `import wasm` must not make vlib/builtin/wasm's `string` a candidate,
+	// though import_reaches matches it by its last segment
+	mut own := false
+	mut builtins := []TypeCand{}
+	for c in cands {
+		if test_private(c.file, caller.file) {
+			continue
+		}
+		if c.mod == caller.mod {
+			own = true
+		} else if import_reaches(c.mod, 'builtin') {
+			builtins << c
+		}
+	}
+	if !own {
+		if id := only_type_id(builtins) {
 			return CallResolution{ id: id, inferred: true }
 		}
 	}
@@ -1603,6 +1698,30 @@ fn type_in_scope(cands []TypeCand, caller DeclSite, imports_of map[string][]stri
 	return none
 }
 
+// host_type_undeclared reports whether `name` is a C or JS type, `C.Window` or
+// `JS.Number`, that no declaration of that host in the program names.
+fn host_type_undeclared(name string, by_type_name map[string][]TypeCand) bool {
+	host := name.all_before('.')
+	if host !in ['C', 'JS'] || name.count('.') != 1 {
+		return false
+	}
+	cands := by_type_name[name.all_after('.')] or { return true }
+	return !cands.any(it.declares_host(host))
+}
+
+// nearest_type is the one declaration in the first of tiers that has any, the
+// scopes from nearest to widest. Declarations of one id in a scope are one type,
+// declared once per platform; two ids in that scope leave it unknown.
+fn nearest_type(tiers ...[]TypeCand) ?TypeCand {
+	for tier in tiers {
+		if tier.len > 0 {
+			only_type_id(tier)?
+			return tier[0]
+		}
+	}
+	return none
+}
+
 // alias_conversion is the type alias a bare call names when the call is a conversion
 // to it: V reads `uintptr_t(x)` under `type uintptr_t = usize` as a conversion, not a
 // call of a function. Unlike resolve_type_ref there is no unique-name step: a bare
@@ -1610,7 +1729,7 @@ fn type_in_scope(cands []TypeCand, caller DeclSite, imports_of map[string][]stri
 fn alias_conversion(e Edge, alias_by_name map[string][]TypeCand, site_of map[string]DeclSite, imports_of map[string][]string) ?string {
 	cands := alias_by_name[e.to] or { return none }
 	caller := caller_site(e, site_of) or { return none }
-	res := type_in_scope(cands, caller, imports_of, true)?
+	res := type_in_scope(cands, caller, imports_of)?
 	return res.id
 }
 

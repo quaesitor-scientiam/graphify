@@ -152,7 +152,7 @@ fn expand_type_param_calls(edges []Edge, sources []Edge, fields []Symbol, mut in
 		// a field's type is written in its struct's module, and the struct's own type
 		// parameters pass on to it, as the parameters of a generic function do
 		own := funcs[f.parent] or { Symbol{} }
-		add_owner_instances(mut instances, mut flows, f.signature.all_after(' '), f.parent.all_before_last('.'), f.file, own)
+		add_owner_instances(mut instances, mut flows, f.signature.all_after(' '), struct_module(f.parent, own), f.file, own)
 	}
 	// a type parameter that is passed on takes the types of the one it is passed from;
 	// a chain of generic calls is short, so a few rounds reach the fixed point
@@ -286,6 +286,17 @@ fn plain_param(text string, mod string, tps []string) ?string {
 		return name
 	}
 	return none
+}
+
+// struct_module is the module of the struct `id`, which `own` declares when it is a
+// generic struct. Otherwise it is read off the id, past an `@file` that tells colliding
+// ids apart and a C struct's `C.` (`vlib.os.C.stat`, see extract_struct).
+fn struct_module(id string, own Symbol) string {
+	if own.parent != '' {
+		return own.parent
+	}
+	m := id.all_before('@').all_before_last('.')
+	return if m.ends_with('.C') { m.all_before_last('.') } else { m }
 }
 
 // add_owner_instances records the type arguments of one instance of a generic struct,
