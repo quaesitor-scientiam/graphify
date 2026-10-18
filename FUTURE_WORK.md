@@ -257,6 +257,26 @@ generic receivers paragraph leaves unresolved (`work D` in `crypto/hmac`, and
 the 3,368 bare-name calls sit on a continuation line of one. A string literal
 receiver is typed and resolves (`'Hello World!'.hex()`).
 
+JS host calls (October 2026). A `fn JS.name` binding is deliberately not a symbol
+(`extract_from_ast` skips it), so a call into the JS host has no declaration to
+resolve to, and it is `external`, the class `JS.parseInt` already had. Two shapes
+were unresolved, or linked to a same-named V function, and are external now. A
+static member of a binding, `JS.Promise.race(p)` or `JS.Math.abs(x)`, keeps its full
+path as its callee (`js_path`, in backend_v.v). A method on a receiver typed by a
+binding, `p.promise.then()` on a `JS.Promise`, resolves to the method of that type
+when the program declares one, a V wrapper or the binding's own member, with
+embedded types followed. Otherwise it is `JS.Promise.then`, which is not linked by
+name to some other type's `then` (`same_type_method`, in infer.v). On the vlang
+tree unresolved calls go 329 to 309, and external calls 32 to 66. Of the calls that
+were resolved and now are host calls, 18 were links to a same-named V function
+(`JS.Math.round` to `vlib.math.round`) or to an unrelated type's method
+(`JS.Math.ceil` to `wasm.Function.ceil`). The `string` helpers' `s.str.slice` and
+`s.str.split` now reach the binding's `String` members, which is where they go. Three JS builtin calls
+stay unresolved: `reduce` on `[]int`, whose `array.reduce` is declared in module
+`vlib.builtin.js`, which the array fallback does not look in; `push` on the result of
+`JS.Array.prototype.constructor()`, which has no type; and `concat` on a `js'...'`
+string literal, which is not typed as a JS string.
+
 Comptime field selectors (measured October 2026): 11 of the 354 unresolved calls
 go through a `$for` field, `x.$(field.name).m()`. Four are on a generic `A` in
 `veb/middleware.v`, which the generic receivers paragraph leaves unresolved, and

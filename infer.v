@@ -96,6 +96,22 @@ fn (mut inf Infer) infer_call(e Edge) ?CallResolution {
 				}
 			}
 			if found == '' {
+				// a method of a JS binding type, `p.promise.then()` on a `JS.Promise`, is the one
+				// declared on that type, the binding's own or a V wrapper of it. Without one, the
+				// call is into the JS host, as `JS.parseInt` is, before any name match, which
+				// would link it to a `then` of some other type
+				if host := js_host_type(t.text) {
+					if id := inf.same_type_method(host, e.to, e.file) {
+						cands := inf.by_name[e.to] or { []CallCand{} }
+						return CallResolution{
+							id:       id
+							inferred: (only_id(cands) or { '' }) != id
+						}
+					}
+					return CallResolution{
+						id: '${host}.${e.to}'
+					}
+				}
 				// before any name match: `b.cb()` on a function-typed field is
 				// no call of some function that happens to be named `cb`
 				if field := inf.no_method(t, e.to, e.file) {
@@ -1165,6 +1181,42 @@ fn (inf &Infer) c_struct(name string, t InferredType) ?TypeCand {
 		if ids.len > 1 {
 			return none
 		}
+	}
+	return none
+}
+
+// js_host_type names the JS binding type a receiver's type text is, `JS.Promise` for a
+// receiver typed `JS.Promise` or `vlib.builtin.js.JS.Promise`, and none for any other type.
+fn js_host_type(t string) ?string {
+	name := bare_type(t)
+	if name.starts_with('JS.') {
+		return name
+	}
+	if name.contains('.JS.') {
+		return 'JS.' + name.all_after('.JS.')
+	}
+	return none
+}
+
+// same_type_method is the one method `name` that a type named `host` (a JS binding type,
+// `JS.HTMLCanvasElement`) has, as method_on finds it on a receiver of that type, embedded
+// types included. Every type of that name is tried, the binding's own and a V wrapper of
+// it. none when there is no such method, or more than one.
+fn (inf &Infer) same_type_method(host string, name string, file string) ?string {
+	short := host.all_after('JS.')
+	mut ids := []string{}
+	for c in inf.by_type_name[short] or { []TypeCand{} } {
+		if c.c {
+			continue
+		}
+		if id := inf.method_on(InferredType{ text: short, mod: c.mod, file: c.file }, name, file, 0) {
+			if id !in ids {
+				ids << id
+			}
+		}
+	}
+	if ids.len == 1 {
+		return ids[0]
 	}
 	return none
 }

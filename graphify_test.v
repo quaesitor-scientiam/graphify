@@ -156,6 +156,54 @@ pub fn change_color(id string) {
 	assert fns[0].name == 'change_color'
 }
 
+fn test_a_static_member_of_a_js_binding_is_a_call_into_the_host() {
+	// `JS.Promise.race` and `JS.Array.prototype.constructor()` are calls into the JS host,
+	// as `JS.parseInt` is, so the full path is the callee and not its last name
+	root := write_tree('js_static_calls', {
+		'demo.v': 'module demo\n\npub fn make() {\n\t_ = JS.Array.prototype.constructor()\n\t_ = JS.Promise.race(1)\n}\n'
+	})
+	defer {
+		os.rmdir_all(root) or {}
+	}
+	g := build_graph(Options{ root: root })
+	targets := g.edges.filter(it.kind == .calls && it.from == 'demo.make').map(it.to)
+	assert 'JS.Array.prototype.constructor' in targets, targets.str()
+	assert 'JS.Promise.race' in targets, targets.str()
+	assert 'constructor' !in targets && 'race' !in targets, targets.str()
+}
+
+fn test_a_method_of_a_js_binding_type_is_a_call_into_the_host() {
+	// `promise` is a `JS.Promise`, a type of the binding, which the program declares no `then`
+	// on. The `then` of `Other` is no method of it, though a call matched by name alone would
+	// take it
+	root := write_tree('js_method_calls', {
+		'demo.v': 'module demo\n\npub struct Waiter {\npub mut:\n\tpromise JS.Promise\n}\n\npub fn (w Waiter) run() {\n\tw.promise.then(1, 2)\n}\n\npub struct Other {\n}\n\npub fn (o Other) then(a int, b int) {\n}\n'
+	})
+	defer {
+		os.rmdir_all(root) or {}
+	}
+	g := build_graph(Options{ root: root })
+	targets := g.edges.filter(it.kind == .calls && it.from == 'demo.Waiter.run').map(it.to)
+	assert 'JS.Promise.then' in targets, targets.str()
+	assert 'demo.Other.then' !in targets, targets.str()
+}
+
+fn test_a_method_of_a_js_binding_type_that_a_v_wrapper_declares_links_to_the_wrapper() {
+	// `g` is a `JS.WebGLRenderingContext`, and the program's own `WebGLRenderingContext`
+	// declares clear(), a wrapper of the host's. The call links to that declaration, and is
+	// not a call into the host
+	root := write_tree('js_wrapped_method_calls', {
+		'demo.v': 'module demo\n\npub struct WebGLRenderingContext {\n}\n\npub fn (g WebGLRenderingContext) clear() {\n}\n\npub fn run(g JS.WebGLRenderingContext) {\n\tg.clear()\n}\n'
+	})
+	defer {
+		os.rmdir_all(root) or {}
+	}
+	g := build_graph(Options{ root: root })
+	targets := g.edges.filter(it.kind == .calls && it.from == 'demo.run').map(it.to)
+	assert 'demo.WebGLRenderingContext.clear' in targets, targets.str()
+	assert 'JS.WebGLRenderingContext.clear' !in targets, targets.str()
+}
+
 fn test_literal_receiver_types_the_call() {
 	src := 'module demo
 
