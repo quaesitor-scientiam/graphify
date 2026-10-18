@@ -1718,12 +1718,22 @@ fn (f &V3File) declare(n &flat.Node, kids []flat.NodeId, ctx V3CallCtx) V3CallCt
 			recipes << f.recipe(kids[i + 1], ctx)
 		}
 	} else if count > 1 && kids.len == count + 1 {
-		r := f.recipe(kids[1], ctx)
 		mut lhs := [kids[0]]
 		lhs << kids[2..]
-		for i, k in lhs {
-			names << f.node(k).value
-			recipes << if r == '' { '' } else { r + recipe_sep + '#${i}' }
+		// `a, b := if ... { x, y } else { ... }`: each name takes the type of its own value,
+		// not the first value's with `#i` after it, so a branch's `c` never types `b`
+		if f.node(kids[1]).kind in [.if_expr, .match_stmt] {
+			elems := f.tuple_recipes(kids[1], count, ctx)
+			for i, k in lhs {
+				names << f.node(k).value
+				recipes << elems[i]
+			}
+		} else {
+			r := f.recipe(kids[1], ctx)
+			for i, k in lhs {
+				names << f.node(k).value
+				recipes << if r == '' { '' } else { r + recipe_sep + '#${i}' }
+			}
 		}
 	} else {
 		return ctx
@@ -1742,6 +1752,56 @@ fn (f &V3File) declare(n &flat.Node, kids []flat.NodeId, ctx V3CallCtx) V3CallCt
 		}
 	}
 	return out
+}
+
+// tuple_recipes is the recipe of each value of an `if` or `match` that yields several, as
+// `compressed, ext := match n { ... }` does: each value takes the recipe of the first branch
+// that types it. A branch's own `:=` names are declared first, so the `c` in `c, '.zst'` is
+// typed by the `c := f()` above it. A value no branch types has an empty recipe.
+fn (f &V3File) tuple_recipes(id flat.NodeId, count int, ctx V3CallCtx) []string {
+	mut out := []string{len: count}
+	mut blocks := []flat.NodeId{}
+	for k in f.kids(id) {
+		if f.node(k).kind in [.block, .match_branch] {
+			blocks << k
+		}
+	}
+	for b in blocks {
+		bctx, vals := f.branch_values(f.kids(b), ctx)
+		if vals.len != count {
+			continue
+		}
+		for i, v in vals {
+			if out[i] == '' {
+				out[i] = f.recipe(v, bctx)
+			}
+		}
+	}
+	return out
+}
+
+// branch_values is the context a branch's values are read in, and the values. The names a
+// branch declares come first, and its values are the expressions of the block it ends in.
+fn (f &V3File) branch_values(body []flat.NodeId, ctx V3CallCtx) (V3CallCtx, []flat.NodeId) {
+	if body.len == 0 {
+		return ctx, []flat.NodeId{}
+	}
+	mut bctx := ctx
+	for s in body[..body.len - 1] {
+		if f.node(s).kind == .decl_assign {
+			bctx = f.declare(f.node(s), f.kids(s), bctx)
+		}
+	}
+	last := body.last()
+	mut vals := []flat.NodeId{}
+	if f.node(last).kind == .block {
+		for v in f.kids(last) {
+			vals << if f.node(v).kind == .expr_stmt && f.kids(v).len > 0 { f.kids(v)[0] } else { v }
+		}
+	} else if f.node(last).kind == .expr_stmt && f.kids(last).len > 0 {
+		vals << f.kids(last)[0]
+	}
+	return bctx, vals
 }
 
 // decl_count is how many names a `:=` declares, from the node's value. The

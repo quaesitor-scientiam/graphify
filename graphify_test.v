@@ -7503,3 +7503,23 @@ fn test_a_c_type_conversion_is_a_call_of_the_c_type() {
 	targets := g.edges.filter(it.kind == .calls && it.from == 'demo.conv').map(it.to)
 	assert 'C.DWORD' in targets, targets.str()
 }
+
+fn test_a_tuple_from_a_match_or_if_takes_each_element_type_from_its_branch() {
+	// `compressed` is the first value of each branch's tuple, `c`, which the branch declares from
+	// zstd.compress(), so bytestr() on it is the []u8 method. Http's Response has a bytestr() too,
+	// so the call is only resolved by the type of `compressed`, not by the name alone
+	root := write_tree('tuple_from_branch', {
+		'vlib/builtin/int.v':        'module builtin\n\npub fn (b []u8) bytestr() string {\n\treturn ""\n}\n'
+		'vlib/net/http/response.v':  'module http\n\npub struct Response {\n}\n\npub fn (r Response) bytestr() string {\n\treturn ""\n}\n'
+		'vlib/compress/zstd/zstd.v': 'module zstd\n\npub struct CompressParams {\npub:\n\tlevel int\n}\n\npub fn compress(data []u8, params CompressParams) ![]u8 {\n\treturn data\n}\n'
+		'vlib/veb/context.v':        'module veb\n\nimport compress.zstd\nimport net.http\n\npub enum ContentEncoding {\n\tgzip\n\tzstd\n}\n\npub fn pack(encoding ContentEncoding, data string) string {\n\tcompressed, ext, encoding_name := match encoding {\n\t\t.zstd {\n\t\t\tc := zstd.compress(data.bytes(), zstd.CompressParams{}) or { return "" }\n\t\t\tc, ".zst", "zstd"\n\t\t}\n\t\t.gzip {\n\t\t\tc := zstd.compress(data.bytes(), zstd.CompressParams{}) or { return "" }\n\t\t\tc, ".gz", "gzip"\n\t\t}\n\t}\n\treturn compressed.bytestr() + ext + encoding_name\n}\n\npub fn pack_if(encoding ContentEncoding, data string) string {\n\tcompressed, ext := if encoding == .zstd {\n\t\tc := zstd.compress(data.bytes(), zstd.CompressParams{}) or { return "" }\n\t\tc, ".zst"\n\t} else {\n\t\tc := zstd.compress(data.bytes(), zstd.CompressParams{}) or { return "" }\n\t\tc, ".gz"\n\t}\n\treturn compressed.bytestr() + ext\n}\n'
+	})
+	defer {
+		os.rmdir_all(root) or {}
+	}
+	g := build_graph(Options{ root: root })
+	targets := g.edges.filter(it.kind == .calls && it.from == 'vlib.veb.pack').map(it.to)
+	assert 'vlib.builtin.[]u8.bytestr' in targets, targets.str()
+	targets_if := g.edges.filter(it.kind == .calls && it.from == 'vlib.veb.pack_if').map(it.to)
+	assert 'vlib.builtin.[]u8.bytestr' in targets_if, targets_if.str()
+}
