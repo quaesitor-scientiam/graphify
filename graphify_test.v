@@ -7523,3 +7523,20 @@ fn test_a_tuple_from_a_match_or_if_takes_each_element_type_from_its_branch() {
 	targets_if := g.edges.filter(it.kind == .calls && it.from == 'vlib.veb.pack_if').map(it.to)
 	assert 'vlib.builtin.[]u8.bytestr' in targets_if, targets_if.str()
 }
+
+fn test_a_map_of_a_method_on_each_element_types_the_elements_by_that_method() {
+	// `ct` is the strings that `split` gives, each `trim_left`ed, so `ct[0]` is a string and its
+	// trim() and to_lower() are the string methods. An array's trim() would match by name alone
+	root := write_tree('map_of_method', {
+		'vlib/builtin/string.v': 'module builtin\n\npub fn (s string) split(delim string) []string {\n\treturn []string{}\n}\n\npub fn (s string) trim_left(cutset string) string {\n\treturn s\n}\n\npub fn (s string) trim(cutset string) string {\n\treturn s\n}\n\npub fn (s string) to_lower() string {\n\treturn s\n}\n'
+		'vlib/builtin/array.v':  'module builtin\n\npub fn (a array) trim(x string) array {\n\treturn a\n}\n'
+		'vlib/veb/parse.v':      "module veb\n\npub fn parse(header string) string {\n\tct := header.split(';').map(it.trim_left(' \\t'))\n\treturn ct[0].trim(' \\t').to_lower()\n}\n"
+	})
+	defer {
+		os.rmdir_all(root) or {}
+	}
+	g := build_graph(Options{ root: root })
+	targets := g.edges.filter(it.kind == .calls && it.from == 'vlib.veb.parse').map(it.to)
+	assert 'vlib.builtin.string.trim' in targets, targets.str()
+	assert 'vlib.builtin.string.to_lower' in targets, targets.str()
+}

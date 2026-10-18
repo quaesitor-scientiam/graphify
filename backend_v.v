@@ -2201,6 +2201,10 @@ fn (f &V3File) recipe(id flat.NodeId, ctx V3CallCtx) string {
 					&& f.node(kids[1]).typ_text() != '' {
 					rec += recipe_sep + 'mapto:' + f.type_text(f.node(kids[1]).typ_text())
 				}
+				// `xs.map(it.trim_left(' '))`: the result of the method called on one element
+				if name == 'map' && kids.len == 2 && f.it_method(kids[1]) != '' {
+					rec += recipe_sep + 'mapit:' + f.it_method(kids[1])
+				}
 				return rec
 			}
 		}
@@ -2249,6 +2253,23 @@ fn (f &V3File) recipe(id flat.NodeId, ctx V3CallCtx) string {
 		else {}
 	}
 	return ''
+}
+
+// it_method is the name of the method a call makes on `it`, as in `it.trim_left(' ')`, or ''
+// for any other call
+fn (f &V3File) it_method(id flat.NodeId) string {
+	if f.node(id).kind != .call {
+		return ''
+	}
+	ks := f.kids(id)
+	if ks.len == 0 || f.node(ks[0]).kind != .selector {
+		return ''
+	}
+	cs := f.kids(ks[0])
+	if cs.len != 1 || f.node(cs[0]).kind != .ident || f.node(cs[0]).value != 'it' {
+		return ''
+	}
+	return f.node(ks[0]).value
 }
 
 // match_pattern_type is the type a `match` branch's pattern names, which a subject
