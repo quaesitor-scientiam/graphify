@@ -2978,6 +2978,568 @@ fn test_report_counts_builtin_type_references_apart_from_unresolved() {
 	assert r.contains('- calls: extracted 0, inferred 0, external 2, unresolved 1')
 }
 
+fn test_report_counts_v3_primitives_and_undeclared_host_types_apart_from_unresolved() {
+	// V3 has 128-bit integers, which no file declares, and a `C.` or `JS.` type
+	// that nothing in the program declares (resolve_edges marks it undeclared) is
+	// in a system header or the JS host
+	mut g := Graph{}
+	g.symbols << Symbol{
+		id:   'demo.f'
+		name: 'f'
+		kind: .function
+		file: 'demo.v'
+	}
+	for to in ['u128', 'i128', 'C.Cursor', 'JS.EveryFn', 'C.timespec', 'Mystery'] {
+		g.edges << Edge{
+			from:       'demo.f'
+			to:         to
+			kind:       .references
+			provenance: if to in ['C.Cursor', 'JS.EveryFn'] { .undeclared } else { .extracted }
+		}
+	}
+	// `C.timespec` stands for one declared several times that doesn't resolve
+	r := g.report()
+	assert r.contains('- references: extracted 0, inferred 0, built-in 2, external 2, unresolved 2'), r
+}
+
+fn test_a_c_or_js_type_reference_names_only_a_c_or_js_declaration() {
+	// A reference keeps the `C.` or `JS.` it is written with, and names the nearest C
+	// or JS declaration of that name. It was recorded without it, so `C.Cursor` went
+	// to the one V struct named Cursor, `JS.Number` to the V struct Number in the
+	// referencing module, and the bare `Window` was ambiguous with `C.Window`. A V
+	// type of the same name is not the C or JS one, `EveryFn` for `JS.EveryFn` too:
+	// with no such declaration, the reference keeps its name and is external.
+	g := graph_of({
+		'vlib/x11/x11.c.v':          'module x11
+
+pub type C.XID = u64
+
+pub type C.Window = C.XID
+
+pub type Window = C.Window
+
+pub struct C.XEvent {
+	typ int
+}
+
+pub struct Display {
+	win    C.Window
+	root   Window
+	ev     C.XEvent
+	cursor C.Cursor
+}
+'
+		'vlib/ui/ui.v':              'module ui
+
+pub struct Cursor {
+	x int
+}
+'
+		'vlib/builtin/js/jsfns.js.v': 'module builtin
+
+pub interface JS.Number {}
+'
+		'vlib/js/dom/number.v':      'module dom
+
+pub struct Number {
+	n int
+}
+'
+		'vlib/js/dom/dom.js.v':      'module dom
+
+type EveryFn = fn (JS.Number) bool
+
+pub interface JS.Point {
+	x JS.Number
+	every(JS.EveryFn) bool
+}
+'
+	})
+	display := g.edges.filter(it.kind == .references && it.from == 'vlib.x11.Display').map(it.to)
+	assert display == ['C.Window', 'vlib.x11.Window', 'vlib.x11.C.XEvent', 'C.Cursor'], display.str()
+	window := g.edges.filter(it.kind == .references && it.from == 'vlib.x11.Window').map(it.to)
+	assert window == ['C.Window'], window.str()
+	point := g.edges.filter(it.kind == .references && it.from.starts_with('vlib.js.dom.Point')).map(it.to)
+	assert 'vlib.builtin.js.Number' in point && 'JS.EveryFn' in point, point.str()
+	assert !g.edges.any(it.kind == .references
+		&& it.to in ['vlib.ui.Cursor', 'vlib.js.dom.Number', 'vlib.js.dom.EveryFn'])
+	r := g.report()
+	assert r.contains('- references: extracted '), r
+	assert r.contains(', external 2, '), r
+}
+
+fn test_a_sum_type_references_the_struct_of_each_named_variant() {
+	// V3 declares each variant of `type Expr = IntLit(int) | Void` as a hidden
+	// struct, `Expr@variant@IntLit { payload int }` and `Expr@variant@Void {}`, and
+	// the sum type holds those structs. Its reference kept only the variant's name,
+	// `IntLit`, which nothing declares, or named another type: the alias `Void`
+	// beside it, the `Nil` struct of another module, the `Count` an import selects.
+	// A variant is written `Expr.Count`, never by its name alone, so no type of
+	// that name is it; the variant's struct references its payload's type.
+	g := graph_of({
+		'lib/expr.v':    'module lib
+
+import other { Count }
+
+struct Point {
+	x int
+}
+
+type Void = int
+
+type Expr = IntLit(int) | Count(string) | Pt(Point) | Void | Nil
+
+pub type Opt[T] = Some(T) | Nothing
+'
+		'other/other.v': 'module other
+
+pub struct Count {}
+
+pub struct Nil {}
+'
+	})
+	syms := maps_by_id(g.symbols)
+	assert syms['lib.Expr'].signature == 'type Expr = Expr@variant@IntLit | Expr@variant@Count | Expr@variant@Pt | Expr@variant@Void | Expr@variant@Nil'
+	expr := g.edges.filter(it.kind == .references && it.from == 'lib.Expr').map(it.to)
+	assert expr == ['lib.Expr@variant@IntLit', 'lib.Expr@variant@Count', 'lib.Expr@variant@Pt',
+		'lib.Expr@variant@Void', 'lib.Expr@variant@Nil'], expr.str()
+	opt := g.edges.filter(it.kind == .references && it.from == 'lib.Opt').map(it.to)
+	assert opt == ['lib.Opt@variant@Some', 'lib.Opt@variant@Nothing'], opt.str()
+	pt := g.edges.filter(it.kind == .references && it.from == 'lib.Expr@variant@Pt').map(it.to)
+	assert pt == ['lib.Point'], pt.str()
+	assert !g.edges.any(it.kind == .references && it.to in ['lib.Void', 'other.Count', 'other.Nil'])
+}
+
+// two_strings are builtin's `string` and the JS builtin's in vlib/builtin/js, as V's
+// tree has them, so a bare `string` never resolves by its name alone
+const two_strings = {
+	'vlib/builtin/string.v':       'module builtin
+
+pub struct string {
+	len int
+}
+'
+	'vlib/builtin/js/string.js.v': 'module builtin
+
+pub struct string {
+	str int
+}
+'
+}
+
+// built_graph_of is graph_of with the steps build_graph takes in between: ids
+// declared more than once in a build unit are told apart before edges resolve
+fn built_graph_of(files map[string]string) Graph {
+	mut g := Graph{}
+	for rel, src in files {
+		syms, edges := extract_v_text(src, rel)
+		g.symbols << syms
+		g.edges << edges
+	}
+	disambiguate_ids(mut g)
+	resolve_edges(mut g)
+	return g
+}
+
+fn refs_of(g Graph, from string) []string {
+	return g.edges.filter(it.kind == .references && it.from == from).map(it.to)
+}
+
+fn test_a_variadic_c_or_js_type_keeps_its_qualifier() {
+	// `...JS.Any` left its dots on the qualifier, so the reference was recorded as the
+	// bare `Any` and matched V types of that name
+	g := graph_of({
+		'vlib/builtin/js/jsfns.js.v': 'module builtin
+
+pub interface JS.Any {}
+'
+		'vlib/json2/types.v':         'module json2
+
+pub type Any = int | string
+'
+		'vlib/js/dom/dom.js.v':       'module dom
+
+pub interface JS.ChildNode {
+	after(nodes ...JS.Any)
+}
+'
+	})
+	refs := refs_of(g, 'vlib.js.dom.ChildNode.after')
+	assert refs == ['vlib.builtin.js.Any'], refs.str()
+}
+
+fn test_a_type_in_a_module_main_directory_with_no_main_is_seen_by_its_files() {
+	// `v test` builds a `module main` directory with no `fn main` together, so the
+	// `Country` in country.v is the one country_cases.v names, as for an alias
+	// conversion. A test file's own types stay its own.
+	g := graph_of({
+		'vlib/v/tests/generic_calls/country.v':       'module main
+
+pub enum Country {
+	us
+	fr
+}
+'
+		'vlib/v/tests/generic_calls/country_cases.v': 'module main
+
+pub fn Country.cases() []Country {
+	return []Country{}
+}
+'
+		'vlib/v/tests/structs/struct_test.v':         'module main
+
+struct Country {
+	name string
+}
+
+fn test_country() {}
+'
+	})
+	refs := refs_of(g, 'vlib.v.tests.generic_calls.Country__static__cases')
+	assert refs == ['vlib.v.tests.generic_calls.Country'], refs.str()
+}
+
+fn test_a_type_declared_once_per_platform_resolves_its_field_types() {
+	// An id declared in two files has no one site, and only a function or method got
+	// one per file back, so `string` in a struct declared once per platform had no
+	// locality to pick builtin's by (`gg.Config` in gg.c.v and gg.js.v).
+	mut files := two_strings.clone()
+	files['vlib/fasthttp/fasthttp_linux.v'] = 'module fasthttp
+
+pub struct Server {
+	host string
+}
+'
+	files['vlib/fasthttp/fasthttp_windows.v'] = 'module fasthttp
+
+pub struct Server {
+	host string
+}
+'
+	g := built_graph_of(files)
+	refs := refs_of(g, 'vlib.fasthttp.Server')
+	assert refs == ['vlib.builtin.string', 'vlib.builtin.string'], refs.str()
+}
+
+fn test_a_bare_type_name_is_the_builtins_when_an_import_ends_like_a_builtin_directory() {
+	// `import wasm` reaches vlib/builtin/wasm by its last segment as well as vlib/wasm,
+	// so builtin's `string` and the wasm builtin's both looked visible. A bare type
+	// name is the caller's module's, or else builtin's, as V reads it.
+	mut files := two_strings.clone()
+	files['vlib/builtin/wasm/string.v'] = 'module builtin
+
+pub struct string {
+	str int
+}
+'
+	files['vlib/wasm/module.v'] = 'module wasm
+
+pub struct Module {}
+'
+	files['examples/wasm_codegen/main.v'] = 'import wasm
+
+fn save(m wasm.Module, path string) {}
+
+fn main() {}
+'
+	files['examples/wasm_codegen/add.v'] = 'import wasm
+
+fn main() {}
+'
+	g := built_graph_of(files)
+	refs := refs_of(g, 'examples.wasm_codegen.save')
+	assert 'vlib.builtin.string' in refs, refs.str()
+}
+
+fn test_a_function_repeated_under_a_top_level_comptime_if_resolves_its_types() {
+	// A function declared in each branch of a top-level `$if` repeats one id in one
+	// `module main` test file. The repeat made the id unaddressable, which also kept
+	// its site from coming back, though every copy is in that one file.
+	mut files := two_strings.clone()
+	files['vlib/v/tests/comptime/top_test.v'] = "module main
+
+\$if new_1 ? {
+	pub fn ret() string {
+		return 'a'
+	}
+} \$else {
+	pub fn ret() string {
+		return 'b'
+	}
+}
+
+fn test_main() {
+	assert ret() == 'a'
+}
+"
+	g := built_graph_of(files)
+	refs := refs_of(g, 'vlib.v.tests.comptime.ret@vlib/v/tests/comptime/top_test.v')
+	assert refs.len == 2 && refs.all(it == 'vlib.builtin.string'), refs.str()
+}
+
+fn test_a_c_struct_has_an_id_apart_from_a_v_type_of_its_name() {
+	// `struct C.Counter` and the alias `type Counter = C.Counter` are two types, but
+	// both had the id `vlib.bridge.Counter`, so the alias's reference to `C.Counter`
+	// was a loop to itself, and a reference to either named both. The same held for
+	// a V type in another file of the module (builtin's `interface IError` and
+	// `struct C.IError`). A C struct's id is `<module>.C.<name>`, as the ids of its
+	// methods already begin.
+	g := graph_of({
+		'vlib/bridge/bridge.c.v': 'module bridge
+
+pub struct C.Counter {
+	value int
+	label Label
+}
+
+pub type Counter = C.Counter
+
+pub struct Holder {
+	value C.Counter
+}
+
+pub fn (c C.Counter) read() int {
+	return c.value
+}
+
+pub fn (c Counter) read() int {
+	return c.value + 100
+}
+
+pub fn render(c Counter) string {
+	return c.label.show()
+}
+'
+		'vlib/bridge/label.v':    'module bridge
+
+pub struct Label {
+	text string
+}
+
+pub fn (l Label) show() string {
+	return l.text
+}
+
+pub struct Badge {}
+
+pub fn (b Badge) show() string {
+	return b.str()
+}
+
+pub interface Event {
+	name() string
+}
+
+pub fn handle(e Event) {}
+'
+		'vlib/bridge/event.c.v':  'module bridge
+
+pub struct C.Event {
+	code int
+}
+
+fn C.poll_event(e &C.Event) int
+'
+	})
+	c_struct := g.symbols.filter(it.kind == .struct_ && it.name == 'Counter')
+	assert c_struct.map(it.id) == ['vlib.bridge.C.Counter'], c_struct.str()
+	fields := g.symbols.filter(it.kind == .field && it.name == 'value' && it.file == 'vlib/bridge/bridge.c.v')
+	assert fields.map(it.parent) == ['vlib.bridge.C.Counter', 'vlib.bridge.Holder'], fields.str()
+	assert g.symbols.filter(it.id == 'vlib.bridge.Counter').map(it.kind) == [SymbolKind.type_alias]
+	assert refs_of(g, 'vlib.bridge.Counter') == ['vlib.bridge.C.Counter']
+	assert refs_of(g, 'vlib.bridge.Holder') == ['vlib.bridge.C.Counter']
+	assert 'vlib.bridge.C.Counter' in refs_of(g, 'vlib.bridge.C.Counter.read')
+	assert 'vlib.bridge.Counter' in refs_of(g, 'vlib.bridge.Counter.read')
+	assert g.symbols.filter(it.id == 'vlib.bridge.Event').map(it.kind) == [SymbolKind.interface_]
+	assert 'vlib.bridge.Event' in refs_of(g, 'vlib.bridge.handle')
+	assert 'vlib.bridge.C.Event' in refs_of(g, 'C.poll_event')
+	// a field reached through the alias still has the C struct's field type, which
+	// picks Label's `show` from Badge's: a bare name is not the C struct beside it
+	calls := g.edges.filter(it.kind == .calls && it.from == 'vlib.bridge.render').map(it.to)
+	assert calls == ['vlib.bridge.Label.show'], calls.str()
+}
+
+fn test_a_c_struct_beside_its_alias_in_a_test_program_resolves_its_references() {
+	// In a directory of `module main` tests, `struct C.Size` with `type Size = C.Size`
+	// in one file, and `struct C.Foo` with `type Foo = C.Foo` where other tests declare
+	// `struct C.Foo` and `struct Foo`, came out as one id, `id@file` for the second
+	// pair, for both declarations. Two declarations of an id in a standalone program
+	// make it unaddressable, so every reference to the C struct and to the alias was
+	// refused.
+	g := built_graph_of({
+		'vlib/v/tests/c_structs/return_csize_test.v':     '#include "@VMODROOT/csize.h"
+
+struct C.Size {
+	width int
+}
+
+type Size = C.Size
+
+fn get_size() C.Size {
+	return C.Size{11}
+}
+
+fn get_csize() Size {
+	return Size(C.Size{11})
+}
+
+fn test_return_csize() {}
+'
+		'vlib/v/tests/c_structs/arr_map_test.c.v':       'module main
+
+struct C.Foo {
+	a int
+}
+
+type Foo = C.Foo
+
+struct GameObject {
+	b []Foo
+}
+
+fn test_main() {}
+'
+		'vlib/v/tests/c_structs/sumtype_test.c.v':       'struct C.Foo {
+	a int
+}
+
+fn test_cstruct() {}
+'
+		'vlib/v/tests/c_structs/default_value_test.c.v': 'struct Foo {
+	a int
+}
+
+fn test_default() {}
+'
+	})
+	cs := 'vlib.v.tests.c_structs'
+	assert refs_of(g, '${cs}.get_size') == ['${cs}.C.Size']
+	assert refs_of(g, '${cs}.Size') == ['${cs}.C.Size']
+	assert refs_of(g, '${cs}.get_csize') == ['${cs}.Size']
+	foo := '${cs}.Foo@vlib/v/tests/c_structs/arr_map_test.c.v'
+	assert refs_of(g, foo) == ['${cs}.C.Foo@vlib/v/tests/c_structs/arr_map_test.c.v']
+	assert refs_of(g, '${cs}.GameObject') == [foo]
+}
+
+fn test_a_c_struct_repeated_under_a_top_level_comptime_if_in_a_program_resolves() {
+	// A C struct declared in each branch of a top-level `$if` repeats one id in one
+	// `module main` test file, as a function does. Its copies in that one file are one
+	// declaration, as copies in an ordinary module's files are, so a reference to it
+	// and a call of the function resolve. Two kinds of declaration under one id are
+	// two declarations, and a reference to that id still doesn't resolve.
+	g := built_graph_of({
+		'vlib/v/tests/fns/closure_test.c.v': "module main
+
+\$if windows {
+	struct C.ClosureMutex {
+		lock voidptr
+	}
+	fn ret() int {
+		return 1
+	}
+} \$else {
+	struct C.ClosureMutex {
+		mutex voidptr
+	}
+	fn ret() int {
+		return 2
+	}
+}
+
+struct C.Closure {
+	mtx C.ClosureMutex
+}
+
+struct Twice {}
+
+type Twice = int
+
+fn take(t Twice) {}
+
+fn test_closure() {
+	assert ret() > 0
+}
+"
+	})
+	file := 'vlib/v/tests/fns/closure_test.c.v'
+	assert refs_of(g, 'vlib.v.tests.fns.C.Closure') == ['vlib.v.tests.fns.C.ClosureMutex@${file}']
+	calls := g.edges.filter(it.kind == .calls && it.from == 'vlib.v.tests.fns.test_closure').map(it.to)
+	assert calls == ['vlib.v.tests.fns.ret@${file}'], calls.str()
+	assert refs_of(g, 'vlib.v.tests.fns.take') == ['Twice']
+}
+
+fn test_a_c_struct_declared_in_modules_the_reference_cannot_tell_apart_stays_unresolved() {
+	// `C.timespec` is declared by os and by time. From picoev, which imports neither in
+	// the referencing file, nothing picks one: the reference stays unresolved, neither
+	// linked to one of them nor called undeclared. A file that imports time names
+	// time's.
+	g := graph_of({
+		'vlib/os/sleeping.c.v':           'module os
+
+pub struct C.timespec {
+	tv_sec i64
+}
+'
+		'vlib/time/time_nix.c.v':         'module time
+
+pub struct C.timespec {
+	tv_sec i64
+}
+'
+		'vlib/picoev/loop_macos.c.v':     'module picoev
+
+fn C.kevent(kq i32, timeout &C.timespec) i32
+'
+		'vlib/fasthttp/fasthttp_bsd.c.v': 'module fasthttp
+
+import time
+
+fn wait(ts &C.timespec) {}
+'
+	})
+	kevent := g.edges.filter(it.kind == .references && it.from == 'C.kevent' && it.to.contains('timespec'))
+	assert kevent.len == 1 && kevent[0].to == 'C.timespec' && kevent[0].provenance != .undeclared, kevent.str()
+	assert refs_of(g, 'vlib.fasthttp.wait') == ['vlib.time.C.timespec']
+}
+
+fn test_a_global_that_shares_a_colliding_id_keeps_its_references() {
+	// The functions `value` of two test files collide, so their edges are renamed to
+	// `id@file`. A global of that id is not one of the kinds renamed, and its edges
+	// were renamed too, to an id that names no symbol.
+	mut files := two_strings.clone()
+	files['vlib/v/tests/a_test.v'] = 'module main
+
+fn value(n int) int {
+	return n
+}
+
+fn test_a() {}
+'
+	files['vlib/v/tests/b_test.v'] = 'module main
+
+fn value(n int) int {
+	return n
+}
+
+fn test_b() {}
+'
+	files['vlib/v/tests/c_test.v'] = '@[translated]
+module main
+
+__global (
+	value string
+)
+
+fn test_c() {}
+'
+	g := built_graph_of(files)
+	ids := g.symbols.map(it.id)
+	assert g.symbols.any(it.id == 'vlib.v.tests.value' && it.kind == .global)
+	orphans := g.edges.filter(it.kind == .references && it.from !in ids)
+	assert orphans.len == 0, orphans.map('${it.from} -> ${it.to}').str()
+	assert refs_of(g, 'vlib.v.tests.value') == ['vlib.builtin.string']
+}
+
 fn test_parameter_types_resolve_method_calls() {
 	// `s.contains(x)` inside `fn f(s string)` needs no inference: the type is
 	// written on the declaration. Each call has a same-named decoy method in
@@ -3095,6 +3657,96 @@ pub mut:
 	for e in fr.edges {
 		assert !e.to.contains('_x2f_') && !e.to.contains('_x5c_'), e.to
 	}
+}
+
+fn test_an_anonymous_struct_is_referenced_through_the_types_of_its_fields() {
+	// V3 names an anonymous struct or union after its file and a counter that
+	// starts again in each file, so `_VAnonStruct1` here and in vlib/other are
+	// different structs, and no declaration has the name: a reference to it
+	// never resolved. The declaration that writes `struct { ... }` references
+	// the types of its fields instead, through nested ones too, as it
+	// references `Item` for a field of type `[]Item`.
+	g := graph_of({
+		'vlib/cfg/cfg.v':     'module cfg
+
+pub struct Item {
+	n int
+}
+
+pub enum Tag {
+	x
+}
+
+pub struct Holder {
+	name string
+	opts ?struct {
+		item  Item
+		inner struct {
+			items []Item
+			u     union {
+				a f32
+				b Tag
+			}
+		}
+	}
+}
+
+pub fn run(params struct {
+	tag Tag
+}) ?struct {
+	item Item
+} {
+	return none
+}
+
+pub type Config = struct {
+	holder Holder
+}
+
+type Check = fn (struct {
+	item Item
+}) bool
+
+pub interface Source {
+	cfg struct {
+		tag Tag
+	}
+	get(o struct {
+		item Item
+	}) ?struct {
+		tag Tag
+	}
+}
+
+__global last struct {
+	holder Holder
+}
+'
+		'vlib/other/other.v': 'module other
+
+struct Box {
+	val struct {
+		v int
+	}
+}
+'
+	})
+	refs := fn [g] (from string) []string {
+		return g.edges.filter(it.kind == .references && it.from == from).map(it.to)
+	}
+	assert refs('vlib.cfg.Holder') == ['string', 'vlib.cfg.Item', 'f32', 'vlib.cfg.Tag'], refs('vlib.cfg.Holder').str()
+	assert refs('vlib.cfg.run') == ['vlib.cfg.Tag', 'vlib.cfg.Item'], refs('vlib.cfg.run').str()
+	assert refs('vlib.cfg.Config') == ['vlib.cfg.Holder'], refs('vlib.cfg.Config').str()
+	// a function type's parameters are read from its text, as type_text wrote it
+	assert refs('vlib.cfg.Check') == ['vlib.cfg.Item', 'bool'], refs('vlib.cfg.Check').str()
+	assert refs('vlib.cfg.Source') == ['vlib.cfg.Tag'], refs('vlib.cfg.Source').str()
+	assert refs('vlib.cfg.Source.get') == ['vlib.cfg.Item', 'vlib.cfg.Tag'], refs('vlib.cfg.Source.get').str()
+	assert refs('vlib.cfg.last') == ['vlib.cfg.Holder'], refs('vlib.cfg.last').str()
+	assert refs('vlib.other.Box') == ['int'], refs('vlib.other.Box').str()
+	assert !g.edges.any(it.to.contains('Anon')), g.edges.filter(it.to.contains('Anon')).str()
+	// the field is still a symbol, with its type as V 0.5.2 named it
+	opts := g.symbols.filter(it.id == 'vlib.cfg.Holder.opts')
+	assert opts.len == 1 && opts[0].signature.starts_with('opts ?_VAnonStruct'), opts.str()
 }
 
 fn test_if_guarded_functions_keep_their_calls_on_every_host() {
@@ -7349,6 +8001,25 @@ fn test_a_generic_struct_in_a_field_type_instantiates_its_type_parameter() {
 	targets := g.edges.filter(it.kind == .calls && it.from == 'demo.Box[T].total').map(it.to)
 	assert 'demo.Pen.weight' in targets, targets.str()
 	assert 'demo.Other.weight' !in targets, targets.str()
+}
+
+fn test_a_generic_struct_in_a_field_of_a_renamed_struct_instantiates_its_type_parameter() {
+	// Holder is declared in two test programs, so its id is told apart by file,
+	// `vlib.v.tests.Holder@vlib/v/tests/a_test.v`, and the module its field type is
+	// written in was read off that id up to its last dot, which is in the file name
+	root := write_tree('generic_struct_field_renamed_owner', {
+		'vlib/v/tests/box.v':    'module main\n\npub struct Pen {\n}\n\npub fn (p Pen) weight() int {\n\treturn 2\n}\n\npub struct Other {\n}\n\npub fn (o Other) weight() int {\n\treturn 3\n}\n\npub struct Box[T] {\n\titem T\n}\n\npub fn (b Box[T]) total() int {\n\treturn b.item.weight()\n}\n'
+		'vlib/v/tests/a_test.v': 'module main\n\nstruct Holder {\n\tbox Box[Pen]\n}\n\nfn test_a() {}\n'
+		'vlib/v/tests/b_test.v': 'module main\n\nstruct Holder {\n\tn int\n}\n\nfn test_b() {}\n'
+	})
+	defer {
+		os.rmdir_all(root) or {}
+	}
+	g := build_graph(Options{ root: root })
+	assert g.symbols.any(it.id == 'vlib.v.tests.Holder@vlib/v/tests/a_test.v')
+	targets := g.edges.filter(it.kind == .calls && it.from == 'vlib.v.tests.Box[T].total').map(it.to)
+	assert 'vlib.v.tests.Pen.weight' in targets, targets.str()
+	assert 'vlib.v.tests.Other.weight' !in targets, targets.str()
 }
 
 fn test_a_static_generic_call_with_a_type_argument_types_its_result() {

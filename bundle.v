@@ -121,7 +121,7 @@ pub fn (g Graph) report() string {
 	}
 	b << ''
 	b << '## Edges by provenance'
-	b << '`extracted` = unique name or (calls only) a parser-typed receiver; `inferred` = picked among several real candidates by the inferred receiver type or by locality/visibility; `built-in` = a primitive type such as `int`, which has no declaration to resolve to; `external` = a call to a `C.` or `JS.` function; `undeclared` = a call with no declaration to resolve to, of a function value or a method V provides itself (`thread.wait()`); `unresolved` = name stayed ambiguous or unknown.'
+	b << '`extracted` = unique name or (calls only) a parser-typed receiver; `inferred` = picked among several real candidates by the inferred receiver type or by locality/visibility; `built-in` = a primitive type such as `int`, which has no declaration to resolve to; `external` = a call to a `C.` or `JS.` function, or a `C.` or `JS.` type that nothing in the program declares; `undeclared` = a call with no declaration to resolve to, of a function value or a method V provides itself (`thread.wait()`); `unresolved` = name stayed ambiguous or unknown.'
 	b << '- calls: ${calls_prov.str()}'
 	b << '- references: ${refs_prov.str()}'
 	b << '- embeds: ${embeds_prov.str()}'
@@ -200,7 +200,7 @@ mut:
 	extracted  int
 	inferred   int
 	builtin    int // a primitive type name, see builtin_type_names
-	external   int // a call to a `C.` or `JS.` function
+	external   int // a call to a `C.` or `JS.` function, or a `C.` or `JS.` type nothing declares
 	undeclared int // a call with no declaration, see EdgeProvenance
 	unresolved int
 }
@@ -216,9 +216,9 @@ fn (c ProvCounts) str() string {
 // `map`, which vlib/builtin declares as structs, they have no declaration,
 // so a reference to one can never resolve; on the V compiler's own tree they
 // were 35,072 of 36,625 unresolved references, hiding the ones worth a look.
-const builtin_type_names = ['bool', 'i8', 'i16', 'int', 'i32', 'i64', 'u8', 'byte', 'u16', 'u32',
-	'u64', 'usize', 'isize', 'f32', 'f64', 'rune', 'char', 'voidptr', 'byteptr', 'charptr',
-	'void', 'any', 'none', 'nil', 'thread', 'chan', 'int_literal', 'float_literal']
+const builtin_type_names = ['bool', 'i8', 'i16', 'int', 'i32', 'i64', 'i128', 'u8', 'byte', 'u16',
+	'u32', 'u64', 'u128', 'usize', 'isize', 'uint', 'f32', 'f64', 'rune', 'char', 'voidptr', 'byteptr',
+	'charptr', 'void', 'any', 'none', 'nil', 'thread', 'chan', 'int_literal', 'float_literal']
 
 // count_provenance buckets every edge of `kind` by how (and whether) its `to`
 // was resolved. provenance only means something once `to` is a real symbol
@@ -239,7 +239,13 @@ fn count_provenance(idx Index, edges []Edge, kind EdgeKind) ProvCounts {
 				// extract_from_ast), and its body is foreign code anyway
 				c.external++
 			} else if e.provenance == .undeclared {
-				c.undeclared++
+				// a type is undeclared only when it is a C or JS one no
+				// declaration names (see host_type_undeclared)
+				if e.kind == .calls {
+					c.undeclared++
+				} else {
+					c.external++
+				}
 			} else {
 				c.unresolved++
 			}

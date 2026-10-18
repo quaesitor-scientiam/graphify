@@ -82,7 +82,7 @@ Pipeline: `walk files -> extract_v_file(file) -> []Symbol + []Edge -> Graph -> e
 ### Model
 
 - `Symbol{ id, name, kind, signature, file, line, end_line, is_pub, parent, doc }` — `end_line` is what lets `get_body` read one declaration instead of a whole file; `doc` is the `//` block directly above it
-- `Edge{ from, to, kind, provenance }` — kinds: `defines`, `calls`, `imports`, `implements`, `embeds`, `references`; `provenance` (`extracted`/`inferred`) is set on resolved `calls`, `embeds`, and `references` edges, and `undeclared` on an unresolved call that has no declaration to resolve to — see the edge provenance item in Status
+- `Edge{ from, to, kind, provenance }` — kinds: `defines`, `calls`, `imports`, `implements`, `embeds`, `references`; `provenance` (`extracted`/`inferred`) is set on resolved `calls`, `embeds`, and `references` edges, and `undeclared` on an unresolved call that has no declaration to resolve to, or on a `C.` or `JS.` type reference that nothing declares — see the edge provenance item in Status
 - **`implements` is a declared vocabulary slot, not a planned feature.** V's interfaces are satisfied structurally — there is no `impl X for Y` syntax to read off the AST, so detecting it means matching a candidate's resolved method/field set (including through embeds) against every visible interface's, which needs a whole-program, fully-resolved type table exactly like `v/ast/table.does_type_implement_interface` builds — the opposite of graphify's per-file, parallel-worker, cacheable extraction. Investigated concretely, not just deferred by assumption: real yield data across 3 real corpora (V's own compiler, this project, and a real `veb`-framework app) found the obvious pitch — a project's own type implementing a project's own interface — in **zero of 288 measured pairs**, including a corpus that declares 6 of its own interfaces specifically to test this. The one real signal (app code satisfying a *framework's* interface) scored 2 meaningful pairs in the one corpus built to have it; the other 286 pairs were stdlib-satisfying-stdlib facts (`io.ReaderWriter`, `IError`) — the same static fact in every V program, not project-specific insight. Building this would mean a standing compiler-patch dependency (forking or upstreaming a change to `v/ast/table.v`) for a feature that, on the best evidence gathered, finds a handful of edges per framework-consumer project and nothing in most others.
 
 ### Emitters
@@ -371,12 +371,15 @@ pair came out as one id, so 429 `calls` edges on vlang pointed as much at a
 field as at the method. `separate_member_ids` gives such a field or const the
 id `<parent>::field::<name>` or `<parent>::const::<name>`, the form import ids
 already use, and leaves the plain id to the method or function that edges
-point at. Left as they are: a module id that equals a member of the parent
-module (`vlib.term.termios`, both a submodule and the C struct `termios`; 5
-ids), a `C.`/`JS.` type sharing an id with a V type of the same name (3), and
-duplicates written twice in the source itself (the same `C.` structs declared
-twice in `vlib/sokol/sapp/sapp_linux.c.v`; `import samename` next to `import
-samename as sn`).
+point at. A C struct has an id of its own, `<module>.C.<name>`, as its
+methods do, so it no longer shares one with a V type of its name (`type Size =
+C.Size`, the interface `IError`, the function `os.stat`; 9 ids on vlang, October
+2026). Left as they are: a module id that equals a member of the parent module
+(`vlib.rand.seed`, both a submodule and a function; 5 ids), a JS binding type
+sharing an id with a V type of the same name (`vlib.builtin.js.Error` and
+`vlib.builtin.js.Promise`), and duplicates written twice in the source itself
+(the same `C.` structs declared twice in `vlib/sokol/sapp/sapp_linux.c.v`;
+`import samename` next to `import samename as sn`).
 
 **Merging graphs.** Every id is namespaced by its source graph's label (its
 root directory name by default, or `--labels a,b,...`), unconditionally and

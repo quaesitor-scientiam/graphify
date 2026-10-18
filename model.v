@@ -39,7 +39,9 @@ pub enum EdgeKind {
 // or a method V provides without declaring it (`thread.wait()`,
 // `array.filter()`, `str()` on a type that doesn't declare one, a `@[flag]`
 // enum's `has()`). Its `to` stays the raw name. A call of a function-typed
-// field resolves to the field instead.
+// field resolves to the field instead. On a `references` or `embeds` edge,
+// `undeclared` marks a `C.` or `JS.` type that no declaration in the program
+// names (see host_type_undeclared), and the report counts it as external.
 pub enum EdgeProvenance {
 	extracted
 	inferred

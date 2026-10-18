@@ -80,6 +80,10 @@ mut:
 	// selected maps each name brought in by a selective import, `import util
 	// { shared }`, to its module's path
 	selected map[string]string
+	// anon maps each anonymous struct or union the parser made up for this
+	// file, by the name anon_type gives it (`_VAnonStruct1`), to its
+	// declaration (see add_type_ref)
+	anon map[string]flat.NodeId
 }
 
 fn extract_v3(path string, src string, rel string, real_path string) FileResult {
@@ -121,6 +125,16 @@ fn extract_v3(path string, src string, rel string, real_path string) FileResult 
 			starts << i + 1
 		}
 	}
+	// V3 declares an anonymous `struct { ... }` or `union { ... }` as a
+	// struct_decl outside the file's statements, and lists the names it made up
+	mut anon := map[string]flat.NodeId{}
+	if a.synthesized_anon_struct_types.len > 0 {
+		for i, n in a.nodes {
+			if n.kind == .struct_decl && n.value in a.synthesized_anon_struct_types {
+				anon[anon_type(n.value)] = flat.NodeId(i)
+			}
+		}
+	}
 	mut f := V3File{
 		a:           a
 		src:         src
@@ -128,6 +142,7 @@ fn extract_v3(path string, src string, rel string, real_path string) FileResult 
 		line_starts: starts
 		rel:         rel
 		real_path:   real_path
+		anon:        anon
 	}
 	syms, edges := f.extract(flat.NodeId(root))
 	return FileResult{
@@ -381,6 +396,10 @@ fn (f &V3File) type_text(t_ string) string {
 				j++
 			} else if t[j] == `.` && j + 1 < t.len && (t[j + 1].is_letter() || t[j + 1] == `_`) {
 				j++
+			} else if t[j..].starts_with(flat.named_variant_marker) {
+				// the struct V3 declares for a named variant, `Expr@variant@Count`, is
+				// one name: its `Count` is the variant's, not a type an import selects
+				j += flat.named_variant_marker.len
 			} else {
 				break
 			}
@@ -405,17 +424,27 @@ fn (f &V3File) type_text(t_ string) string {
 }
 
 // base_name keeps a type's final identifier, as V 0.5.2's base_type_name did:
-// `[]&ast.Expr` -> `Expr`, `veb.Middleware[Context]` -> `Middleware`.
+// `[]&ast.Expr` -> `Expr`, `veb.Middleware[Context]` -> `Middleware`. The
+// struct of a named variant is one identifier, `Expr@variant@Count`: the sum
+// type `type Expr = Count(int) | Void` declares it (see named_sum_type_decl in
+// v/parser), and the variant's name alone, `Count`, names no type.
 fn base_name(t string) string {
 	name := strip_generic_args(anon_type(t))
 	mut out := ''
-	for ch in name {
+	mut i := 0
+	for i < name.len {
+		ch := name[i]
 		if (ch >= `a` && ch <= `z`) || (ch >= `A` && ch <= `Z`) || (ch >= `0` && ch <= `9`)
 			|| ch == `_` {
 			out += ch.ascii_str()
+		} else if out != '' && name[i..].starts_with(flat.named_variant_marker) {
+			out += flat.named_variant_marker
+			i += flat.named_variant_marker.len
+			continue
 		} else {
 			out = ''
 		}
+		i++
 	}
 	return out
 }
@@ -424,7 +453,9 @@ fn base_name(t string) string {
 // bare name, `Base`, or with the path of the module it comes from,
 // `veb.Context` -> `veb.Context`, `[]json.Any` -> `x.json2.Any`, and `Image`
 // from `import sokol.gfx { Image }` -> `sokol.gfx.Image`, so that
-// resolve_type_ref doesn't take a local type of the same name for it.
+// resolve_type_ref doesn't take a local type of the same name for it. A C or JS
+// type keeps its qualifier, `C.Window` and `JS.Number`, since only a C or JS
+// declaration is that type.
 fn (f &V3File) type_ref(t string) string {
 	base := base_name(t)
 	name := strip_generic_args(anon_type(t))
@@ -434,7 +465,11 @@ fn (f &V3File) type_ref(t string) string {
 		for i > 0 && (head[i - 1].is_alnum() || head[i - 1] == `_` || head[i - 1] == `.`) {
 			i--
 		}
-		qual := head[i..]
+		// a variadic `...JS.Any` leaves its dots on the qualifier
+		qual := head[i..].trim_left('.')
+		if qual in ['C', 'JS'] {
+			return '${qual}.${base}'
+		}
 		// as written, `json.Any`, or as type_text renders it, `x.json2.Any`
 		if path := f.imports[qual] {
 			return '${path}.${base}'
@@ -452,6 +487,32 @@ fn (f &V3File) type_ref(t string) string {
 	return base
 }
 
+// add_type_ref records that `from` references the type written `t`, as
+// type_ref names it. An anonymous struct or union names no declaration: V3
+// names it after the file and a counter that starts again in each file, so
+// `_VAnonStruct1` is a different struct in each file that has one. `from`,
+// the declaration that writes the `struct { ... }`, references the types of
+// its fields instead, and of a nested one's fields.
+fn (f &V3File) add_type_ref(from string, t string, mut edges []Edge, mut seen map[string]bool) {
+	if f.anon.len > 0 {
+		name := base_name(t)
+		if id := f.anon[name] {
+			if name in seen {
+				return
+			}
+			seen[name] = true
+			for k in f.kids(id) {
+				fd := f.node(k)
+				if fd.kind == .field_decl {
+					f.add_type_ref(from, fd.typ_text(), mut edges, mut seen)
+				}
+			}
+			return
+		}
+	}
+	add_ref(from, f.type_ref(t), f.rel, mut edges, mut seen)
+}
+
 // recv_type renders a receiver type as walk_call stamps it: an unqualified type
 // gets this module's id, a qualified one keeps its module.
 fn (f &V3File) recv_type(t string) string {
@@ -464,6 +525,18 @@ fn (f &V3File) recv_type(t string) string {
 // (`@type`) and a `C.`/`JS.` prefix are dropped.
 fn decl_name(v string) string {
 	return v.replace('@static@', '__static__').all_after_last('.').trim_left('@')
+}
+
+// host_qualifier is the `C.` or `JS.` a declaration name starts with, which
+// decl_name drops, and '' for a V declaration.
+fn host_qualifier(v string) string {
+	return if v.starts_with('C.') {
+		'C.'
+	} else if v.starts_with('JS.') {
+		'JS.'
+	} else {
+		''
+	}
 }
 
 // source_name is a function's name as its declaration writes it: `Box.new` for the
@@ -840,13 +913,13 @@ fn (mut f V3File) extract_fn(id flat.NodeId, mut syms []Symbol, mut edges []Edge
 	})
 	mut rseen := map[string]bool{}
 	if is_method {
-		add_ref(fid, f.type_ref(recv_typ), f.rel, mut edges, mut rseen)
+		f.add_type_ref(fid, recv_typ, mut edges, mut rseen)
 	}
 	for i := start; i < params.len; i++ {
-		add_ref(fid, f.type_ref(f.node(params[i]).typ_text()), f.rel, mut edges, mut rseen)
+		f.add_type_ref(fid, f.node(params[i]).typ_text(), mut edges, mut rseen)
 	}
 	if n.typ_text() != '' && n.typ_text() != 'void' {
-		add_ref(fid, f.type_ref(n.typ_text()), f.rel, mut edges, mut rseen)
+		f.add_type_ref(fid, n.typ_text(), mut edges, mut rseen)
 	}
 	mut locals := map[string]string{}
 	mut vars := map[string]string{}
@@ -887,17 +960,21 @@ fn (mut f V3File) extract_struct(id flat.NodeId, mut syms []Symbol, mut edges []
 	if short == '' {
 		return
 	}
-	sid := '${f.mod_id}.${short}'
 	line := f.line_of(n.pos.offset)
 	is_pub := f.line_is_pub(line)
 	// a C struct, `struct C.name`, keeps its `C.` on the signature, which tells it from
-	// a V struct of the same name (see field_of)
-	c_prefix := if n.value.starts_with('C.') { 'C.' } else { '' }
+	// a V struct of the same name (see field_of), and a JS one its `JS.` (see
+	// resolve_type_ref)
+	host_prefix := host_qualifier(n.value)
+	// and on its id, `<module>.C.name`: it is a type of its own, not the V type `name`
+	// of its module, such as the alias `type name = C.name` beside it, which would
+	// otherwise share the id. Its methods are `<module>.C.name.method` already.
+	sid := if host_prefix == 'C.' { '${f.mod_id}.C.${short}' } else { '${f.mod_id}.${short}' }
 	f.add_symbol(mut syms, mut edges, Symbol{
 		id:        sid
 		name:      short
 		kind:      .struct_
-		signature: (if is_pub { 'pub ' } else { '' }) + 'struct ${c_prefix}${short}'
+		signature: (if is_pub { 'pub ' } else { '' }) + 'struct ${host_prefix}${short}'
 		file:      f.rel
 		line:      line
 		end_line:  f.line_of(n.pos.end)
@@ -940,7 +1017,7 @@ fn (mut f V3File) extract_struct(id flat.NodeId, mut syms []Symbol, mut edges []
 			parent:    sid
 		})
 		f.walk_initializer(.field, fname, fline, f.kids(k), mut edges)
-		add_ref(sid, f.type_ref(fd.typ_text()), f.rel, mut edges, mut rseen)
+		f.add_type_ref(sid, fd.typ_text(), mut edges, mut rseen)
 	}
 }
 
@@ -991,7 +1068,7 @@ fn (mut f V3File) extract_interface(id flat.NodeId, mut syms []Symbol, mut edges
 		id:        iid
 		name:      short
 		kind:      .interface_
-		signature: (if is_pub { 'pub ' } else { '' }) + 'interface ${short}'
+		signature: (if is_pub { 'pub ' } else { '' }) + 'interface ${host_qualifier(n.value)}${short}'
 		file:      f.rel
 		line:      line
 		end_line:  f.line_of(n.pos.end)
@@ -1015,13 +1092,13 @@ fn (mut f V3File) extract_interface(id flat.NodeId, mut syms []Symbol, mut edges
 				pn := f.node(pk)
 				if pn.kind == .param {
 					parts << '${pn.value} ${f.type_text(pn.typ_text())}'
-					add_ref(mid, f.type_ref(pn.typ_text()), f.rel, mut edges, mut mseen)
+					f.add_type_ref(mid, pn.typ_text(), mut edges, mut mseen)
 				}
 			}
 			mut sig := 'fn (${short}) ${m.value}(${parts.join(', ')})'
 			if m.typ_text() != '' && m.typ_text() != 'void' {
 				sig += ' ${f.type_text(m.typ_text())}'
-				add_ref(mid, f.type_ref(m.typ_text()), f.rel, mut edges, mut mseen)
+				f.add_type_ref(mid, m.typ_text(), mut edges, mut mseen)
 			}
 			f.add_symbol(mut syms, mut edges, Symbol{
 				id:        mid
@@ -1062,7 +1139,7 @@ fn (mut f V3File) extract_interface(id flat.NodeId, mut syms []Symbol, mut edges
 				is_pub:    is_pub
 				parent:    iid
 			})
-			add_ref(iid, f.type_ref(m.typ_text()), f.rel, mut edges, mut rseen)
+			f.add_type_ref(iid, m.typ_text(), mut edges, mut rseen)
 		}
 	}
 }
@@ -1128,7 +1205,7 @@ fn (mut f V3File) extract_globals(id flat.NodeId, mut syms []Symbol, mut edges [
 		f.walk_initializer(.global, g.value, line, value, mut edges)
 		if typ != '' {
 			mut rseen := map[string]bool{}
-			add_ref('${f.mod_id}.${g.value}', f.type_ref(g.typ_text()), f.rel, mut edges, mut rseen)
+			f.add_type_ref('${f.mod_id}.${g.value}', g.typ_text(), mut edges, mut rseen)
 		}
 	}
 }
@@ -1175,7 +1252,7 @@ fn (mut f V3File) extract_type(id flat.NodeId, mut syms []Symbol, mut edges []Ed
 	})
 	mut rseen := map[string]bool{}
 	for t in parts {
-		add_ref(tid, f.type_ref(t), f.rel, mut edges, mut rseen)
+		f.add_type_ref(tid, t, mut edges, mut rseen)
 	}
 }
 
