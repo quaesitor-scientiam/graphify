@@ -626,6 +626,24 @@ fn (inf &Infer) comptime_recipe(recipe string, file string) string {
 	return alts.join(recipe_alt)
 }
 
+// comptime_sites is `sites` (arg_sites) with comptime_recipe applied to each argument's recipe.
+// A `ta:` site names explicit type arguments, which have no narrowed step
+fn (inf &Infer) comptime_sites(sites string, file string) string {
+	mut out := []string{}
+	for site in sites.split(arg_site_end) {
+		if site.starts_with('ta:') {
+			out << site
+			continue
+		}
+		mut args := []string{}
+		for arg in site.split('\x0b') {
+			args << inf.comptime_recipe(arg, file)
+		}
+		out << args.join('\x0b')
+	}
+	return out.join(arg_site_end)
+}
+
 // names_interface reports whether `t`, with its `&` and `[]` taken off, names an interface
 fn (inf &Infer) names_interface(t string, file string) bool {
 	scope := inf.scope_of[file] or { FileScope{} }

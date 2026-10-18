@@ -950,8 +950,12 @@ fn resolve_edges(mut g Graph) {
 	// comptime_recipe), before any edge is followed, the expansion's sources included
 	for i in 0 .. g.edges.len {
 		e := g.edges[i]
-		if e.recv_recipe.contains('ctp:') {
-			g.edges[i] = Edge{ ...e, recv_recipe: inf.comptime_recipe(e.recv_recipe, e.file) }
+		if e.recv_recipe.contains('ctp:') || e.arg_sites.contains('ctp:') {
+			g.edges[i] = Edge{
+				...e
+				recv_recipe: inf.comptime_recipe(e.recv_recipe, e.file)
+				arg_sites:   inf.comptime_sites(e.arg_sites, e.file)
+			}
 		}
 	}
 	mut resolved := []Edge{cap: g.edges.len}
