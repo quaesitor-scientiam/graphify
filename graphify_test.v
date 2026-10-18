@@ -7281,6 +7281,21 @@ fn test_a_call_on_the_result_of_a_type_parameter_call_takes_that_result_type() {
 	assert 'demo.Other.size' !in targets, targets.str()
 }
 
+fn test_a_type_passed_through_two_generic_functions_reaches_the_struct_it_builds() {
+	// `outer[T]` passes its T to `inner[T]`, which builds a Ctx[T]: the Ctx's first() takes
+	// the types of outer's calls, Pen from run() and Other from Box[Other].total()
+	root := write_tree('two_deep_instantiation', {
+		'demo.v': 'module demo\n\npub struct Pen {\n}\n\npub fn (p Pen) weight() int {\n\treturn 2\n}\n\npub struct Other {\n}\n\npub fn (o Other) weight() int {\n\treturn 3\n}\n\npub struct Ctx[T] {\n\titems []T\n}\n\npub fn (c Ctx[T]) first() int {\n\treturn c.items[0].weight()\n}\n\npub fn inner[T](x T) int {\n\tc := &Ctx[T]{\n\t\titems: [x]\n\t}\n\treturn c.first()\n}\n\npub fn outer[T](x T) int {\n\treturn inner(x)\n}\n\npub fn run() int {\n\treturn outer(Pen{})\n}\n\npub struct Box[T] {\n\titem T\n}\n\npub fn (b Box[T]) total() int {\n\treturn outer(b.item)\n}\n\npub fn run_box() int {\n\tb := Box[Other]{\n\t\titem: Other{}\n\t}\n\treturn b.total()\n}\n'
+	})
+	defer {
+		os.rmdir_all(root) or {}
+	}
+	g := build_graph(Options{ root: root })
+	targets := g.edges.filter(it.kind == .calls && it.from == 'demo.Ctx[T].first').map(it.to)
+	assert 'demo.Pen.weight' in targets, targets.str()
+	assert 'demo.Other.weight' in targets, targets.str()
+}
+
 fn test_a_c_binding_result_type_picks_the_method_among_same_named_ones() {
 	// two types declare `size`, so only the result type of C.make_thing() can tell
 	// which one the call means

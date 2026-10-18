@@ -7,18 +7,28 @@ module graphify
 // one whose parameter is `[]T`), read from the argument recipes the extraction
 // recorded (Edge.arg_sites).
 
+// Flow says the types of one type parameter are the types of another: a generic
+// function that passes its own `T` on to another, `inner(x)` inside `outer[T]`, gives
+// `inner`'s `T` the types `outer`'s `T` has. A flow is followed until nothing is new.
+struct Flow {
+	dst string
+	src string
+}
+
 // expand_type_param_calls returns the edges with each method call on a type
-// parameter replaced by the methods of the types its function is called with, as
+// parameter replaced by the methods of the types the parameter stands for, as
 // `inferred` edges. A call with no such type stays as it was. `funcs` holds the
-// generic free functions and the methods of generic structs, by id. A method of a
-// generic struct, `Box[T].show`, is called on the types its struct is instantiated
-// with, at the receivers of its methods (`sources`, the edges as the extraction
-// recorded them, since a resolved edge drops its receiver) and in the types of the
-// struct fields that are generic instances (`fields`).
+// generic free functions and the methods and structs that have type parameters, by
+// id. A method of a generic struct, `Box[T].show`, is called on the types its struct is
+// instantiated with, at the receivers of its methods (`sources`, the edges as the
+// extraction recorded them, since a resolved edge drops its receiver) and in the types
+// of the struct fields that are generic instances (`fields`).
 fn expand_type_param_calls(edges []Edge, sources []Edge, fields []Symbol, mut inf Infer, funcs map[string]Symbol) []Edge {
-	// the types each type parameter of a generic function was given at its call
-	// sites, by `<function id>\x00<type parameter>`
-	mut types := map[string][]InferredType{}
+	// the types each type parameter stands for, by instance_key
+	mut instances := map[string][]InferredType{}
+	mut flows := []Flow{}
+	// the types a generic function's type parameter is given at its call sites, from
+	// the argument recipes
 	for e in edges {
 		if e.kind != .calls || e.is_method || e.arg_sites == '' {
 			continue
@@ -31,6 +41,8 @@ fn expand_type_param_calls(edges []Edge, sources []Edge, fields []Symbol, mut in
 		if tps.len == 0 {
 			continue
 		}
+		caller := funcs[e.from] or { Symbol{} }
+		caller_tps := generic_params(caller)
 		ptypes := param_types(callee.signature)
 		sites := e.arg_sites.split(arg_site_end)
 		for si, site in sites {
@@ -58,64 +70,61 @@ fn expand_type_param_calls(edges []Edge, sources []Edge, fields []Symbol, mut in
 						}
 						text = text[2..]
 					}
-					if text == '' || is_type_param_text(text) {
+					if text == '' {
 						continue
 					}
-					key := callee.id + '\x00' + tp
-					existing := types[key] or { []InferredType{} }
-					if !existing.any(it.text == text) {
-						mut known := existing.clone()
-						known << InferredType{
-							text: text
-							mod:  t.mod
-							file: t.file
+					dst := callee.id + '\x00' + tp
+					if passed := plain_param(text, t.mod, caller_tps) {
+						flows << Flow{
+							dst: dst
+							src: instance_key(caller, passed)
 						}
-						types[key] = known
+						continue
 					}
+					if is_type_param_text(text) {
+						continue
+					}
+					put_instance(mut instances, dst, InferredType{
+						text: text
+						mod:  t.mod
+						file: t.file
+					})
 				}
 			}
 		}
 	}
-	// the types each type parameter of a generic struct was instantiated with, by
-	// `<struct id>\x00<position of the parameter>`: at the receivers of its methods, and
-	// in the type of a field, `c Choi[Aa]`
-	mut owner_types := map[string][]InferredType{}
-	// an instance whose argument is the type parameter of a generic function, the
-	// `DiffContext[T]` that `diff[T]` builds, takes the types that function is called
-	// with, once those are known below
-	mut deferred := []DeferredInstance{}
+	// the types a generic struct's type parameters are instantiated with, at the
+	// receivers of its methods, and in the types of its fields
 	for e in sources {
 		if e.kind != .calls || !e.is_method {
 			continue
 		}
 		recv := inf.receiver(e) or { continue }
 		caller := funcs[e.from] or { Symbol{} }
-		caller_tps := generic_params(caller)
-		add_owner_types(mut owner_types, recv.text, recv.mod, recv.file, caller_tps)
-		if caller.kind == .function {
-			for i, arg in split_type_args(recv.text) {
-				if bare_type(arg) in caller_tps {
-					deferred << DeferredInstance{
-						owner:   owner_of(recv.text, recv.mod)
-						pos:     i
-						func_id: caller.id
-						tp:      bare_type(arg)
-					}
+		add_owner_instances(mut instances, mut flows, recv.text, recv.mod, recv.file, caller)
+	}
+	for f in fields {
+		// a field's type is written in its struct's module, and the struct's own type
+		// parameters pass on to it, as the parameters of a generic function do
+		own := funcs[f.parent] or { Symbol{} }
+		add_owner_instances(mut instances, mut flows, f.signature.all_after(' '), f.parent.all_before_last('.'), f.file, own)
+	}
+	// a type parameter that is passed on takes the types of the one it is passed from;
+	// a chain of generic calls is short, so a few rounds reach the fixed point
+	for _ in 0 .. 16 {
+		mut changed := false
+		for fl in flows {
+			for t in instances[fl.src] or { []InferredType{} } {
+				if put_instance(mut instances, fl.dst, t) {
+					changed = true
 				}
 			}
 		}
-	}
-	for f in fields {
-		// a field's type is written in its struct's module, and a type parameter of its
-		// struct is not an instance of anything
-		add_owner_types(mut owner_types, f.signature.all_after(' '), f.parent.all_before_last('.'), f.file, generic_params(funcs[f.parent] or { Symbol{} }))
-	}
-	for d in deferred {
-		for t in types[d.func_id + '\x00' + d.tp] or { []InferredType{} } {
-			put_owner_type(mut owner_types, d.owner, d.pos, t)
+		if !changed {
+			break
 		}
 	}
-	if types.len == 0 && owner_types.len == 0 {
+	if instances.len == 0 {
 		return edges
 	}
 	mut out := []Edge{cap: edges.len}
@@ -136,7 +145,7 @@ fn expand_type_param_calls(edges []Edge, sources []Edge, fields []Symbol, mut in
 		recv := inf.receiver(e) or {
 			// a call on the result of a call on a type parameter, `el.tag().bytes()`, is a
 			// call on what each instance's tag() returns
-			chained := chained_call_ids(e, caller, tps, types, owner_types, mut inf)
+			chained := chained_call_ids(e, caller, tps, instances, mut inf)
 			if chained.len == 0 {
 				out << e
 			}
@@ -152,39 +161,23 @@ fn expand_type_param_calls(edges []Edge, sources []Edge, fields []Symbol, mut in
 			}
 			continue
 		}
-		mut recv_text := bare_type(recv.text)
-		// a field or element typed by its owner's type parameter comes back qualified by
-		// the module, `demo.T` for `T`, which is still the parameter
-		if recv.mod != '' && recv_text.starts_with(recv.mod + '.')
-			&& recv_text[recv.mod.len + 1..] in tps {
-			recv_text = recv_text[recv.mod.len + 1..]
-		}
-		// a call of a field that holds a function, `self.func(a)` where `func T` and T is
-		// instantiated with a function type, calls that value, as no_method has it
-		if caller.kind == .method && owner_of(recv.text, recv.mod) == method_owner(caller) {
-			if field := inf.field_of(recv, e.to, e.file, 0) {
-				mut field_text := bare_type(field.text)
-				if recv.mod != '' && field_text.starts_with(recv.mod + '.') {
-					field_text = field_text[recv.mod.len + 1..]
-				}
-				mut pos := -1
-				for i, tp in tps {
-					if tp == field_text {
-						pos = i
+		recv_text := plain_param(recv.text, recv.mod, tps) or {
+			// a call of a field that holds a function, `self.func(a)` where `func T` and T
+			// is instantiated with a function type, calls that value, as no_method has it
+			if caller.kind == .method && owner_of(recv.text, recv.mod) == method_owner(caller) {
+				if field := inf.field_of(recv, e.to, e.file, 0) {
+					if field_text := plain_param(field.text, field.mod, tps) {
+						if (instances[instance_key(caller, field_text)] or { []InferredType{} }).any(it.text.starts_with('fn')) {
+							out << Edge{ ...e, provenance: .undeclared }
+							continue
+						}
 					}
 				}
-				if pos >= 0 && (owner_types[method_owner(caller) + '\x00' + pos.str()] or { []InferredType{} }).any(it.text.starts_with('fn')) {
-					out << Edge{ ...e, provenance: .undeclared }
-					continue
-				}
 			}
-		}
-		if recv_text !in tps {
 			out << e
 			continue
 		}
-		insts := type_param_instances(caller, tps, recv_text, types, owner_types)
-		if insts.len == 0 {
+		insts := instances[instance_key(caller, recv_text)] or {
 			out << e
 			continue
 		}
@@ -213,21 +206,63 @@ fn expand_type_param_calls(edges []Edge, sources []Edge, fields []Symbol, mut in
 	return out
 }
 
-// add_owner_types records one instance of a generic struct, `Box[Pen]` written in
-// module `mod`, under the struct and the position of each type argument. An argument
-// in `skip`, a type parameter of the enclosing declaration, is not a type.
-fn add_owner_types(mut owner_types map[string][]InferredType, text string, mod string, file string, skip []string) {
+// instance_key is the key of the types a type parameter `tp` of the declaration
+// `caller` stands for: `<function id>\x00<tp>` for a generic function, and
+// `<struct id>\x00<position of tp>` for a type parameter of a generic struct, which a
+// method or a field of the struct has. `tp` must be one of the caller's parameters.
+fn instance_key(caller Symbol, tp string) string {
+	if caller.kind == .function {
+		return caller.id + '\x00' + tp
+	}
+	mut pos := 0
+	for i, p in generic_params(caller) {
+		if p == tp {
+			pos = i
+		}
+	}
+	owner := if caller.kind == .method { method_owner(caller) } else { caller.id }
+	return owner + '\x00' + pos.str()
+}
+
+// plain_param is the type parameter a type text names, of those in `tps`: `T`, or
+// `demo.T` for a field or element typed by its owner's parameter, which the module
+// qualifies. none when the text names none of them.
+fn plain_param(text string, mod string, tps []string) ?string {
+	mut name := bare_type(text)
+	if mod != '' && name.starts_with(mod + '.') {
+		name = name[mod.len + 1..]
+	}
+	if name in tps {
+		return name
+	}
+	return none
+}
+
+// add_owner_instances records the type arguments of one instance of a generic struct,
+// `Box[Pen]` written in module `mod` inside the declaration `caller`. A concrete
+// argument is an instance of the struct at its position. An argument that is a type
+// parameter of `caller` passes that parameter's instances on, as a flow.
+fn add_owner_instances(mut instances map[string][]InferredType, mut flows []Flow, text string, mod string, file string, caller Symbol) {
 	args := split_type_args(text)
 	if args.len == 0 {
 		return
 	}
+	caller_tps := generic_params(caller)
 	owner := owner_of(text, mod)
 	for i, arg in args {
 		arg_text := bare_type(arg)
-		if arg_text == '' || arg_text in skip {
+		if arg_text == '' {
 			continue
 		}
-		put_owner_type(mut owner_types, owner, i, InferredType{
+		dst := owner + '\x00' + i.str()
+		if passed := plain_param(arg_text, mod, caller_tps) {
+			flows << Flow{
+				dst: dst
+				src: instance_key(caller, passed)
+			}
+			continue
+		}
+		put_instance(mut instances, dst, InferredType{
 			text: arg_text
 			mod:  mod
 			file: file
@@ -241,26 +276,17 @@ fn owner_of(text string, mod string) string {
 	return qualify_type_names(strip_generic_args(bare_type(text)), mod)
 }
 
-// put_owner_type records one type as an instance at a position of a generic struct,
-// unless it is recorded already.
-fn put_owner_type(mut owner_types map[string][]InferredType, owner string, pos int, t InferredType) {
-	key := owner + '\x00' + pos.str()
-	existing := owner_types[key] or { []InferredType{} }
-	if !existing.any(it.text == t.text) {
-		mut known := existing.clone()
-		known << t
-		owner_types[key] = known
+// put_instance records one type under a key unless it is recorded already, and
+// reports whether it was new.
+fn put_instance(mut instances map[string][]InferredType, key string, t InferredType) bool {
+	existing := instances[key] or { []InferredType{} }
+	if existing.any(it.text == t.text) {
+		return false
 	}
-}
-
-// deferred_instance is an instance of a generic struct whose type argument at `pos`
-// is the type parameter `tp` of the generic function `func_id` that names it, so its
-// types are that function's (see expand_type_param_calls).
-struct DeferredInstance {
-	owner   string
-	pos     int
-	func_id string
-	tp      string
+	mut known := existing.clone()
+	known << t
+	instances[key] = known
+	return true
 }
 
 // generic_params are a generic function's type parameters, a method's receiver type
@@ -273,27 +299,11 @@ fn generic_params(s Symbol) []string {
 	return s.recipe.split(',')
 }
 
-// type_param_instances are the types a type parameter of a generic caller stands for:
-// the types its function is called with, or for a method of a generic struct, the types
-// its struct is instantiated with at the same position.
-fn type_param_instances(caller Symbol, tps []string, tp string, types map[string][]InferredType, owner_types map[string][]InferredType) []InferredType {
-	if caller.kind == .method {
-		mut pos := 0
-		for i, p in tps {
-			if p == tp {
-				pos = i
-			}
-		}
-		return owner_types[method_owner(caller) + '\x00' + pos.str()] or { []InferredType{} }
-	}
-	return types[caller.id + '\x00' + tp] or { []InferredType{} }
-}
-
 // chained_call_ids are the methods a call reaches on the result of a method call on a
 // type parameter: `el.tag().bytes()` where `el` is T has the receiver recipe
 // `t:Choi[T] | f:src | [] | m:tag`, and the receiver of bytes() is what tag() returns on
-// each instance of T. none-empty only when the receiver is such a call.
-fn chained_call_ids(e Edge, caller Symbol, tps []string, types map[string][]InferredType, owner_types map[string][]InferredType, mut inf Infer) []string {
+// each instance of T. Empty unless the receiver is such a call.
+fn chained_call_ids(e Edge, caller Symbol, tps []string, instances map[string][]InferredType, mut inf Infer) []string {
 	steps := e.recv_recipe.split(recipe_sep)
 	if steps.len < 2 || !steps[steps.len - 1].starts_with('m:') {
 		return []string{}
@@ -303,16 +313,10 @@ fn chained_call_ids(e Edge, caller Symbol, tps []string, types map[string][]Infe
 		file:        e.file
 		recv_recipe: steps[..steps.len - 1].join(recipe_sep)
 	}) or { return []string{} }
-	mut tp := bare_type(prefix.text)
-	if prefix.mod != '' && tp.starts_with(prefix.mod + '.') {
-		tp = tp[prefix.mod.len + 1..]
-	}
-	if tp !in tps {
-		return []string{}
-	}
+	tp := plain_param(prefix.text, prefix.mod, tps) or { return []string{} }
 	method := steps[steps.len - 1][2..]
 	mut ids := []string{}
-	for t in type_param_instances(caller, tps, tp, types, owner_types) {
+	for t in instances[instance_key(caller, tp)] or { []InferredType{} } {
 		result_id := inf.method_on(t, method, e.file, 0) or { continue }
 		result := inf.returns(result_id) or { continue }
 		id := inf.method_on(result, e.to, e.file, 0) or { continue }
