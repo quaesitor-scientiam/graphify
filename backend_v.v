@@ -466,6 +466,13 @@ fn decl_name(v string) string {
 	return v.replace('@static@', '__static__').all_after_last('.').trim_left('@')
 }
 
+// source_name is a function's name as its declaration writes it: `Box.new` for the
+// static method `Box__static__new` that decl_name gives, which its `fn Box.new[T]`
+// header is found by.
+fn source_name(name string) string {
+	return name.replace('__static__', '.')
+}
+
 fn (mut f V3File) extract(root flat.NodeId) ([]Symbol, []Edge) {
 	mut syms := []Symbol{}
 	mut edges := []Edge{}
@@ -828,7 +835,7 @@ fn (mut f V3File) extract_fn(id flat.NodeId, mut syms []Symbol, mut edges []Edge
 		is_pub:    f.line_is_pub(line)
 		parent:    f.mod_id
 		doc:       doc_from(f.lines, line)
-		recipe:    if is_method { split_type_args(recv_typ).join(',') } else { f.generic_params(line, 'fn ${name}').join(',') }
+		recipe:    if is_method { split_type_args(recv_typ).join(',') } else { f.generic_params(line, 'fn ${source_name(name)}').join(',') }
 		tparams:   if is_method { f.method_tparams(line, name).join(',') } else { '' }
 	})
 	mut rseen := map[string]bool{}
@@ -860,7 +867,7 @@ fn (mut f V3File) extract_fn(id flat.NodeId, mut syms []Symbol, mut edges []Edge
 		recv_name: recv_name
 		recv_type: if is_method { '${f.mod_id}.${recv_typ.trim_left('&')}' } else { '' }
 		file:      f.rel
-		tparams:   if is_method { split_type_args(recv_typ) } else { f.generic_params(line, 'fn ${name}') }
+		tparams:   if is_method { split_type_args(recv_typ) } else { f.generic_params(line, 'fn ${source_name(name)}') }
 		locals:    locals
 		vars:      vars
 	}
