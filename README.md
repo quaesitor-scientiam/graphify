@@ -111,6 +111,20 @@ graphify export svg     --out graph.svg        # static, community-clustered nod
 graphify export html    --out graph.html       # the same, interactive: hover/lock/trace/zoom, + to drill into large communities
 ```
 
+**The standard library and installed modules.** A project outside the V tree
+has no vlib in it, so `extract` also reads the modules it imports from vlib
+(the V checkout of the `v` on PATH, or `VROOT`) and from `~/.vmodules` (or
+`VMODULES`), and their imports in turn, so its calls into them resolve:
+`s.contains(x)` goes to `vlib.builtin.string.contains` rather than to the
+project's only `contains`, and `os.join_path` to its declaration. The library
+declarations the project reaches are kept in `graph.json`'s `library` section,
+apart from the project's `symbols`: `explain` lists them, marked `[library]`,
+and `body` reads them from VROOT, but they take no part in `query`, `path`,
+communities, the exports, `diff` or the most-connected list. The report counts
+an edge into the library as `library`. `--no-library` turns this off, and so
+does `VROOT=`; extracting the V tree itself reads nothing extra. On
+`~/.vmodules/gui` unresolved calls go from 2,201 to 6 (FUTURE_WORK.md §10).
+
 **SVG/HTML.** Nodes are laid out by community (see Communities above), not by
 a force-directed simulation: communities are arranged around an outer
 circle, each community's own members around a smaller circle centered on

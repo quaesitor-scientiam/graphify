@@ -188,7 +188,8 @@ fn with_every_match_branch(src string) string {
 // A candidate is a directory holding .v files. The name is the module's path
 // below `vlib` (`v.tests.geometry`, and `os` for vlib/os), or below the tree's
 // root elsewhere. A module found nowhere, such as the standard library of a
-// project that doesn't include it, stays as written.
+// project that doesn't include it, stays as written, unless the library is read
+// too and it is an alias directory there (library_import).
 fn resolve_import(mod string, file_path string, rel string) string {
 	if file_path == '' || rel == '' || mod == '' {
 		return mod
@@ -196,7 +197,8 @@ fn resolve_import(mod string, file_path string, rel string) string {
 	fp := file_path.replace('\\', '/')
 	r := rel.replace('\\', '/')
 	if !fp.ends_with('/' + r) {
-		return mod
+		// a VMODULES library file (`vmodules/vglyph/x.v`), whose rel is not its path
+		return library_import(mod)
 	}
 	root := fp[..fp.len - r.len - 1]
 	file_dir := fp.all_before_last('/')
@@ -237,7 +239,20 @@ fn resolve_import(mod string, file_path string, rel string) string {
 			return c[base.len + 1..].replace('/', '.')
 		}
 	}
-	return mod
+	// a VMODULES module that is this tree itself, through a link to the checkout
+	// (`import vebidor.webdriver` in vebidor, with ~/.vmodules/vebidor linked to it),
+	// is the tree's own module, named by its path in the tree
+	vmodules := os.getenv(lib_env_vmodules)
+	if vmodules != '' {
+		c := vmodules + '/' + mod_path
+		if has_v_sources(c) {
+			real := os.real_path(c).replace('\\', '/')
+			if real.starts_with(root + '/') {
+				return real[root.len + 1..].replace('/', '.')
+			}
+		}
+	}
+	return library_import(mod)
 }
 
 // alias_dir_target is the path that a directory's `@[alias: '@VMODROOT/<path>']`

@@ -88,16 +88,24 @@ fn fresh_reuse_of(cached CacheEntry) CacheEntry {
 // Returns the graph and a report of the binary hash used plus which files
 // failed to parse and/or are being served stale this run.
 pub fn build_graph_resilient(root string, worker_exe string, out_dir string) (Graph, ExtractReport) {
+	return build_graph_with_library(root, worker_exe, out_dir, LibraryRoots{})
+}
+
+// build_graph_with_library is build_graph_resilient that also reads the modules the
+// project imports from `lib` (VROOT's vlib and VMODULES), so the project's calls and
+// type references into them resolve. Their declarations take part in resolution, and
+// the ones the project's edges reach are kept in `g.library` (see FUTURE_WORK.md §10).
+pub fn build_graph_with_library(root string, worker_exe string, out_dir string, lib LibraryRoots) (Graph, ExtractReport) {
 	abs_root := os.real_path(root)
 	mut g := Graph{
 		root: abs_root
 	}
-	mut failed := []string{}
-	mut stale := []string{}
-	mut partial := []string{}
 	// save_cache below needs out_dir to exist; write_bundle also creates it
 	// later, but that's after this function returns.
 	os.mkdir_all(out_dir) or {}
+	// the workers name an import of a vlib alias directory against the library
+	// (library_import), and none when it is off
+	lib.export_env()
 
 	files := if os.is_dir(abs_root) {
 		find_source_files(abs_root)
@@ -107,46 +115,132 @@ pub fn build_graph_resilient(root string, worker_exe string, out_dir string) (Gr
 
 	// Hashed once and reused for both load and save below -- see cache.v for
 	// why the cache is tied to the running binary's own content, not just
-	// each source file's hash.
+	// each source file's hash. With the library on, an import's name also
+	// depends on its roots, so they are part of the key.
 	bin_hash := file_hash(worker_exe)
-	old_cache := load_cache(out_dir, bin_hash)
-	mut new_cache := []CacheEntry{cap: files.len}
-	// each file's result, by relative path; the graph is assembled from it in
-	// `files` order at the end, so which of two same-id declarations comes
-	// first doesn't depend on what was cached, retried or parsed when
-	mut by_rel := map[string]FileResult{}
+	cache_key := if bin_hash != '' && lib.enabled() { '${bin_hash} ${lib.cache_tag()}' } else { bin_hash }
+	mut run := ParseRun{
+		worker_exe: worker_exe
+		old_cache:  load_cache(out_dir, cache_key)
+		pid:        os.getpid()
+	}
 	// each file's text hash as this run read it, for get_body (Graph.file_hashes)
 	mut source_hashes := map[string]string{}
-
-	mut queue := []WorkItem{}
+	mut items := []WorkItem{cap: files.len}
 	for path in files {
 		rel := rel_path(abs_root, path)
 		hash := source_hash(path)
 		if hash != '' {
 			source_hashes[rel] = hash
 		}
-		if hash != '' && rel in old_cache && old_cache[rel].hash == hash {
-			// unchanged since the last extract — reuse its symbols/edges
-			// instead of spending a worker parsing it again.
-			reused := fresh_reuse_of(old_cache[rel])
-			by_rel[rel] = reused.fr
-			new_cache << reused
-			if reused.fr.parse_error != '' {
-				partial << rel
-			}
-			continue
-		}
-		queue << WorkItem{
+		items << WorkItem{
 			path: path
 			rel:  rel
 			hash: hash
 		}
 	}
+	run.parse(items)
+	// the report is the project's: the library's files are parsed after this
+	mut failed := run.failed.clone()
+	mut stale := run.stale.clone()
+	mut partial := run.partial.clone()
+
+	for path in files {
+		if fr := run.by_rel[rel_path(abs_root, path)] {
+			g.symbols << fr.symbols
+			g.edges << fr.edges
+		}
+	}
+	project_len := g.symbols.len
+	lib_rels := if lib.enabled() { run.parse_library(lib, g.symbols, abs_root) } else { []string{} }
+	mut lib_files := map[string]bool{}
+	for rel in lib_rels {
+		if fr := run.by_rel[rel] {
+			lib_files[rel] = true
+			g.symbols << fr.symbols
+			// a call inside the library is not one of the project's; the rest say
+			// which file they come from, which keep_reached_library goes by, since a
+			// `C.` binding's id is one for the project and the library
+			for e in fr.edges {
+				if e.kind != .calls {
+					g.edges << Edge{
+						...e
+						file: if e.file == '' { rel } else { e.file }
+					}
+				}
+			}
+		}
+	}
+	failed.sort()
+	stale.sort()
+	partial.sort()
+	save_cache(out_dir, cache_key, run.new_cache)
+	disambiguate_ids(mut g)
+	separate_member_ids(mut g)
+	resolve_edges(mut g)
+	if lib_rels.len > 0 {
+		keep_reached_library(mut g, project_len, lib, lib_files)
+	}
+	g.file_hashes = source_hashes
+	return g, ExtractReport{
+		binary_hash: bin_hash
+		failed:      failed
+		stale:       stale
+		partial:     partial
+	}
+}
+
+// ParseRun is one extract's parsing: the files the cache answers and the ones the
+// worker processes parse, with what each run of them found.
+struct ParseRun {
+	worker_exe string
+	old_cache  map[string]CacheEntry
+	pid        int
+mut:
+	// each file's result, by relative path; the graph is assembled from it in
+	// `files` order at the end, so which of two same-id declarations comes
+	// first doesn't depend on what was cached, retried or parsed when
+	by_rel    map[string]FileResult
+	new_cache []CacheEntry
+	failed    []string
+	stale     []string
+	partial   []string
+	batch_seq int
+}
+
+// parse extracts `items`, reusing the cache for a file whose content is unchanged
+// since the last extract and parsing the rest in worker processes.
+fn (mut run ParseRun) parse(items []WorkItem) {
+	mut queue := []WorkItem{}
+	for w in items {
+		if w.hash != '' && w.rel in run.old_cache && run.old_cache[w.rel].hash == w.hash {
+			// unchanged since the last extract — reuse its symbols/edges
+			// instead of spending a worker parsing it again.
+			reused := fresh_reuse_of(run.old_cache[w.rel])
+			run.by_rel[w.rel] = reused.fr
+			run.new_cache << reused
+			if reused.fr.parse_error != '' {
+				run.partial << w.rel
+			}
+			continue
+		}
+		queue << w
+	}
+	if run.worker_exe == '' {
+		// no worker to isolate a crash in: each file is parsed here, as the tests
+		// that build a graph with its library do
+		for w in queue {
+			fr := extract_v_file_result(w.path, w.rel)
+			run.by_rel[w.rel] = fr
+			if fr.parse_error != '' {
+				run.partial << w.rel
+			}
+		}
+		return
+	}
 
 	batch_size := 200
 	parallel := if runtime.nr_cpus() > 0 { runtime.nr_cpus() } else { 1 }
-	pid := os.getpid()
-	mut batch_seq := 0
 
 	for queue.len > 0 {
 		// slice off up to `parallel` batches and spawn them all before waiting
@@ -157,9 +251,9 @@ pub fn build_graph_resilient(root string, worker_exe string, out_dir string) (Gr
 			batch := queue#[..n].clone()
 			queue = queue#[n..].clone()
 
-			batch_seq++
-			listfile := os.join_path(os.temp_dir(), 'gf_list_${pid}_${batch_seq}.txt')
-			outfile := os.join_path(os.temp_dir(), 'gf_out_${pid}_${batch_seq}.ndjson')
+			run.batch_seq++
+			listfile := os.join_path(os.temp_dir(), 'gf_list_${run.pid}_${run.batch_seq}.txt')
+			outfile := os.join_path(os.temp_dir(), 'gf_out_${run.pid}_${run.batch_seq}.ndjson')
 
 			mut lines := []string{}
 			for w in batch {
@@ -170,17 +264,17 @@ pub fn build_graph_resilient(root string, worker_exe string, out_dir string) (Gr
 				// same class of gap as a crashed worker, so the same
 				// stale-fallback treatment applies to each of them.
 				for w in batch {
-					failed << w.rel
-					if fallback := stale_fallback_for(old_cache, w.rel) {
-						by_rel[w.rel] = fallback.fr
-						new_cache << fallback
-						stale << w.rel
+					run.failed << w.rel
+					if fallback := stale_fallback_for(run.old_cache, w.rel) {
+						run.by_rel[w.rel] = fallback.fr
+						run.new_cache << fallback
+						run.stale << w.rel
 					}
 				}
 				continue
 			}
 
-			mut p := os.new_process(worker_exe)
+			mut p := os.new_process(run.worker_exe)
 			p.set_args(['_parse-batch', listfile, outfile])
 			p.run()
 			jobs << BatchJob{
@@ -206,11 +300,11 @@ pub fn build_graph_resilient(root string, worker_exe string, out_dir string) (Gr
 				}
 				fr := decode_file_result(line)
 				if i < job.batch.len {
-					by_rel[job.batch[i].rel] = fr
+					run.by_rel[job.batch[i].rel] = fr
 					if fr.parse_error != '' {
-						partial << job.batch[i].rel
+						run.partial << job.batch[i].rel
 					}
-					new_cache << CacheEntry{
+					run.new_cache << CacheEntry{
 						rel:  job.batch[i].rel
 						hash: job.batch[i].hash
 						fr:   fr
@@ -223,11 +317,11 @@ pub fn build_graph_resilient(root string, worker_exe string, out_dir string) (Gr
 				// the file at index `completed` crashed this worker — skip it
 				// and requeue the rest of the batch for the next wave.
 				crashed_rel := job.batch[completed].rel
-				failed << crashed_rel
-				if fallback := stale_fallback_for(old_cache, crashed_rel) {
-					by_rel[crashed_rel] = fallback.fr
-					new_cache << fallback
-					stale << crashed_rel
+				run.failed << crashed_rel
+				if fallback := stale_fallback_for(run.old_cache, crashed_rel) {
+					run.by_rel[crashed_rel] = fallback.fr
+					run.new_cache << fallback
+					run.stale << crashed_rel
 				}
 				for i := completed + 1; i < n; i++ {
 					retry << job.batch[i]
@@ -241,27 +335,155 @@ pub fn build_graph_resilient(root string, worker_exe string, out_dir string) (Gr
 			queue = retry.clone()
 		}
 	}
+}
 
-	for path in files {
-		if fr := by_rel[rel_path(abs_root, path)] {
-			g.symbols << fr.symbols
-			g.edges << fr.edges
+// parse_library parses the library modules the project's `symbols` import, and the
+// ones those import in turn, and returns their files' rels in the order they were
+// read. A module is looked for only when no module of the project is what the import
+// names, and one whose directory is inside the project is never read, so extracting
+// the V tree itself reads none; builtin, which every file
+// imports without saying so, is always read. A library file that fails to parse is
+// left out; the report lists only the project's files, which are parsed first.
+fn (mut run ParseRun) parse_library(lib LibraryRoots, symbols []Symbol, project_root string) []string {
+	mut project_mods := []string{}
+	for s in symbols {
+		if s.kind == .mod_ && s.id !in project_mods {
+			project_mods << s.id
 		}
 	}
-	failed.sort()
-	stale.sort()
-	partial.sort()
-	save_cache(out_dir, bin_hash, new_cache)
-	disambiguate_ids(mut g)
-	separate_member_ids(mut g)
-	resolve_edges(mut g)
-	g.file_hashes = source_hashes
-	return g, ExtractReport{
-		binary_hash: bin_hash
-		failed:      failed
-		stale:       stale
-		partial:     partial
+	mut wanted := ['builtin']
+	wanted << imports_of_symbols(symbols)
+	mut seen_dirs := map[string]bool{}
+	mut seen_imports := map[string]bool{}
+	mut rels := []string{}
+	for wanted.len > 0 {
+		mut items := []WorkItem{}
+		for imp in wanted {
+			if seen_imports[imp] || project_mods.any(import_names(it, imp)) {
+				continue
+			}
+			seen_imports[imp] = true
+			m := lib.module_of(imp) or { continue }
+			// a module linked into VMODULES from the project is the project's own
+			// (resolve_import names it so), not a library
+			real := os.real_path(m.dir)
+			if seen_dirs[real] || real == project_root || real.starts_with(project_root + os.path_separator) {
+				continue
+			}
+			seen_dirs[real] = true
+			for name in m.files() {
+				path := os.join_path(m.dir, name)
+				items << WorkItem{
+					path: path
+					rel:  m.rel_dir + '/' + name
+					hash: source_hash(path)
+				}
+			}
+		}
+		run.parse(items)
+		mut next := []Symbol{}
+		for w in items {
+			if fr := run.by_rel[w.rel] {
+				rels << w.rel
+				next << fr.symbols
+			}
+		}
+		wanted = imports_of_symbols(next)
 	}
+	return rels
+}
+
+// imports_of_symbols is the module paths the import symbols among `symbols` name.
+fn imports_of_symbols(symbols []Symbol) []string {
+	mut out := []string{}
+	for s in symbols {
+		if s.kind == .import_ && s.name !in out {
+			out << s.name
+		}
+	}
+	return out
+}
+
+// keep_reached_library moves the library's symbols, `g.symbols[project_len..]`, out
+// of the project's: the declarations the project's calls, references and embeds reach
+// go into `g.library` with their parents, one per id, each with the last line of its
+// body, and the rest go, with every edge made in a library file (`lib_files`). An id
+// the project declares too, a `C.` binding both have, stays the project's.
+fn keep_reached_library(mut g Graph, project_len int, lib LibraryRoots, lib_files map[string]bool) {
+	lib_syms := g.symbols[project_len..].clone()
+	mut project_ids := map[string]bool{}
+	for s in g.symbols[..project_len] {
+		project_ids[s.id] = true
+	}
+	mut by_id := map[string]Symbol{}
+	for s in lib_syms {
+		if s.id in project_ids {
+			continue
+		}
+		if prev := by_id[s.id] {
+			if shown_before(s, prev) {
+				by_id[s.id] = s
+			}
+		} else {
+			by_id[s.id] = s
+		}
+	}
+	// an edge the library's own declarations make, by its file, or by its id when it
+	// has none (regenerate_defines makes `defines` edges without one)
+	in_library := fn [lib_files, by_id] (e Edge) bool {
+		return if e.file != '' { e.file in lib_files } else { e.from in by_id }
+	}
+	mut keep := map[string]bool{}
+	for e in g.edges {
+		if e.kind in [EdgeKind.calls, .references, .embeds] && e.to in by_id && !in_library(e) {
+			keep[e.to] = true
+		}
+	}
+	for id in keep.keys() {
+		mut p := by_id[id].parent
+		for p != '' && p in by_id && p !in keep {
+			keep[p] = true
+			p = by_id[p].parent
+		}
+	}
+	mut library := Library{}
+	library.roots['vlib'] = lib.vroot
+	if lib.vmodules != '' {
+		library.roots['vmodules'] = lib.vmodules
+	}
+	// the graph keeps only some of a library file's declarations, so get_body could
+	// not find where one ends from the next one kept: its end is found now, from all
+	mut kept := []Symbol{}
+	mut done := map[string]bool{}
+	for s in lib_syms {
+		if keep[s.id] && !done[s.id] {
+			done[s.id] = true
+			kept << by_id[s.id]
+		}
+	}
+	library.symbols = with_body_ends(kept, lib_syms, library)
+	g.library = library
+	g.symbols = g.symbols[..project_len].clone()
+	g.edges = g.edges.filter(!in_library(it))
+}
+
+// with_body_ends gives each of `kept` the last line of its declaration as its
+// end_line, found as get_body finds it, among `all` the declarations of its file.
+fn with_body_ends(kept []Symbol, all []Symbol, library Library) []Symbol {
+	mut lines_of := map[string][]string{}
+	mut out := []Symbol{cap: kept.len}
+	for s in kept {
+		if s.file !in lines_of {
+			path := library.path_of(s.file) or { '' }
+			src := os.read_file(path) or { '' }
+			lines_of[s.file] = src.replace('\r\n', '\n').split('\n')
+		}
+		lines := lines_of[s.file] or { []string{} }
+		mut t := s
+		t.end_line = decl_end(lines, s, all)
+		out << t
+	}
+	return out
 }
 
 // Options controls a graph build.
@@ -704,7 +926,8 @@ fn resolve_edges(mut g Graph) {
 	mut sym_ids := map[string]bool{}
 	// c_declared holds the names of the C functions the program binds (`fn C.name`)
 	mut c_declared := map[string]bool{}
-	// a field's site is its struct, so a struct maps to its own module
+	// a field's parent is its struct or interface, so each maps to its own module,
+	// which is the field's (decl_mod)
 	mut struct_mod := map[string]string{}
 	for s in g.symbols {
 		sym_ids[s.id] = true
@@ -717,7 +940,7 @@ fn resolve_edges(mut g Graph) {
 			flag_here[s.parent + '\x00' + s.name + '\x00' + s.file] = flagged
 			flag_in_mod[s.parent + '\x00' + s.name] = (flag_in_mod[s.parent + '\x00' + s.name] or { true }) && flagged
 		}
-		if s.kind == .struct_ {
+		if s.kind in [SymbolKind.struct_, .interface_] {
 			struct_mod[s.id] = s.parent
 		}
 	}
@@ -808,12 +1031,13 @@ fn resolve_edges(mut g Graph) {
 		// (embeds), type alias (the types it is built from), and constant, global
 		// and field (the calls in their initializers). Enums are only ever a `to`.
 		if s.kind in [SymbolKind.function, .method, .struct_, .interface_, .type_alias, .constant, .global, .field] {
+			mod := decl_mod(s, struct_mod)
 			site_of[s.id] = DeclSite{
-				mod:     s.parent
+				mod:     mod
 				file:    s.file
 				is_main: in_main_unit(s, mains)
-				solo:    main_count[s.parent] == 1
-				no_main: main_count[s.parent] == 0
+				solo:    main_count[mod] == 1
+				no_main: main_count[mod] == 0
 			}
 		}
 		// id_count/id_main/id_files feed the build-unit-aware duplicate check
@@ -897,12 +1121,13 @@ fn resolve_edges(mut g Graph) {
 		if s.kind in [SymbolKind.function, .method, .struct_, .interface_, .type_alias]
 			&& id_count[s.id] > 1
 			&& (!unaddressable[s.id] || (id_files[s.id] or { []string{} }).all(it == s.file)) {
+			mod := decl_mod(s, struct_mod)
 			site_of[site_key(s.id, s.file)] = DeclSite{
-				mod:     s.parent
+				mod:     mod
 				file:    s.file
 				is_main: in_main_unit(s, mains)
-				solo:    main_count[s.parent] == 1
-				no_main: main_count[s.parent] == 0
+				solo:    main_count[mod] == 1
+				no_main: main_count[mod] == 0
 			}
 		}
 	}
@@ -1145,7 +1370,7 @@ fn resolve_edges(mut g Graph) {
 			// `T.from_string(s)` for every enum T. A call of one of them, to an enum T in
 			// the caller's module that declares no method of that name, is one V provides.
 			if site := caller_site(e, site_of) {
-				mod := struct_mod[site.mod] or { site.mod }
+				mod := site.mod
 				typ := e.to.all_before('__static__')
 				method := e.to.all_after('__static__')
 				if enum_names[mod + '\x00' + typ] && '${mod}.${typ}.${method}' !in sym_ids
@@ -1224,6 +1449,12 @@ fn site_key(id string, file string) string {
 // caller_site is where the declaration an edge comes from lives: its id's
 // only declaration, or, for an id with per-platform variants, the one in the
 // file the edge was found in.
+// decl_mod is the module a declaration is in: its parent, or for a field, the
+// parent of its struct or interface (`struct_mod`).
+fn decl_mod(s Symbol, struct_mod map[string]string) string {
+	return if s.kind == .field { struct_mod[s.parent] or { s.parent } } else { s.parent }
+}
+
 fn caller_site(e Edge, site_of map[string]DeclSite) ?DeclSite {
 	if site := site_of[e.from] {
 		return site

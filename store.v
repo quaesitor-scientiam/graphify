@@ -107,27 +107,7 @@ fn graph_to_json(g Graph) string {
 		if i > 0 {
 			sb.write_u8(`,`)
 		}
-		sb.write_string('{"id":')
-		write_json_str(mut sb, s.id)
-		sb.write_string(',"name":')
-		write_json_str(mut sb, s.name)
-		sb.write_string(',"kind":')
-		sb.write_decimal(i64(s.kind))
-		sb.write_string(',"signature":')
-		write_json_str(mut sb, s.signature)
-		sb.write_string(',"file":')
-		write_json_str(mut sb, s.file)
-		sb.write_string(',"line":')
-		sb.write_decimal(i64(s.line))
-		sb.write_string(',"end_line":')
-		sb.write_decimal(i64(s.end_line))
-		sb.write_string(',"is_pub":')
-		sb.write_string(if s.is_pub { 'true' } else { 'false' })
-		sb.write_string(',"parent":')
-		write_json_str(mut sb, s.parent)
-		sb.write_string(',"doc":')
-		write_json_str(mut sb, s.doc)
-		sb.write_u8(`}`)
+		write_symbol_json(mut sb, s)
 	}
 	sb.write_string('],"edges":[')
 	for i, e in g.edges {
@@ -144,8 +124,57 @@ fn graph_to_json(g Graph) string {
 		sb.write_decimal(i64(e.provenance))
 		sb.write_u8(`}`)
 	}
-	sb.write_string(']}')
+	sb.write_u8(`]`)
+	// only a graph that reads a library has the section, so one without stays
+	// byte for byte as before
+	if g.library.symbols.len > 0 || g.library.roots.len > 0 {
+		sb.write_string(',"library":{"roots":{')
+		mut li := 0
+		for label, root in g.library.roots {
+			if li > 0 {
+				sb.write_u8(`,`)
+			}
+			write_json_str(mut sb, label)
+			sb.write_u8(`:`)
+			write_json_str(mut sb, root)
+			li++
+		}
+		sb.write_string('},"symbols":[')
+		for i, s in g.library.symbols {
+			if i > 0 {
+				sb.write_u8(`,`)
+			}
+			write_symbol_json(mut sb, s)
+		}
+		sb.write_string(']}')
+	}
+	sb.write_u8(`}`)
 	return sb.str()
+}
+
+// write_symbol_json writes one symbol of graph.json's `symbols` or `library`.
+fn write_symbol_json(mut sb strings.Builder, s Symbol) {
+	sb.write_string('{"id":')
+	write_json_str(mut sb, s.id)
+	sb.write_string(',"name":')
+	write_json_str(mut sb, s.name)
+	sb.write_string(',"kind":')
+	sb.write_decimal(i64(s.kind))
+	sb.write_string(',"signature":')
+	write_json_str(mut sb, s.signature)
+	sb.write_string(',"file":')
+	write_json_str(mut sb, s.file)
+	sb.write_string(',"line":')
+	sb.write_decimal(i64(s.line))
+	sb.write_string(',"end_line":')
+	sb.write_decimal(i64(s.end_line))
+	sb.write_string(',"is_pub":')
+	sb.write_string(if s.is_pub { 'true' } else { 'false' })
+	sb.write_string(',"parent":')
+	write_json_str(mut sb, s.parent)
+	sb.write_string(',"doc":')
+	write_json_str(mut sb, s.doc)
+	sb.write_u8(`}`)
 }
 
 // write_json_str writes a JSON-escaped string (with surrounding quotes) to sb.

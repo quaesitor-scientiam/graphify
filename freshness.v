@@ -8,6 +8,8 @@ import os
 //
 //   - the commit the graph was extracted from with the commit `root` (the
 //     source checkout) is at now, and
+//   - the commit each library root it read (VROOT, see Graph.library) was at
+//     with the commit that root is at now, and
 //   - the graphify build that extracted it with `cli_exe`, the graphify that
 //     would extract it again; skipped when `cli_exe` is '', as for a graph
 //     shared from another machine, whose build always differs.
@@ -23,6 +25,16 @@ pub fn stale_note(graph_path string, root string, cli_exe string) string {
 		if head != '' && head != m.source_commit {
 			notes << 'it was extracted from ${short_commit(m.source_commit)}, but ${root} is at ${short_commit(head)}${commits_between(root,
 				m.source_commit, head)}'
+		}
+	}
+	// the library the project's calls resolve into: V updated, or a module reinstalled
+	for l in m.library {
+		if l.commit == '' {
+			continue
+		}
+		head := git_commit_of(l.root)
+		if head != '' && head != l.commit {
+			notes << 'its library (${l.label}) was read from ${l.root} at ${short_commit(l.commit)}, which is at ${short_commit(head)} now'
 		}
 	}
 	if cli_exe != '' && m.binary_hash != '' && os.exists(cli_exe) {
