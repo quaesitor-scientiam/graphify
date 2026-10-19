@@ -541,6 +541,23 @@ codex mcp add graphify -- /path/to/graphify/bin/graphify-mcp /path/to/graph_data
 Restart the client after registering or switching the graph so it reloads the
 MCP server configuration (a re-extract of the same graph doesn't need one).
 
+**Your own projects, layered on vlang.** Add `--projects <store>`, the directory
+`extract --store` writes project graphs into:
+
+```
+claude mcp add graphify -- /path/to/bin/graphify-mcp /path/to/graph_data/vlang/graph.json --projects /path/to/graph_data
+```
+
+A session whose directory is inside a project in the store, or inside a worktree
+of one, then gets that project's graph with vlang's `vlib` under it: one
+`shortest_path`, `get_neighbors` or `get_node` goes from the project's code into
+gg, sokol or builtin, because the project's calls into vlib already name vlang's
+ids. `query_graph` seeds from the project's own matches first, the overview is
+the project's, and a vlib declaration is marked `[library]`. Anywhere else the
+server serves the vlang graph alone, as before. The note at the top of a result
+also says when the project read vlib from another checkout or commit than the
+vlang graph is of. See FUTURE_WORK.md §11.
+
 **Stale-graph notes.** Both the CLI (on stderr) and the MCP server (at the top
 of a tool result) say when the graph may be out of date, from the
 `manifest.json` beside it: when the source checkout has moved past the commit
@@ -565,11 +582,16 @@ run via `v run`, and the scheduled refresh on Windows, which also runs as a
 prebuilt exe (see **Scheduling**).
 
 **One-time setup:** copy `graphify.config.json.example` to
-`graphify.config.json` (repo root) and edit the two paths for your machine:
+`graphify.config.json` (repo root) and edit the paths for your machine:
 
 ```json
 { "vlang_repo": "/path/to/repo/vlang", "store": "/path/to/graph_data" }
 ```
+
+Add `"projects": ["/path/to/a/project", ...]` to have `update-vlang-graph.vsh`
+extract your own projects into the store after vlang, for the MCP server's
+`--projects`. A project is re-extracted when its commit moved, graphify was
+rebuilt, or vlang changed; it is never pulled.
 
 `graphify.config.json` is gitignored — each machine keeps its own copy, and
 `update-vlang-graph.vsh`, `switch-vlang-graph.vsh`, and `extract_bench.vsh`

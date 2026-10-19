@@ -1244,3 +1244,81 @@ Still open:
   project builds with another V.
 - A call inside a library generic function that an instance from the project
   makes (`arrays.map[T]` calling `T.str()`) is not recorded.
+
+## 11. A project's graph layered on the V tree's
+
+A project's graph (§10) holds the vlib declarations its calls reach, but not what they
+call in turn, so a problem that goes deeper into vlib had to be followed in a second
+graph by hand. A bug found in gui usually ends in gg, sokol or builtin.
+
+### Design
+
+**The join.** A project's library ids are the V tree's own (`vlib.gg.Context.draw_text`
+in both), so the two graphs join without renaming anything. `layer_graph` (layer.v)
+puts the project's symbols first, then each V tree symbol declared in a `vlib/` file
+whose id the project doesn't have; the project's edges, then the V tree's edges from
+those symbols, resolved by the V tree's own index first, so a raw name is resolved
+among the V tree's declarations, not the project's. The project's library section
+keeps only what the V tree doesn't stand in for: modules from VMODULES
+(`vmodules.vglyph...`), and a vlib id the V tree's graph doesn't have. The V tree's
+`cmd/`, `examples/` and tests stay out: a project calls vlib, nothing else.
+
+**The project comes first.** Ids from the V tree are marked (`Graph.base`). An edge's
+raw name is still resolved among the project's declarations only, as before, so a
+name that is unique in the project stays linked although vlib has one too. A search
+(`query`) seeds from the project's matches, and from the V tree's only when the
+project has none; a name names the project's declaration before the V tree's. The
+overview is the project's own report, with a line saying what it is layered on.
+explain and the path tools treat both alike, which is what crossing the boundary
+needs, and mark a V tree symbol `[library]`, as a library declaration was.
+
+**Bodies and freshness.** A V tree symbol's body is read from the V tree's root, and
+its drift check uses the V tree's file hashes. Each graph keeps its own manifest, so
+the stale note is the project's and the V tree's, joined. The join is exact only when
+the project read vlib from the checkout the V tree's graph is of, at the same commit:
+the project's manifest names the library root and commit it read (§10), and the
+note says when they differ from the V tree graph's root and `source_commit`.
+
+**Which project.** The MCP server takes the V tree's graph as before and, with
+`--projects <dir>`, a directory of project graphs (`<store>/<name>/graph.json`, as
+`extract --store` writes them). It serves the project whose root holds its working
+directory, the deepest such root, so a session in a worktree inside the project gets
+the project's graph too; elsewhere, or in the V tree itself, it serves the V tree's
+graph alone. A replaced graph.json of either is reloaded, as one was before.
+
+**Extracting projects.** `graphify.config.json` gains `projects`, the roots to
+extract. The update script extracts each project after the V tree when the project's
+commit differs from its graph's `source_commit`, when graphify was rebuilt, when the
+V tree moved, or when it has no graph yet. It doesn't pull a project: they are the
+user's own checkouts.
+
+### What was built, and measured
+
+As designed (layer.v, `--projects` in cmd/mcp, `projects` in update-vlang-graph.vsh).
+vlib's tests stay out with the rest of the tree's tests: a `_test.v` file, a platform's
+`_test.c.v`, and the `tests`, `slow_tests`, `compiler_tests` and `testdata`
+directories. Before that, gg's module symbol was shown from
+`wayland_pipe_abi_test.c.v`.
+
+Measured on gui and vebidor, each extracted against the vlang checkout its graph is of
+(1e63d0f20e):
+
+| Project | vlib declarations its calls reach | Missing from the vlang graph | Edges into them | vlib symbols layered under it |
+|---|---|---|---|---|
+| `~/.vmodules/gui` | 388 (and 41 from VMODULES, kept as library) | 0 | 3,845 | 69,888 |
+| vebidor | 131 | 0 | 1,187 | 69,888 |
+
+From inside gui, `shortest_path` from `gui.draw_rounded_image_batch` to
+`vlib.sokol.sgl.v2f` is one query, and `get_node` on `vlib.gg.Context.draw_image` lists
+its gui callers at their gui locations next to its own calls in gg. Loading and answering
+three tools takes 1.4 s and 1.5 GB at most, against 1.6 s and 1.8 GB for the vlang graph
+served alone, whose index holds all 163,000 symbols, not vlib's 70,000.
+
+Still open:
+
+- A project's modules from VMODULES are layered only as the library declarations its
+  calls reach, not as their own graphs: a project using gui reaches the gui
+  declarations it calls, not what they call.
+- A worktree inside a project gets the graph of the project's checkout, as a worktree
+  of vlang gets vlang's.
+- Each session's server holds its own copy of the vlang graph, as one did before.

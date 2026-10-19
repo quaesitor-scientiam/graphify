@@ -5,11 +5,16 @@ module main
 // graph.json once and exposes graph traversal as tools, so the model queries
 // the graph instead of re-reading source files.
 //
-//   v run cmd/mcp [graphify-out/graph.json]
+//   v run cmd/mcp [graphify-out/graph.json] [source-dir] [--projects <dir>]
 //
 // Tools: query_graph, get_node, get_neighbors, shortest_path.
 //
-// It reloads the graph when graph.json changes on disk (an extract publishes
+// With --projects, a directory of project graphs (`extract --store`), it serves the
+// project whose root holds its working directory, layered on the graph it was given
+// (the V tree's), so that a traversal from the project carries on into vlib
+// (graphify.layer_graph, FUTURE_WORK.md §11); elsewhere it serves that graph alone.
+//
+// It reloads a graph when its graph.json changes on disk (an extract publishes
 // it atomically), and a tool result starts with a note when the graph looks
 // out of date (graphify.stale_note).
 import os
@@ -17,24 +22,47 @@ import time
 import x.json2
 import graphify
 
+// Served is what the tools answer from: `g`, the graph served, and when it is a
+// project layered on the base graph, the project's own graph, whose report the
+// overview is.
+struct Served {
+	g       graphify.Graph
+	project graphify.Graph
+	layered bool
+}
+
 fn main() {
-	graph_path := if os.args.len > 1 {
-		os.args[1]
+	mut positional := []string{}
+	mut projects_dir := ''
+	for i := 1; i < os.args.len; i++ {
+		if os.args[i] == '--projects' && i + 1 < os.args.len {
+			projects_dir = os.args[i + 1]
+			i++
+			continue
+		}
+		positional << os.args[i]
+	}
+	graph_path := if positional.len > 0 {
+		positional[0]
 	} else {
 		os.join_path(graphify.out_dir_name, 'graph.json')
 	}
 	// optional 2nd arg / GRAPHIFY_SOURCE_DIR: override the extraction root so a
 	// graph shared from another machine resolves get_body against local source.
-	src_dir := if os.args.len > 2 { os.args[2] } else { os.getenv('GRAPHIFY_SOURCE_DIR') }
-	mut g := load(graph_path, src_dir) or {
+	src_dir := if positional.len > 1 { positional[1] } else { os.getenv('GRAPHIFY_SOURCE_DIR') }
+	mut base := load(graph_path, src_dir) or {
 		eprintln('graphify-mcp: cannot load ${graph_path}: ${err}')
 		exit(1)
 	}
+	// the project whose root holds the directory this server was started in
+	project_path := graphify.project_for(projects_dir, os.getwd(), base.root) or { '' }
+	mut served := serve(base, project_path)
 	// mtime has one-second resolution, so the size is compared as well
 	mut stamp := file_stamp(graph_path)
+	mut project_stamp := if project_path != '' { file_stamp(project_path) } else { '' }
 	// a shared graph was built by another machine's graphify: compare commits only
 	cli := if src_dir != '' { '' } else { graphify.cli_beside() }
-	mut note := graphify.stale_note(graph_path, g.root, cli)
+	mut note := notes(graph_path, project_path, served, cli)
 	mut note_at := time.now().unix()
 
 	for {
@@ -47,22 +75,27 @@ fn main() {
 			continue
 		}
 		if line.contains('"tools/call"') {
-			// a re-extract replaced graph.json: serve the new graph
+			// a re-extract replaced a graph.json: serve the new graph
 			now_stamp := file_stamp(graph_path)
-			if now_stamp != stamp {
-				if fresh := load(graph_path, src_dir) {
-					g = fresh
-					stamp = now_stamp
-					note_at = 0
+			now_project := if project_path != '' { file_stamp(project_path) } else { '' }
+			if now_stamp != stamp || now_project != project_stamp {
+				if now_stamp != stamp {
+					if fresh := load(graph_path, src_dir) {
+						base = fresh
+					}
 				}
+				served = serve(base, project_path)
+				stamp = now_stamp
+				project_stamp = now_project
+				note_at = 0
 			}
 			// the checkout moves on its own; look again at most once a minute
 			if time.now().unix() - note_at >= 60 {
-				note = graphify.stale_note(graph_path, g.root, cli)
+				note = notes(graph_path, project_path, served, cli)
 				note_at = time.now().unix()
 			}
 		}
-		resp := handle(line, g, note)
+		resp := handle(line, served, note)
 		if resp != '' {
 			println(resp)
 			flush_stdout()
@@ -86,7 +119,52 @@ fn load(graph_path string, src_dir string) !graphify.Graph {
 	return g
 }
 
-fn handle(line string, g graphify.Graph, note string) string {
+// serve is the graph to answer from: the project at `project_path` layered on
+// `base`, or `base` alone when there is no project, or it can't be read.
+fn serve(base graphify.Graph, project_path string) Served {
+	if project_path == '' {
+		return Served{
+			g: base
+		}
+	}
+	project := load(project_path, '') or {
+		eprintln('graphify-mcp: cannot load ${project_path}: ${err}; serving the base graph alone')
+		return Served{
+			g: base
+		}
+	}
+	g := graphify.layer_graph(project, base)
+	eprintln('graphify-mcp: layered ${project_path} on the base graph: ${g.base.ids.len} vlib symbols under it')
+	return Served{
+		g:       g
+		project: project
+		layered: true
+	}
+}
+
+// notes is the stale note of each graph served, the project's and the base's, and
+// whether the vlib layered under a project is the one it read (graphify.layer_note).
+fn notes(graph_path string, project_path string, served Served, cli string) string {
+	mut out := []string{}
+	if served.layered {
+		n := graphify.stale_note(project_path, served.project.root, cli)
+		if n != '' {
+			out << 'the project: ${n}'
+		}
+		l := graphify.layer_note(project_path, graph_path)
+		if l != '' {
+			out << l
+		}
+	}
+	root := if served.layered { served.g.base.root } else { served.g.root }
+	n := graphify.stale_note(graph_path, root, cli)
+	if n != '' {
+		out << if served.layered { 'the vlib under it: ${n}' } else { n }
+	}
+	return out.join(' ')
+}
+
+fn handle(line string, served Served, note string) string {
 	any := json2.decode[json2.Any](line) or { return rpc_error(json2.null, -32700, 'parse error') }
 	req := any.as_map()
 	method := req['method'] or { return '' }.str()
@@ -111,7 +189,7 @@ fn handle(line string, g graphify.Graph, note string) string {
 			params := (req['params'] or { json2.null }).as_map()
 			name := (params['name'] or { json2.null }).str()
 			args := (params['arguments'] or { json2.null }).as_map()
-			return rpc_result(id, call_tool(name, args, g, note))
+			return rpc_result(id, call_tool(name, args, served, note))
 		}
 		'ping' {
 			return rpc_result(id, jobj(map[string]json2.Any{}))
@@ -124,7 +202,8 @@ fn handle(line string, g graphify.Graph, note string) string {
 
 // call_tool runs one tool; `note`, when set, says the graph may be stale and
 // goes first in the result.
-fn call_tool(name string, args map[string]json2.Any, g graphify.Graph, note string) json2.Any {
+fn call_tool(name string, args map[string]json2.Any, served Served, note string) json2.Any {
+	g := served.g
 	mut str_args := map[string]string{}
 	for k, v in args {
 		if v is string {
@@ -148,7 +227,12 @@ fn call_tool(name string, args map[string]json2.Any, g graphify.Graph, note stri
 			g.get_body((args['node'] or { json2.null }).str())
 		}
 		'overview' {
-			g.report()
+			if served.layered {
+				// the project's own report: vlib's counts and hubs would drown it
+				'${served.project.report()}\n(layered on the vlib of ${g.base.root}: ${g.base.ids.len} more symbols, which the other tools reach)'
+			} else {
+				g.report()
+			}
 		}
 		'get_neighbors' {
 			names := g.neighbor_names((args['node'] or { json2.null }).str())

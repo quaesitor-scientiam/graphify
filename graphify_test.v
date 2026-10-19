@@ -8810,3 +8810,222 @@ fn test_graph_json_has_a_library_section_only_when_it_reads_one() {
 	assert back.library.symbols.map(it.id) == ['vlib.os.join_path']
 	assert back.library.roots['vlib'] == '/v'
 }
+
+// layer_fixture is a V tree's graph with gg in vlib, a test of it and a tool in
+// cmd, and a project calling gg.draw, with a library section of its own.
+fn layer_fixture() (Graph, Graph) {
+	base_root := write_tree('layer_base', {
+		'vlib/gg/gg.v':        'module gg\n\npub fn draw() {\n\tflush()\n}\n\nfn flush() {}\n\nfn helper() {}\n'
+		'vlib/gg/gg_test.v':   'module gg\n\nfn test_draw() {}\n'
+		'vlib/gg/gg_test.c.v': 'module gg\n\nfn test_native() {}\n'
+		'cmd/tool.v':          'module main\n\nfn main() {}\n'
+	})
+	base := Graph{
+		root:    base_root
+		symbols: [
+			Symbol{
+				id:        'vlib.gg.draw'
+				name:      'draw'
+				kind:      .function
+				signature: 'pub fn draw()'
+				file:      'vlib/gg/gg.v'
+				line:      3
+				end_line:  3
+			},
+			Symbol{
+				id:        'vlib.gg.flush'
+				name:      'flush'
+				kind:      .function
+				signature: 'fn flush()'
+				file:      'vlib/gg/gg.v'
+				line:      7
+				end_line:  7
+			},
+			Symbol{
+				id:        'vlib.gg.helper'
+				name:      'helper'
+				kind:      .function
+				signature: 'fn helper()'
+				file:      'vlib/gg/gg.v'
+				line:      9
+				end_line:  9
+			},
+			Symbol{
+				id:   'vlib.gg.test_draw'
+				name: 'test_draw'
+				kind: .function
+				file: 'vlib/gg/gg_test.v'
+				line: 3
+			},
+			Symbol{
+				id:   'vlib.gg.test_native'
+				name: 'test_native'
+				kind: .function
+				file: 'vlib/gg/gg_test.c.v'
+				line: 3
+			},
+			Symbol{
+				id:   'cmd.main'
+				name: 'main'
+				kind: .function
+				file: 'cmd/tool.v'
+				line: 3
+			},
+		]
+		edges:   [
+			Edge{
+				from: 'vlib.gg.draw'
+				to:   'vlib.gg.flush'
+				kind: .calls
+			},
+			Edge{
+				from: 'vlib.gg.test_draw'
+				to:   'vlib.gg.draw'
+				kind: .calls
+			},
+		]
+	}
+	project := Graph{
+		root:    '/nowhere/proj'
+		symbols: [
+			Symbol{
+				id:        'proj.redraw'
+				name:      'redraw'
+				kind:      .function
+				signature: 'fn redraw()'
+				file:      'proj.v'
+				line:      3
+			},
+			Symbol{
+				id:        'proj.helper'
+				name:      'helper'
+				kind:      .function
+				signature: 'fn helper()'
+				file:      'proj.v'
+				line:      7
+			},
+		]
+		edges:   [
+			Edge{
+				from: 'proj.redraw'
+				to:   'vlib.gg.draw'
+				kind: .calls
+			},
+			// a name the project's own declaration answers, which vlib has too
+			Edge{
+				from: 'proj.redraw'
+				to:   'helper'
+				kind: .calls
+			},
+		]
+		library: Library{
+			roots:   {
+				'vlib': base_root
+			}
+			symbols: [
+				Symbol{
+					id:   'vlib.gg.draw'
+					name: 'draw'
+					kind: .function
+					file: 'vlib/gg/gg.v'
+					line: 3
+				},
+				Symbol{
+					id:   'vmodules.ext.f'
+					name: 'f'
+					kind: .function
+					file: 'vmodules/ext/ext.v'
+					line: 1
+				},
+			]
+		}
+	}
+	return project, base
+}
+
+fn test_a_project_layered_on_the_v_tree_carries_on_into_vlib() {
+	project, base := layer_fixture()
+	g := layer_graph(project, base)
+	// one path from the project, through the vlib function it calls, to what that calls
+	assert g.shortest_path('proj.redraw', 'vlib.gg.flush') == ['proj.redraw', 'vlib.gg.draw',
+		'vlib.gg.flush']
+	// vlib's tests and the rest of the tree stay out
+	for id in ['vlib.gg.test_draw', 'vlib.gg.test_native', 'cmd.main'] {
+		assert !g.symbols.any(it.id == id), id
+	}
+	// a raw name of the project's is still its own declaration, though vlib has one too
+	idx := g.index()
+	assert idx.edges.any(it.from == 'proj.redraw' && it.to == 'proj.helper')
+	// a search seeds from the project's matches, and from vlib's only when it has none
+	assert g.find('draw') == ['proj.redraw']
+	assert g.find('flush') == ['vlib.gg.flush']
+	// a vlib body is read from the V tree, and explain marks vlib and shows the project's callers
+	assert g.get_body('vlib.gg.flush').contains('fn flush() {}')
+	ex := g.explain('vlib.gg.draw')
+	assert ex.contains('[library]')
+	assert ex.contains('redraw (proj.v:3)')
+	// the library section keeps only what the V tree doesn't stand in for
+	assert g.library.symbols.map(it.id) == ['vmodules.ext.f']
+	// the project's graph itself is untouched
+	assert project.base.ids.len == 0
+}
+
+fn test_a_project_graph_is_found_by_the_root_that_holds_the_directory() {
+	tree := write_tree('layer_dirs', {
+		'gui/a.v':     ''
+		'gui/sub/a.v': ''
+		'gui2/a.v':    ''
+		'vlang/a.v':   ''
+		'other/a.v':   ''
+	})
+	mut files := map[string]string{}
+	for name, root in {
+		'gui':   'gui'
+		'inner': 'gui/sub'
+		'gui2':  'gui2'
+		'vlang': 'vlang'
+	} {
+		files['${name}/graph.json'] = '{}'
+		files['${name}/manifest.json'] = json_root(os.join_path(tree, root))
+	}
+	// a directory without a graph.json is passed over
+	files['stray/manifest.json'] = json_root(os.join_path(tree, 'other'))
+	store := write_tree('layer_store', files)
+	graph := fn [store] (name string) string {
+		return os.join_path(store, name, 'graph.json')
+	}
+	base := os.join_path(tree, 'vlang')
+	assert project_for(store, os.join_path(tree, 'gui'), base) or { '' } == graph('gui')
+	// the deepest root that holds it: a project inside another, or a worktree's own graph
+	assert project_for(store, os.join_path(tree, 'gui', 'sub'), base) or { '' } == graph('inner')
+	// `gui2` is not inside `gui`
+	assert project_for(store, os.join_path(tree, 'gui2'), base) or { '' } == graph('gui2')
+	// the base's own tree, and a directory no project holds, serve the base alone
+	assert project_for(store, base, base) == none
+	assert project_for(store, os.join_path(tree, 'other'), base) == none
+	assert project_for('', os.join_path(tree, 'gui'), base) == none
+}
+
+fn json_root(root string) string {
+	return '{"root": "${root.replace('\\', '\\\\')}"}'
+}
+
+fn test_the_layer_note_says_when_the_project_read_another_vlib() {
+	vroot := write_tree('layer_vroot', {
+		'vlib/a.v': ''
+	})
+	esc := vroot.replace('\\', '\\\\')
+	note := fn [esc] (lib_root string, lib_commit string, base_commit string) string {
+		store := write_tree('layer_note', {
+			'proj/graph.json':     '{}'
+			'proj/manifest.json':  '{"root": "/p", "library": [{"label": "vlib", "root": "${lib_root}", "commit": "${lib_commit}"}]}'
+			'vlang/graph.json':    '{}'
+			'vlang/manifest.json': '{"root": "${esc}", "source_commit": "${base_commit}"}'
+		})
+		return layer_note(os.join_path(store, 'proj', 'graph.json'), os.join_path(store,
+			'vlang', 'graph.json'))
+	}
+	assert note(esc, 'aaaa', 'aaaa') == ''
+	assert note(esc, 'aaaa', 'bbbb').contains('extracted at bbbb')
+	assert note('/elsewhere', 'aaaa', 'aaaa').contains('read vlib from /elsewhere')
+}
