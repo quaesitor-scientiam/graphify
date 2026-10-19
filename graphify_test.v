@@ -9189,3 +9189,46 @@ fn test_a_module_from_vmodules_updated_in_place_makes_the_graph_stale() {
 	note := stale_note(graph, '', '')
 	assert note.contains('its module glyph was read from ${glyph} at ${first[..10]}'), note
 }
+
+fn test_a_module_installed_under_its_owner_is_tracked_by_its_own_clone() {
+	// `v install` puts a package registered with its owner's name in a directory of the
+	// owner's, `quaesitor_scientiam/vebidor`, which is no clone itself: the clone the
+	// module's commit is read from is the one below it
+	base, roots := library_fixture('library_owner_module')
+	defer {
+		os.rmdir_all(base) or {}
+	}
+	pkg := os.join_path(roots.vmodules, 'owner', 'pkg')
+	os.mkdir_all(pkg) or { panic(err) }
+	os.write_file(os.join_path(pkg, 'pkg.v'), 'module pkg\n\npub fn run() {}\n') or { panic(err) }
+	os.write_file(os.join_path(pkg, 'v.mod'), "Module {\n\tname: 'pkg'\n}\n") or { panic(err) }
+	os.write_file(os.join_path(base, 'proj', 'use.v'), 'module main\n\nimport owner.pkg\n\nfn use() {\n\tpkg.run()\n}\n') or {
+		panic(err)
+	}
+	git := fn [pkg] (args ...string) string {
+		mut cmd := ['git', '-C', pkg, '-c', 'user.name=t', '-c', 'user.email=t@t', '-c',
+			'commit.gpgsign=false']
+		cmd << args
+		return os.exec(cmd).output.trim_space()
+	}
+	git('init', '-q')
+	git('add', '.')
+	git('commit', '-q', '-m', 'one')
+	first := git('rev-parse', 'HEAD')
+	out := os.join_path(base, 'out')
+	g, report := build_graph_with_library(os.join_path(base, 'proj'), '', out, roots)
+	assert g.library.symbols.any(it.file.starts_with('vmodules/owner/pkg/')), g.library.symbols.map(it.file).str()
+	write_bundle(g, out, report) or { panic(err) }
+	m := load_manifest(os.join_path(out, 'manifest.json')) or { panic(err) }
+	mods := m.library.filter(it.label == 'vmodules')[0].modules
+	owned := mods.filter(it.name == 'owner/pkg')
+	assert owned.len == 1 && owned[0].commit == first, mods.str()
+	// glyph, in no clone, by its own directory without a commit
+	assert mods.any(it.name == 'glyph' && it.commit == ''), mods.str()
+
+	os.write_file(os.join_path(pkg, 'more.v'), 'module pkg\n') or { panic(err) }
+	git('add', '.')
+	git('commit', '-q', '-m', 'two')
+	note := stale_note(os.join_path(out, 'graph.json'), '', '')
+	assert note.contains('its module owner/pkg was read from ${pkg} at ${first[..10]}'), note
+}

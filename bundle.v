@@ -55,26 +55,47 @@ pub:
 }
 
 // vmodules_states lists the modules under `root` (VMODULES) whose declarations the
-// library keeps, by their directory there, with the commit of each that is a clone
-// of its own.
+// library keeps, each by the directory there of the clone that holds it, with that
+// clone's commit: `vglyph`, or `quaesitor_scientiam/vebidor` for one `v install` put
+// under its owner. A module in no clone of its own is listed by its top directory,
+// with no commit.
 fn vmodules_states(lib Library, root string) []ModuleState {
-	mut names := map[string]bool{}
+	mut dirs := map[string]bool{}
 	for s in lib.symbols {
-		if s.file.starts_with(lib_vmodules_prefix) {
-			names[s.file[lib_vmodules_prefix.len..].all_before('/')] = true
+		if !s.file.starts_with(lib_vmodules_prefix) {
+			continue
+		}
+		rel := s.file[lib_vmodules_prefix.len..]
+		if rel.contains('/') {
+			dirs[rel.all_before_last('/')] = true
 		}
 	}
-	mut sorted := names.keys()
-	sorted.sort()
-	mut out := []ModuleState{cap: sorted.len}
-	for name in sorted {
-		dir := os.join_path(root, name)
-		out << ModuleState{
-			name:   name
-			commit: if os.exists(os.join_path(dir, '.git')) { git_commit_of(dir) } else { '' }
-		}
+	mut commits := map[string]string{}
+	for dir in dirs.keys() {
+		name, commit := clone_of(root, dir)
+		commits[name] = commit
 	}
-	return out
+	mut names := commits.keys()
+	names.sort()
+	return names.map(ModuleState{
+		name:   it
+		commit: commits[it]
+	})
+}
+
+// clone_of is the directory under `root` of the git clone holding `dir`, a module's
+// directory there, nearest first, and the clone's commit; `dir`'s top directory and ''
+// when no directory from `dir` up to `root` is a clone.
+fn clone_of(root string, dir string) (string, string) {
+	mut d := dir
+	for d != '' {
+		path := os.join_path(root, d)
+		if os.exists(os.join_path(path, '.git')) {
+			return d, git_commit_of(path)
+		}
+		d = if d.contains('/') { d.all_before_last('/') } else { '' }
+	}
+	return dir.all_before('/'), ''
 }
 
 // SourceFile is one source file's text hash as the extract read it, so
