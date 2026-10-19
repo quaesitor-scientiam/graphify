@@ -558,6 +558,18 @@ server serves the vlang graph alone, as before. The note at the top of a result
 also says when the project read vlib from another checkout or commit than the
 vlang graph is of. See FUTURE_WORK.md §11.
 
+A session in a git worktree of a project, or of vlang, inside the checkout as
+Claude Code makes one (`.claude/worktrees/`) or beside it, gets the graph of the
+worktree's own branch. The server extracts the worktree in the background, with
+the `bin/graphify` beside it, into a store of its own under
+`~/.cache/graphify/worktrees` (or `GRAPHIFY_WORKTREE_STORES`), seeded with the
+checkout's extract cache so that only the files the branch changed are parsed:
+about half a second for a project, six seconds for vlang. Until it is there the
+checkout's graph is served, with a note saying so. When a V file of the worktree
+changes, committed or not, the next tool call starts another extract, and the
+graph is replaced when it is done. A store whose worktree is gone is removed when
+a server starts.
+
 **Stale-graph notes.** Both the CLI (on stderr) and the MCP server (at the top
 of a tool result) say when the graph may be out of date, from the
 `manifest.json` beside it: when the source checkout has moved past the commit

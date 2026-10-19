@@ -14,6 +14,13 @@ module main
 // (the V tree's), so that a traversal from the project carries on into vlib
 // (graphify.layer_graph, FUTURE_WORK.md §11); elsewhere it serves that graph alone.
 //
+// Started in a git worktree of a project, or of the V tree, it extracts the
+// worktree's own graph in the background, with the graphify beside it, into a store
+// of its own (graphify.worktree_store) seeded with the checkout's cache, and serves
+// that graph in place of the checkout's once it is there; the checkout's until
+// then. It extracts again when the worktree has changed since, so that the graph
+// has the branch's edits (FUTURE_WORK.md §11).
+//
 // It reloads a graph when its graph.json changes on disk (an extract publishes
 // it atomically), and a tool result starts with a note when the graph looks
 // out of date (graphify.stale_note).
@@ -50,19 +57,40 @@ fn main() {
 	// optional 2nd arg / GRAPHIFY_SOURCE_DIR: override the extraction root so a
 	// graph shared from another machine resolves get_body against local source.
 	src_dir := if positional.len > 1 { positional[1] } else { os.getenv('GRAPHIFY_SOURCE_DIR') }
-	mut base := load(graph_path, src_dir) or {
+	// the project whose root holds the directory this server was started in
+	base_root := if m := graphify.load_manifest(os.join_path(os.dir(graph_path), 'manifest.json')) {
+		m.root
+	} else {
+		''
+	}
+	mut project_path := graphify.project_for(projects_dir, os.getwd(), base_root) or { '' }
+	// a worktree's extract starts before the base graph is read, which takes longer
+	// than a project's extract, so that the worktree's graph is the first one served
+	mut wt := Worktree{}
+	if src_dir == '' {
+		wt = start_worktree(projects_dir, project_path, graph_path, base_root)
+	}
+	mut base := load(if wt.ready && wt.graph == graph_path { wt.path } else { graph_path },
+		src_dir) or {
 		eprintln('graphify-mcp: cannot load ${graph_path}: ${err}')
 		exit(1)
 	}
-	// the project whose root holds the directory this server was started in
-	project_path := graphify.project_for(projects_dir, os.getwd(), base.root) or { '' }
+	if wt.poll() && wt.graph == graph_path {
+		base = load(wt.path, '') or { base }
+	}
+	if wt.ready && wt.graph != graph_path {
+		project_path = wt.path
+	}
 	mut served := serve(base, project_path)
-	// mtime has one-second resolution, so the size is compared as well
-	mut stamp := file_stamp(graph_path)
+	// the graph.json the base is read from: the worktree's, once it is there, for a
+	// worktree of the V tree; mtime has one-second resolution, so the size is
+	// compared as well
+	mut base_path := if wt.ready && wt.graph == graph_path { wt.path } else { graph_path }
+	mut stamp := file_stamp(base_path)
 	mut project_stamp := if project_path != '' { file_stamp(project_path) } else { '' }
 	// a shared graph was built by another machine's graphify: compare commits only
 	cli := if src_dir != '' { '' } else { graphify.cli_beside() }
-	mut note := notes(graph_path, project_path, served, cli)
+	mut note := notes(base_path, project_path, served, cli)
 	mut note_at := time.now().unix()
 
 	for {
@@ -75,15 +103,33 @@ fn main() {
 			continue
 		}
 		if line.contains('"tools/call"') {
+			if wt.root != '' {
+				// the worktree's graph is there now: serve it in place of the checkout's
+				if wt.poll() {
+					// only the graph replaced is read again
+					if wt.graph == graph_path {
+						base_path = wt.path
+						stamp = ''
+					} else {
+						project_path = wt.path
+						project_stamp = ''
+					}
+				}
+				wt.refresh()
+			}
 			// a re-extract replaced a graph.json: serve the new graph
-			now_stamp := file_stamp(graph_path)
+			now_stamp := file_stamp(base_path)
 			now_project := if project_path != '' { file_stamp(project_path) } else { '' }
 			if now_stamp != stamp || now_project != project_stamp {
 				if now_stamp != stamp {
-					if fresh := load(graph_path, src_dir) {
+					if fresh := load(base_path, src_dir) {
 						base = fresh
 					}
 				}
+				// the graph served before is let go first, so that the new one can take
+				// its memory: a worktree's is served again after each change
+				served = Served{}
+				gc_collect()
 				served = serve(base, project_path)
 				stamp = now_stamp
 				project_stamp = now_project
@@ -91,11 +137,11 @@ fn main() {
 			}
 			// the checkout moves on its own; look again at most once a minute
 			if time.now().unix() - note_at >= 60 {
-				note = notes(graph_path, project_path, served, cli)
+				note = notes(base_path, project_path, served, cli)
 				note_at = time.now().unix()
 			}
 		}
-		resp := handle(line, served, note)
+		resp := handle(line, served, join_notes(wt.note(), note))
 		if resp != '' {
 			println(resp)
 			flush_stdout()
@@ -103,8 +149,6 @@ fn main() {
 	}
 }
 
-// handle parses one JSON-RPC request and returns the response line, or '' for
-// notifications (no id) and unparseable input.
 fn file_stamp(path string) string {
 	return '${os.file_last_mod_unix(path)}:${os.file_size(path)}'
 }
@@ -170,6 +214,8 @@ fn notes(graph_path string, project_path string, served Served, cli string) stri
 	return out.join(' ')
 }
 
+// handle parses one JSON-RPC request and returns the response line, or '' for
+// notifications (no id) and unparseable input.
 fn handle(line string, served Served, note string) string {
 	any := json2.decode[json2.Any](line) or { return rpc_error(json2.null, -32700, 'parse error') }
 	req := any.as_map()
@@ -388,4 +434,147 @@ fn rpc_error(id json2.Any, code int, message string) string {
 			'message': jstr(message)
 		})
 	}).json_str()
+}
+
+// Worktree is the git worktree this server was started in, when it is another
+// worktree of a graph's repository: `graph`, the checkout's graph.json; `root`,
+// the graph's root in the worktree; `path`, the graph.json its own graph is
+// extracted to. An extract runs in the background, and `done` has its outcome.
+struct Worktree {
+	graph string
+	root  string
+	path  string
+	cli   string
+mut:
+	ready    bool
+	running  bool
+	failed   string
+	state    string
+	state_at i64
+	done     chan string
+}
+
+// start_worktree finds the worktree this server was started in (graphify.worktree_graph)
+// and starts extracting its graph; a Worktree with no root when there is none, or
+// no graphify beside this server to extract it with. A graph a server extracted for
+// the worktree before is served from the start, while it is extracted again.
+fn start_worktree(projects_dir string, project_path string, graph_path string, base_root string) Worktree {
+	stores := graphify.worktree_stores()
+	graphify.prune_worktree_stores(stores)
+	found := graphify.worktree_graph(projects_dir, os.getwd(), project_path, graph_path,
+		base_root) or { return Worktree{} }
+	cli := graphify.cli_beside()
+	if !os.exists(cli) {
+		eprintln('graphify-mcp: ${found.root} is a worktree, but there is no ${cli} to extract it with')
+		return Worktree{}
+	}
+	store := graphify.worktree_store(stores, found.root)
+	graphify.seed_worktree_store(store, found.graph) or {
+		eprintln('graphify-mcp: cannot make ${store}: ${err}')
+		return Worktree{}
+	}
+	path := os.join_path(store, 'graph.json')
+	mut wt := Worktree{
+		graph: found.graph
+		root:  found.root
+		path:  path
+		cli:   cli
+		done:  chan string{cap: 1}
+	}
+	if m := graphify.load_manifest(os.join_path(store, 'manifest.json')) {
+		wt.ready = os.exists(path) && os.real_path(m.root) == os.real_path(found.root)
+	}
+	wt.extract()
+	return wt
+}
+
+// extract starts extracting the worktree's graph in the background, after taking
+// the worktree's state, so that a change made while it runs is extracted after it.
+fn (mut wt Worktree) extract() {
+	wt.state = graphify.worktree_state(wt.root)
+	wt.state_at = time.now().unix()
+	wt.running = true
+	eprintln('graphify-mcp: extracting the worktree ${wt.root}')
+	spawn extract_worktree(wt.cli, wt.root, os.dir(wt.path), wt.done)
+}
+
+// extract_worktree runs `graphify extract` on the worktree into `store`, and sends
+// '' when it published the graph, or what went wrong.
+fn extract_worktree(cli string, root string, store string, done chan string) {
+	res := os.exec([cli, 'extract', root, '--out', store])
+	done <- if res.exit_code == 0 {
+		''
+	} else {
+		lines := res.output.trim_space().split_into_lines()
+		if lines.len > 0 { lines.last() } else { 'exit code ${res.exit_code}' }
+	}
+}
+
+// poll takes the outcome of the extract running, when it is done, and reports
+// whether the worktree's graph has just come: the first that is there, to be served
+// in place of the checkout's. A graph published again is reloaded as any is.
+fn (mut wt Worktree) poll() bool {
+	if !wt.running {
+		return false
+	}
+	mut msg := ''
+	if wt.done.try_pop(mut msg) != .success {
+		return false
+	}
+	wt.running = false
+	wt.failed = msg
+	if msg != '' {
+		eprintln('graphify-mcp: cannot extract the worktree ${wt.root}: ${msg}')
+		return false
+	}
+	eprintln('graphify-mcp: extracted the worktree ${wt.root}')
+	came := !wt.ready
+	wt.ready = true
+	return came
+}
+
+// refresh extracts the worktree again when it has changed since the last extract
+// started, looking at most every two seconds; never while one runs.
+fn (mut wt Worktree) refresh() {
+	if wt.running || time.now().unix() - wt.state_at < 2 {
+		return
+	}
+	wt.state_at = time.now().unix()
+	if graphify.worktree_state(wt.root) != wt.state {
+		wt.extract()
+	}
+}
+
+// note says what the graph served is to the worktree: the checkout's, until the
+// worktree's own is there; the worktree's from before a change, while it is
+// extracted again; '' once it is up to date.
+fn (wt Worktree) note() string {
+	if wt.root == '' {
+		return ''
+	}
+	checkout := os.dir(wt.graph)
+	if !wt.ready {
+		if wt.failed != '' {
+			return 'the graph of this worktree, ${wt.root}, could not be extracted (${wt.failed}), so this is the graph of the checkout in ${checkout}, not of this branch'
+		}
+		return 'the graph of this worktree, ${wt.root}, is being extracted; until it is there, this is the graph of the checkout in ${checkout}, not of this branch'
+	}
+	if wt.running {
+		return 'the worktree has changed since its graph was extracted; it is being extracted again'
+	}
+	if wt.failed != '' {
+		return 'the worktree has changed, but its graph could not be extracted again (${wt.failed})'
+	}
+	return ''
+}
+
+// join_notes joins the notes that are set.
+fn join_notes(a string, b string) string {
+	return if a == '' {
+		b
+	} else if b == '' {
+		a
+	} else {
+		'${a} ${b}'
+	}
 }
