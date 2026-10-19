@@ -23,6 +23,12 @@
 // -Commit makes two machines extract exactly the same source: it fast-forwards
 // the repo to that commit and never moves it back or off its branch.
 //
+// The config's `projects` are extracted after the target repo, each into the store
+// beside it, so the MCP server can layer each on it (`--projects`, FUTURE_WORK.md
+// §11). A project is re-extracted when its commit differs from its graph's, when
+// graphify was rebuilt or the target repo moved (its vlib is the project's library),
+// or when it has no graph yet. A project is never pulled: it is someone's checkout.
+//
 // graphify's own checkout is fast-forwarded too, so a merged change reaches
 // every machine on its next run; it is left alone when it has local changes
 // or isn't on a branch, and a failed pull only logs a warning. A prebuilt
@@ -37,6 +43,13 @@ import x.json2
 struct Config {
 	vlang_repo string
 	store      string
+	projects   []string
+}
+
+// ProjectManifest is the part of a project graph's manifest.json that says
+// whether it is out of date.
+struct ProjectManifest {
+	source_commit string
 }
 
 struct Options {
@@ -416,18 +429,52 @@ fn main() {
 
 	if !changed {
 		log_line(log_path, 'Nothing changed. Skipping extract.')
-		log_line(log_path, '--- done ---')
-		exit(0)
+	} else {
+		log_line(log_path, 'extracting graph...')
+		start := time.now()
+		result := os.exec([graphify_exe, 'extract', vlang, '--store', store])
+		log_output(log_path, result.output)
+		if result.exit_code != 0 {
+			fail(log_path, 'extract failed')
+		}
+		elapsed_s := int(time.now().unix() - start.unix())
+		log_line(log_path, 'done in ${elapsed_s}s')
 	}
+	mut failed := []string{}
+	for project in config.projects {
+		extract_project(log_path, graphify_exe, project, store, changed) or {
+			log_line(log_path, 'ERROR: ${err}')
+			failed << project
+		}
+	}
+	if failed.len > 0 {
+		fail(log_path, 'project extract failed: ${failed.join(', ')}')
+	}
+	log_line(log_path, '--- done ---')
+}
 
-	log_line(log_path, 'extracting graph...')
-	start := time.now()
-	result := os.exec([graphify_exe, 'extract', vlang, '--store', store])
+// extract_project extracts one project into the store, as `extract --store` names
+// it, unless its graph is of its current commit and `force` (graphify rebuilt, or the
+// target repo moved) isn't set.
+fn extract_project(log_path string, exe string, project string, store string, force bool) ! {
+	if !os.is_dir(project) {
+		return error('${project}: no such directory')
+	}
+	out := os.join_path(store, os.base(os.real_path(project)))
+	head := head_of(project)
+	if !force && head != '' && os.exists(os.join_path(out, 'graph.json')) {
+		m := json2.decode[ProjectManifest](os.read_file(os.join_path(out, 'manifest.json')) or {
+			''
+		}) or { ProjectManifest{} }
+		if m.source_commit == head {
+			log_line(log_path, '${project}: up to date')
+			return
+		}
+	}
+	log_line(log_path, 'extracting ${project}...')
+	result := os.exec([exe, 'extract', project, '--store', store])
 	log_output(log_path, result.output)
 	if result.exit_code != 0 {
-		fail(log_path, 'extract failed')
+		return error('${project}: extract failed')
 	}
-	elapsed_s := int(time.now().unix() - start.unix())
-	log_line(log_path, 'done in ${elapsed_s}s')
-	log_line(log_path, '--- done ---')
 }

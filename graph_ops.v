@@ -16,11 +16,15 @@ pub mut:
 	// traversal, ranking or name resolution, which stay the project's
 	lib_by_id map[string]Symbol
 	lib_edges []Edge
+	// base is Graph.base.ids: the ids a layered graph took from the graph under it
+	base map[string]bool
 }
 
 // index builds the lookup structures for a graph.
 pub fn (g Graph) index() Index {
-	mut idx := Index{}
+	mut idx := Index{
+		base: g.base.ids
+	}
 	for s in g.symbols {
 		// Declarations that share an id are one logical declaration, such as a
 		// function declared once per platform (`os.read_file` in os.c.v and
@@ -97,27 +101,40 @@ fn (idx Index) resolve(target string) string {
 		return target
 	}
 	ids := idx.by_name[target] or { return '' }
-	return if ids.len == 1 { ids[0] } else { '' }
+	if idx.base.len == 0 {
+		return if ids.len == 1 { ids[0] } else { '' }
+	}
+	// a layered graph's raw name is the project's: its edges were made among its own
+	// declarations, and the base's come resolved (layer_graph)
+	own := ids.filter(it !in idx.base)
+	return if own.len == 1 { own[0] } else { '' }
 }
 
 // find returns ids of symbols whose name or signature contains any whitespace
 // token of `text` (case-insensitive). This is the deterministic stand-in for
 // Graphify's NL query seeding.
+// In a layered graph the project's matches are the hits, and the base's only when
+// the project has none.
 pub fn (g Graph) find(text string) []string {
 	terms := text.to_lower().fields()
 	mut hits := []string{}
+	mut base_hits := []string{}
 	mut seen := map[string]bool{}
 	for s in g.symbols {
 		hay := '${s.name} ${s.signature}'.to_lower()
 		for t in terms {
 			if hay.contains(t) && s.id !in seen {
 				seen[s.id] = true
-				hits << s.id
+				if s.id in g.base.ids {
+					base_hits << s.id
+				} else {
+					hits << s.id
+				}
 				break
 			}
 		}
 	}
-	return hits
+	return if hits.len > 0 { hits } else { base_hits }
 }
 
 // resolve_one returns the single best id for a node reference (exact id, exact
@@ -307,7 +324,8 @@ pub fn (g Graph) explain(node string) string {
 	}
 	s := idx.by_id[id] or { idx.lib_by_id[id] or { return 'no symbol matches: ${node}' } }
 
-	mut out := ['${s.kind.str()} ${s.name}  (${s.loc()})', s.render()]
+	mark := if id in idx.base || id in idx.lib_by_id { ' [library]' } else { '' }
+	mut out := ['${s.kind.str()} ${s.name}  (${s.loc()})${mark}', s.render()]
 	// The doc comment is often the whole answer to "what does this do", which
 	// otherwise costs a file read. Capped so one rambling comment cannot blow
 	// the budget this tool exists to protect.
@@ -447,7 +465,8 @@ fn name_of(idx Index, id string) string {
 // A library declaration is marked, `contains (vlib/builtin/string.v:1773) [library]`.
 fn label(idx Index, id string) string {
 	if s := idx.by_id[id] {
-		return '${s.name} (${s.loc()})'
+		mark := if id in idx.base { ' [library]' } else { '' }
+		return '${s.name} (${s.loc()})${mark}'
 	}
 	if s := idx.lib_by_id[id] {
 		return '${s.name} (${s.loc()}) [library]'
@@ -486,6 +505,9 @@ fn uniq(a []string) []string {
 // merge_graphs), or the graph's single root otherwise, unchanged from
 // before merged graphs were supported.
 fn (g Graph) source_root(s Symbol) string {
+	if s.id in g.base.ids {
+		return g.base.root
+	}
 	for label, root in g.roots {
 		if s.id.starts_with(label + '::') {
 			return root
@@ -517,7 +539,8 @@ pub fn (g Graph) get_body(node string) string {
 	// the file's text as the extract read it: a change since then means the
 	// captured line range may no longer be this declaration's
 	mut drift := ''
-	if recorded := g.file_hashes[s.file] {
+	hashes := if s.id in g.base.ids { g.base.file_hashes } else { g.file_hashes }
+	if recorded := hashes[s.file] {
 		if recorded != text_hash(src) {
 			drift = '// ${s.file} has changed since the graph was built, so this body may not match it\n'
 		}

@@ -158,6 +158,19 @@ pub mut:
 	// the vlib and VMODULES modules it imports (see FUTURE_WORK.md §10). They are
 	// not in `symbols`: an edge names one by its id, and the index keeps them apart.
 	library Library
+	// base is the graph this one is layered on (layer_graph): the V tree's, whose vlib
+	// declarations and edges follow the project's own in `symbols` and `edges`. Empty
+	// for a graph served on its own. Not in graph.json: the layer is made when served.
+	base Base @[json: '-']
+}
+
+// Base marks the symbols a layered graph took from the graph under it, and says
+// where their files are read from (see layer_graph).
+pub struct Base {
+pub mut:
+	root        string
+	ids         map[string]bool
+	file_hashes map[string]string
 }
 
 // Library is the part of the standard library and of installed modules that a
