@@ -109,6 +109,11 @@ fn extract_v3(path string, src string, rel string, real_path string) FileResult 
 		}
 	}
 	if root < 0 {
+		if errors.len == 0 && only_comments(src) {
+			// an empty file, or one all comments (vlib/v/slow_tests/acommentedmodule),
+			// declares nothing, and V builds it
+			return FileResult{}
+		}
 		return FileResult{
 			parse_error: if errors.len > 0 {
 				'${errors[0].line}:${errors[0].column}: ${errors[0].message}'
@@ -162,6 +167,44 @@ fn extract_v3(path string, src string, rel string, real_path string) FileResult 
 		edges:       edges
 		parse_error: parse_error
 	}
+}
+
+// only_comments reports whether `src` holds nothing but whitespace and comments,
+// `// ...` and `/* ... */`, which V lets nest.
+fn only_comments(src string) bool {
+	mut i := 0
+	for i < src.len {
+		c := src[i]
+		if c.is_space() {
+			i++
+		} else if c == `/` && i + 1 < src.len && src[i + 1] == `/` {
+			for i < src.len && src[i] != `\n` {
+				i++
+			}
+		} else if c == `/` && i + 1 < src.len && src[i + 1] == `*` {
+			mut depth := 0
+			for i < src.len {
+				if src[i] == `/` && i + 1 < src.len && src[i + 1] == `*` {
+					depth++
+					i += 2
+				} else if src[i] == `*` && i + 1 < src.len && src[i + 1] == `/` {
+					depth--
+					i += 2
+					if depth == 0 {
+						break
+					}
+				} else {
+					i++
+				}
+			}
+			if depth != 0 {
+				return false
+			}
+		} else {
+			return false
+		}
+	}
+	return true
 }
 
 // DeclBranch is a method declared at file scope, with the branches of the

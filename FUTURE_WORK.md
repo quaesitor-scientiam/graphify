@@ -1052,7 +1052,11 @@ resolve, but the file was listed as `partial`. `extract_v3` now passes over
 that error when each copy is in another branch of a condition than the rest
 (`method_branches`), and reports it as before when two copies can be compiled
 together. On vlang (adea615a6b) the three `vlib/x/multiwindow` files it flagged
-leave the `partial` list, and `graph.json` is unchanged byte for byte.
+leave the `partial` list, and `graph.json` is unchanged byte for byte. A file of
+nothing but comments, `vlib/v/slow_tests/acommentedmodule/commentedfile.v`, gives V3
+no file node and no error; it declares nothing and V builds it, so it is no longer
+`partial` either (`only_comments`). What remains is the checker fixture whose error is
+its point, `module_alias_started_with_underscore`.
 
 ## 9. Building inside a git worktree compiles the main checkout (fixed, October 2026)
 
