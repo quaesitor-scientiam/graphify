@@ -198,7 +198,7 @@ fn resolve_import(mod string, file_path string, rel string) string {
 	r := rel.replace('\\', '/')
 	if !fp.ends_with('/' + r) {
 		// a VMODULES library file (`vmodules/vglyph/x.v`), whose rel is not its path
-		return library_import(mod)
+		return library_import(mod, file_path)
 	}
 	root := fp[..fp.len - r.len - 1]
 	file_dir := fp.all_before_last('/')
@@ -252,7 +252,7 @@ fn resolve_import(mod string, file_path string, rel string) string {
 			}
 		}
 	}
-	return library_import(mod)
+	return library_import(mod, '')
 }
 
 // alias_dir_target is the path that a directory's `@[alias: '@VMODROOT/<path>']`

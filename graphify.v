@@ -158,11 +158,13 @@ pub fn build_graph_with_library(root string, worker_exe string, out_dir string, 
 		if fr := run.by_rel[rel] {
 			lib_files[rel] = true
 			g.symbols << fr.symbols
-			// a call inside the library is not one of the project's; the rest say
-			// which file they come from, which keep_reached_library goes by, since a
-			// `C.` binding's id is one for the project and the library
+			// a call inside vlib is not one of the project's; a module from VMODULES is
+			// kept whole, calls and all (keep_reached_library). The edges say which file
+			// they come from, which keep_reached_library goes by, since a `C.` binding's
+			// id is one for the project and the library
+			whole := rel.starts_with(lib_vmodules_prefix)
 			for e in fr.edges {
-				if e.kind != .calls {
+				if e.kind != .calls || whole {
 					g.edges << Edge{
 						...e
 						file: if e.file == '' { rel } else { e.file }
@@ -408,7 +410,10 @@ fn imports_of_symbols(symbols []Symbol) []string {
 // of the project's: the declarations the project's calls, references and embeds reach
 // go into `g.library` with their parents, one per id, each with the last line of its
 // body, and the rest go, with every edge made in a library file (`lib_files`). An id
-// the project declares too, a `C.` binding both have, stays the project's.
+// the project declares too, a `C.` binding both have, stays the project's. A module
+// from VMODULES is kept whole, with its edges, which reach into vlib as the project's
+// do: it is what the project builds against, and the MCP server layers it under the
+// project (layer_graph) so a traversal goes on into it (FUTURE_WORK.md §11).
 fn keep_reached_library(mut g Graph, project_len int, lib LibraryRoots, lib_files map[string]bool) {
 	lib_syms := g.symbols[project_len..].clone()
 	mut project_ids := map[string]bool{}
@@ -433,9 +438,23 @@ fn keep_reached_library(mut g Graph, project_len int, lib LibraryRoots, lib_file
 	in_library := fn [lib_files, by_id] (e Edge) bool {
 		return if e.file != '' { e.file in lib_files } else { e.from in by_id }
 	}
+	// an edge a module from VMODULES makes, which is kept
+	in_vmodules := fn [by_id] (e Edge) bool {
+		return if e.file != '' {
+			e.file.starts_with(lib_vmodules_prefix)
+		} else {
+			by_id[e.from].file.starts_with(lib_vmodules_prefix)
+		}
+	}
 	mut keep := map[string]bool{}
+	for id, s in by_id {
+		if s.file.starts_with(lib_vmodules_prefix) {
+			keep[id] = true
+		}
+	}
 	for e in g.edges {
-		if e.kind in [EdgeKind.calls, .references, .embeds] && e.to in by_id && !in_library(e) {
+		if e.kind in [EdgeKind.calls, .references, .embeds] && e.to in by_id
+			&& (!in_library(e) || in_vmodules(e)) {
 			keep[e.to] = true
 		}
 	}
@@ -464,7 +483,7 @@ fn keep_reached_library(mut g Graph, project_len int, lib LibraryRoots, lib_file
 	library.symbols = with_body_ends(kept, lib_syms, library)
 	g.library = library
 	g.symbols = g.symbols[..project_len].clone()
-	g.edges = g.edges.filter(!in_library(it))
+	g.edges = g.edges.filter(!in_library(it) || in_vmodules(it))
 }
 
 // with_body_ends gives each of `kept` the last line of its declaration as its

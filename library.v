@@ -70,11 +70,16 @@ fn (r LibraryRoots) cache_tag() string {
 // library_import names an import the tree doesn't have the way V3 finds it next, in
 // VROOT's vlib: an alias directory (`x.json2`) is the module it names (`json2`, for
 // vlib/json2), and any other module keeps its name, which is its path below vlib or
-// VMODULES. Only a worker the library is handed to looks (export_env).
-fn library_import(mod string) string {
+// VMODULES. In a VMODULES file, `file_path`, a module of its own comes first, found
+// beside its v.mod as V finds it: `import accessibility` in vglyph is
+// `vglyph.accessibility`. Only a worker the library is handed to looks (export_env).
+fn library_import(mod string, file_path string) string {
 	vroot := os.getenv(lib_env_vroot)
 	if vroot == '' {
 		return mod
+	}
+	if own := vmodules_own_import(mod, file_path) {
+		return own
 	}
 	vlib := vroot + '/vlib'
 	if target := alias_dir_target(vlib + '/' + mod.replace('.', '/')) {
@@ -84,6 +89,29 @@ fn library_import(mod string) string {
 		}
 	}
 	return mod
+}
+
+// vmodules_own_import is the module `mod` names from the VMODULES file `file_path`
+// when it is one of that module's own, beside the v.mod above the file, by its path
+// below VMODULES; none for a file outside VMODULES or an import no v.mod holds.
+fn vmodules_own_import(mod string, file_path string) ?string {
+	vmods := os.getenv(lib_env_vmodules).replace('\\', '/')
+	fp := file_path.replace('\\', '/')
+	if vmods == '' || !fp.starts_with(vmods + '/') {
+		return none
+	}
+	mut d := fp.all_before_last('/')
+	for d.len > vmods.len {
+		if os.exists(d + '/v.mod') {
+			c := d + '/' + mod.replace('.', '/')
+			if has_v_sources(c) {
+				return c[vmods.len + 1..].replace('/', '.')
+			}
+			return none
+		}
+		d = d.all_before_last('/')
+	}
+	return none
 }
 
 // LibModule is a module directory the library is read from, with the rel its files

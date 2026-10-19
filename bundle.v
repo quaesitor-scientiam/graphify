@@ -105,13 +105,20 @@ pub fn (g Graph) report() string {
 		files[s.file] = true
 		sym_kinds[s.kind.str()]++
 	}
+	// the project's own edges: a module from VMODULES kept whole has its edges in the
+	// graph too (keep_reached_library), which are the module's, not the project's
+	edges := if g.library.symbols.len > 0 {
+		g.edges.filter(it.from !in idx.lib_by_id)
+	} else {
+		g.edges
+	}
 	mut edge_kinds := map[string]int{}
-	for e in g.edges {
+	for e in edges {
 		edge_kinds[edge_kind_str(e.kind)]++
 	}
-	calls_prov := count_provenance(idx, g.edges, .calls)
-	refs_prov := count_provenance(idx, g.edges, .references)
-	embeds_prov := count_provenance(idx, g.edges, .embeds)
+	calls_prov := count_provenance(idx, edges, .calls)
+	refs_prov := count_provenance(idx, edges, .references)
+	embeds_prov := count_provenance(idx, edges, .embeds)
 
 	mut b := []string{}
 	b << '# Graph report'
@@ -119,7 +126,7 @@ pub fn (g Graph) report() string {
 	b << '- root: `${g.root}`'
 	b << '- files: ${files.len}'
 	b << '- symbols: ${g.symbols.len}'
-	b << '- edges: ${g.edges.len}'
+	b << '- edges: ${edges.len}'
 	if g.library.symbols.len > 0 {
 		mut roots := []string{}
 		for label, root in g.library.roots {

@@ -1316,9 +1316,8 @@ served alone, whose index holds all 163,000 symbols, not vlib's 70,000.
 
 Still open:
 
-- A project's modules from VMODULES are layered only as the library declarations its
-  calls reach, not as their own graphs: a project using gui reaches the gui
-  declarations it calls, not what they call.
+- ~~A project's modules from VMODULES are layered only as the library declarations
+  its calls reach.~~ Done, see below.
 - A worktree inside a project gets the graph of the project's checkout, as a worktree
   of vlang gets vlang's.
 - Each session's server holds its own copy of the vlang graph, as one did before.
@@ -1333,3 +1332,31 @@ same answers byte for byte. A module, whose symbol each of its files declares, i
 shown from one of its own files rather than the last one read, which was often a
 test (`vlib.gg` from `wayland_pipe_abi_test.c.v`): `shown_before` puts a non-test
 file first.
+
+**Modules from VMODULES, whole (October 2026).** A module the project imports from
+VMODULES was kept only as the declarations the project reaches, so a traversal from
+gui stopped at vglyph as it had stopped at vlib. It is now kept whole when the project
+is extracted, with its own edges, calls included, resolved as the project's are
+(`keep_reached_library`); the MCP server layers it under the project with vlib
+(`layer_graph`). This is the module the project builds against, at the version
+installed, with the library's ids, so it needs no graph of its own: a clone being
+worked on, `~/repo/vglyph`, has its own project graph. vlib is still pruned to what is
+reached, and the V tree's graph stands in for the rest. The project's report counts
+its own edges only.
+
+Kept whole, vglyph showed that a VMODULES module's own submodule wasn't read:
+`import accessibility` in vglyph names `vglyph/accessibility`, which V finds beside the
+module's v.mod, but the library looked only in vlib and at the top of VMODULES, so
+`ts.am.commit()` on an `accessibility.AccessibilityManager` resolved by locality to
+`TextSystem.commit` itself. Such an import is now resolved beside the importing
+module's v.mod first (`vmodules_own_import`, in library.v). A test fixture whose
+VMODULES directory was named `vmodules`, as the rels are, had hidden it: the files'
+paths ended in their rels, so they were taken for the tree's.
+
+On gui, the only one of the five projects that imports from VMODULES: the library
+goes from 429 to 1,680 declarations (vglyph and `vglyph.accessibility` whole), with
+3,557 edges of vglyph's own, none of them unresolved calls (6 before the submodule
+was read); graph.json from 5.1 MB to 5.8 MB. gui's own edges are unchanged. One
+`shortest_path` goes from `gui.renderers_draw` through `vglyph.TextSystem.commit` to
+`vglyph.accessibility.AccessibilityManager.commit`, or through
+`vglyph.Renderer.commit` to `vlib.gg.Image.update_pixel_data`.

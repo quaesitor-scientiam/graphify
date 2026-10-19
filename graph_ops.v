@@ -560,9 +560,13 @@ pub fn (g Graph) get_body(node string) string {
 		return 'no symbol matches: ${node}'
 	}
 	s := idx.by_id[id] or { return 'no symbol matches: ${node}' }
-	src := os.read_file(os.join_path(g.source_root(s), s.file)) or {
-		return 'cannot read ${s.file}: ${err}'
+	// a layered module from VMODULES is read where the library was (layer_graph)
+	path := if s.id in g.base.ids && s.file.starts_with(lib_vmodules_prefix) {
+		g.library.path_of(s.file) or { return 'cannot read ${s.file}: no library root' }
+	} else {
+		os.join_path(g.source_root(s), s.file)
 	}
+	src := os.read_file(path) or { return 'cannot read ${s.file}: ${err}' }
 	// a CRLF file (a Windows checkout with core.autocrlf) would otherwise
 	// leave a `\r` on every line, and the closing-brace checks below would
 	// never match
