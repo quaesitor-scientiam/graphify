@@ -560,7 +560,9 @@ vlang graph is of. See FUTURE_WORK.md §11.
 
 A session in a git worktree of a project, or of vlang, inside the checkout as
 Claude Code makes one (`.claude/worktrees/`) or beside it, gets the graph of the
-worktree's own branch. The server extracts the worktree in the background, with
+worktree's own branch. The session's directory is the client's MCP root
+(`roots/list`), which the server asks for: the desktop app starts a server in the
+project's own checkout, not the session's worktree. The server extracts the worktree in the background, with
 the `bin/graphify` beside it, into a store of its own under
 `~/.cache/graphify/worktrees` (or `GRAPHIFY_WORKTREE_STORES`), seeded with the
 checkout's extract cache so that only the files the branch changed are parsed:
