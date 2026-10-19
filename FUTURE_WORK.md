@@ -1008,6 +1008,15 @@ the Mac and Windows, and can never show up in a comparison between the two.
 Preserve mode parsed all 7,467 files without crashing, and no file had fewer
 functions than in default mode.
 
+With every branch kept, V3 reports a method declared once per branch as a
+duplicate method: `$if darwin { fn (b B) f() } $else { fn (b B) f() }`, or under
+`$if d3d ? {}` and `$if !d3d ? {}`. Both copies are read and calls to them
+resolve, but the file was listed as `partial`. `extract_v3` now passes over
+that error when each copy is in another branch of a condition than the rest
+(`method_branches`), and reports it as before when two copies can be compiled
+together. On vlang (adea615a6b) the three `vlib/x/multiwindow` files it flagged
+leave the `partial` list, and `graph.json` is unchanged byte for byte.
+
 ## 9. Building inside a git worktree compiles the main checkout (fixed, October 2026)
 
 `cmd/cli`, `cmd/mcp`, and `cmd/hooks/graphify_hook.vsh` all `import graphify`.

@@ -99,14 +99,8 @@ fn extract_v3(path string, src string, rel string, real_path string) FileResult 
 	prefs.supports_inline_asm = true
 	mut p := parser.Parser.new(prefs)
 	a := p.parse_file(path)
-	mut parse_error := ''
-	for d in p.diagnostics {
-		// errors carry no severity text; warnings and notices say so
-		if d.severity == '' || d.severity.starts_with('error') {
-			parse_error = '${d.line}:${d.column}: ${d.message}'
-			break
-		}
-	}
+	// errors carry no severity text; warnings and notices say so
+	errors := p.diagnostics.filter(it.severity == '' || it.severity.starts_with('error'))
 	// the parser emits an empty `file` node first; the real one has children
 	mut root := -1
 	for i, n in a.nodes {
@@ -116,7 +110,11 @@ fn extract_v3(path string, src string, rel string, real_path string) FileResult 
 	}
 	if root < 0 {
 		return FileResult{
-			parse_error: if parse_error != '' { parse_error } else { 'no file node' }
+			parse_error: if errors.len > 0 {
+				'${errors[0].line}:${errors[0].column}: ${errors[0].message}'
+			} else {
+				'no file node'
+			}
 		}
 	}
 	mut starts := [0]
@@ -145,11 +143,110 @@ fn extract_v3(path string, src string, rel string, real_path string) FileResult 
 		anon:        anon
 	}
 	syms, edges := f.extract(flat.NodeId(root))
+	mut parse_error := ''
+	mut branches := map[string][]DeclBranch{}
+	for d in errors {
+		if d.message.starts_with('duplicate method `') {
+			if branches.len == 0 {
+				f.method_branches(f.kids(flat.NodeId(root)), '', mut branches)
+			}
+			if in_other_branches(branches, d.line) {
+				continue
+			}
+		}
+		parse_error = '${d.line}:${d.column}: ${d.message}'
+		break
+	}
 	return FileResult{
 		symbols:     syms
 		edges:       edges
 		parse_error: parse_error
 	}
+}
+
+// DeclBranch is a method declared at file scope, with the branches of the
+// file-scope `$if`s it is in, outermost first (see comptime_branch).
+struct DeclBranch {
+	line   int
+	branch string
+}
+
+// method_branches finds the file's methods by their parser name (`Type.name`).
+// With every branch of a `$if` kept (extract_v3), V3 reports a method declared
+// in both branches, `$if darwin { fn (b B) f() } $else { fn (b B) f() }`, or
+// under `$if x ?` and `$if !x ?`, as a duplicate method, though only one of them
+// is ever compiled and both are read.
+fn (f &V3File) method_branches(ids []flat.NodeId, branch string, mut out map[string][]DeclBranch) {
+	for id in ids {
+		n := f.node(id)
+		match n.kind {
+			.comptime_if {
+				for i, k in f.kids(id) {
+					f.method_branches([k], branch + comptime_branch(n.value, i == 0), mut out)
+				}
+			}
+			.block {
+				f.method_branches(f.kids(id), branch, mut out)
+			}
+			.fn_decl {
+				if n.value.contains('.') {
+					out[n.value] << DeclBranch{
+						line:   f.line_of(n.pos.offset)
+						branch: branch
+					}
+				}
+			}
+			else {}
+		}
+	}
+}
+
+// in_other_branches reports whether the method declared on `line` is in a
+// different branch of a `$if` from each other declaration of its name, so that
+// V3's duplicate method on it is not one V would report.
+fn in_other_branches(branches map[string][]DeclBranch, line int) bool {
+	for _, decls in branches {
+		for d in decls {
+			if d.line != line {
+				continue
+			}
+			for o in decls {
+				if o.line != line && !exclusive_branches(d.branch, o.branch) {
+					return false
+				}
+			}
+			return decls.len > 1
+		}
+	}
+	return false
+}
+
+// comptime_branch is one step of a branch path: the condition of a `$if` and
+// whether its block (`holds`) or its `$else` is taken, with a leading `!` read as
+// the `$else` of the condition it negates, so `$if !x ? {}` is `$if x ? {} $else {}`'s
+// `$else`. A step ends in \x1f.
+fn comptime_branch(cond string, holds bool) string {
+	c := cond.replace(' ', '')
+	if c.starts_with('!') && !c.contains('&&') && !c.contains('||') {
+		return '${c[1..]}=${!holds}\x1f'
+	}
+	return '${c}=${holds}\x1f'
+}
+
+// exclusive_branches reports whether two branch paths part at a condition, one
+// taking its block and the other its `$else`.
+fn exclusive_branches(a string, b string) bool {
+	sa := a.split('\x1f')
+	sb := b.split('\x1f')
+	for i in 0 .. sa.len {
+		if i >= sb.len || sa[i] == '' || sb[i] == '' {
+			return false
+		}
+		if sa[i] != sb[i] {
+			return sa[i].all_before_last('=') == sb[i].all_before_last('=')
+		}
+	}
+	return false
 }
 
 // method_tparams reads the type parameters of the method `name` declared on

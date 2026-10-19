@@ -2443,6 +2443,23 @@ fn test_extract_clean_file_has_no_parse_error() {
 	assert fr.symbols.map(it.name).contains('ok')
 }
 
+fn test_a_method_in_both_branches_of_a_top_level_comptime_if_is_no_parse_error() {
+	src := 'module demo\n\nstruct B {}\n\n\$if darwin {\n\tfn (b B) ready() bool {\n\t\treturn true\n\t}\n} \$else \$if windows {\n\tfn (b B) ready() bool {\n\t\treturn true\n\t}\n} \$else {\n\tfn (b B) ready() bool {\n\t\treturn false\n\t}\n}\n'
+	fr := extract_v_text_result(src, 'demo.v')
+	assert fr.parse_error == ''
+	assert fr.symbols.filter(it.name == 'ready').map(it.line) == [6, 10, 14]
+	// two `$if`s on a condition and on its negation, as in vlib/x/multiwindow
+	negated := 'module demo\n\nstruct B {}\n\n\$if gui ? {\n\t\$if d3d ? {\n\t\tfn (b B) env() int {\n\t\t\treturn 1\n\t\t}\n\t}\n\t\$if !d3d ? {\n\t\tfn (b B) env() int {\n\t\t\treturn 2\n\t\t}\n\t}\n}\n'
+	assert extract_v_text_result(negated, 'demo.v').parse_error == ''
+	// a method declared twice in one branch, or outside any, is still reported
+	twice := 'module demo\n\nstruct B {}\n\n\$if darwin {\n\tfn (b B) ready() bool {\n\t\treturn true\n\t}\n\tfn (b B) ready() bool {\n\t\treturn true\n\t}\n} \$else {\n\tfn (b B) ready() bool {\n\t\treturn false\n\t}\n}\n'
+	assert extract_v_text_result(twice, 'demo.v').parse_error.contains('duplicate method `ready`')
+	same := 'module demo\n\nstruct B {}\n\n\$if d3d ? {\n\tfn (b B) env() int {\n\t\treturn 1\n\t}\n}\n\$if d3d ? {\n\tfn (b B) env() int {\n\t\treturn 2\n\t}\n}\n'
+	assert extract_v_text_result(same, 'demo.v').parse_error.contains('duplicate method `env`')
+	plain := 'module demo\n\nstruct B {}\n\nfn (b B) ready() bool {\n\treturn true\n}\n\$if darwin {\n\tfn (b B) ready() bool {\n\t\treturn false\n\t}\n}\n'
+	assert extract_v_text_result(plain, 'demo.v').parse_error.contains('duplicate method `ready`')
+}
+
 fn test_file_result_parse_error_round_trips_through_the_batch_protocol() {
 	fr := extract_v_text_result(partial_parse_src, 'demo.v')
 	assert fr.parse_error != ''
