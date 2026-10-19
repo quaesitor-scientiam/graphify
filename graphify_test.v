@@ -4608,7 +4608,7 @@ fn test_index_representative_ranks_backends() {
 			file: file
 		}
 	}
-	js, wasm, c, plain := decl('os/f.js.v'), decl('os/f.wasm.v'), decl('os/f.c.v'), decl('os/f_nix.v')
+	js, wasm, c, plain := decl('os/f.js.v'), decl('os/f.wasm.v'), decl('os/f.c.v'), decl('os/f_more.v')
 	for syms in [[js, wasm, c], [c, wasm, js], [wasm, c, js], [js, c, wasm]] {
 		assert Graph{
 			symbols: syms
@@ -4619,7 +4619,7 @@ fn test_index_representative_ranks_backends() {
 	}.index().by_id['os.f'].file == 'os/f.wasm.v'
 	assert Graph{
 		symbols: [c, plain, js]
-	}.index().by_id['os.f'].file == 'os/f_nix.v'
+	}.index().by_id['os.f'].file == 'os/f_more.v'
 }
 
 fn test_index_representative_is_the_file_this_host_compiles() {
@@ -4633,26 +4633,23 @@ fn test_index_representative_is_the_file_this_host_compiles() {
 			file: file
 		}
 	}
-	nix, windows := decl('os/os_nix.c.v'), decl('os/os_windows.c.v')
-	mut own_os := nix
-	$if windows {
-		own_os = windows
-	}
-	for syms in [[nix, windows], [windows, nix]] {
+	// the host told at run time: a `$if` on a name the test also gives a variable
+	// was not read as the OS
+	host := os.user_os()
+	nix, win := decl('os/os_nix.c.v'), decl('os/os_windows.c.v')
+	own_os := if host == 'windows' { win } else { nix }
+	for syms in [[nix, win], [win, nix]] {
 		assert Graph{
 			symbols: syms
 		}.index().by_id['os.ls'].file == own_os.file
 	}
 	// an OS's own file before the `_default` one V compiles only without it
 	default := decl('os/fd_default.c.v')
-	mut own_name := 'os/fd_linux.c.v'
-	$if windows {
-		own_name = 'os/fd_windows.c.v'
-	}
-	$if macos {
-		own_name = 'os/fd_macos.c.v'
-	}
-	own := decl(own_name)
+	own := decl(match host {
+		'windows' { 'os/fd_windows.c.v' }
+		'macos' { 'os/fd_macos.c.v' }
+		else { 'os/fd_linux.c.v' }
+	})
 	for syms in [[default, own], [own, default]] {
 		assert Graph{
 			symbols: syms
@@ -4671,8 +4668,8 @@ fn test_index_representative_is_the_file_this_host_compiles() {
 	// the backend comes first: a C file for another OS before the JS backend's
 	js := decl('os/os.js.v')
 	assert Graph{
-		symbols: [windows, js]
-	}.index().by_id['os.ls'].file == windows.file
+		symbols: [win, js]
+	}.index().by_id['os.ls'].file == win.file
 }
 
 fn test_index_lists_a_shared_id_once_by_name() {
