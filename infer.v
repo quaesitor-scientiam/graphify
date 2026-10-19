@@ -26,6 +26,7 @@ struct Infer {
 	name_of      map[string]string // fn/method id -> its name
 	field_type   map[string]string // '<struct id>\x00<field>' -> its type
 	alias_of     map[string]string // alias id -> the type it names (not a sum type)
+	sum_variants map[string][]string // sum type id -> its variants, as written
 	embeds_of    map[string][]Edge // struct or interface id -> its raw `embeds` edges
 	field_id     map[string]string // '<struct id>\x00<field>' -> the field's symbol id
 	consts       map[string][]Symbol // name -> the consts and globals with a recipe
@@ -354,6 +355,8 @@ fn (inf &Infer) follow_steps(e Edge, depth int) ?InferredType {
 			t = spawned_thread(t)
 			continue
 		}
+		// indexing a pointer, `p[i]` in unsafe code, reads what it points to
+		pointer := t.text.starts_with('&')
 		t.text = bare_type(t.text)
 		if t.text == '' {
 			return none
@@ -431,12 +434,17 @@ fn (inf &Infer) follow_steps(e Edge, depth int) ?InferredType {
 					}
 					targs << rest[j][2..]
 				}
+				caller_mod := (inf.scope_of[e.file] or { FileScope{} }).mod
 				for i, param in inf.tparams_of[found] or { []string{} } {
 					if i < targs.len && targs[i] != '' {
-						ret.text = subst_word(ret.text, param, targs[i])
+						ret.text = subst_word(ret.text, param, qualify_type_names(targs[i],
+							caller_mod))
 					}
 				}
 				t = ret
+			} else if ft := inf.called_field(t, name, e.file) {
+				// `p.factory()` calls a function-typed field, and has the function's result
+				t = ft
 			} else {
 				// V writes `str()` for a type that declares none, and it returns a string
 				if name != 'str' || (inf.no_method(t, name, e.file) or { 'none' }) != '' {
@@ -456,7 +464,20 @@ fn (inf &Infer) follow_steps(e Edge, depth int) ?InferredType {
 		} else if step == '[]' {
 			// an alias of an array, `type Sources = [2]Source`, has its element type
 			t = inf.unalias(t, e.file)
-			t.text = elem_type(t.text)?
+			t.text = elem_type(t.text) or {
+				if !pointer || !is_named_type(t.text) {
+					return none
+				}
+				t.text
+			}
+		} else if step == 'sl' {
+			// a slice of a fixed array, `digest[..]`, is a dynamic array of its elements; any
+			// other slice has the type of what it slices
+			u := inf.unalias(t, e.file)
+			if u.text.starts_with('[') && !u.text.starts_with('[]') {
+				t = u
+				t.text = '[]' + elem_type(u.text)?
+			}
 		} else if step == 'R' {
 			// the return type of a function type, `fn (int) Doc`
 			t.text = fn_return(t.text)?
@@ -493,8 +514,10 @@ fn (inf &Infer) follow_steps(e Edge, depth int) ?InferredType {
 // generic arguments (the `p:` steps of `steps`) put in place of its parameters.
 fn (inf &Infer) call_result(e Edge, to string, steps []string) ?InferredType {
 	// V generates `T.from(x)` and `T.from_string(s)` for every enum T, and they return
-	// T (a result, which the recipe's `or` already drops), so the value is the enum
-	if to.ends_with('__static__from') || to.ends_with('__static__from_string') {
+	// T (a result, which the recipe's `or` already drops), so the value is the enum; so
+	// does a `@[flag]` enum's `T.zero()`
+	if to.ends_with('__static__from') || to.ends_with('__static__from_string')
+		|| to.ends_with('__static__zero') {
 		typ := to.all_before('__static__')
 		scope := inf.scope_of[e.file] or { FileScope{} }
 		enum_t := InferredType{
@@ -537,10 +560,13 @@ fn (inf &Infer) call_result(e Edge, to string, steps []string) ?InferredType {
 		}
 		targs << step[2..]
 	}
+	// a type argument is written in the caller's module, the result read in the callee's:
+	// `json.decode[[]Envelope](s)` returns mcp's `[]Envelope`, not json2's
+	caller_mod := (inf.scope_of[e.file] or { FileScope{} }).mod
 	params := inf.generics_of[id] or { []string{} }
 	for i, param in params {
 		if i < targs.len && targs[i] != '' {
-			t.text = subst_word(t.text, param, targs[i])
+			t.text = subst_word(t.text, param, qualify_type_names(targs[i], caller_mod))
 		}
 	}
 	return t
@@ -713,7 +739,8 @@ fn (inf &Infer) comptime_type(name string, file string) ?InferredType {
 }
 
 // find_const is the const or global that `name` names from `file`: one of
-// its module's (in a standalone program, of its own file), or of builtin;
+// its module's (in a standalone program, of its own file, unless its `main`
+// module is one program), or of builtin;
 // with a module path, `os.args`, one of that module's.
 fn (inf &Infer) find_const(name string, file string) ?Symbol {
 	short := name.all_after_last('.')
@@ -726,7 +753,10 @@ fn (inf &Infer) find_const(name string, file string) ?Symbol {
 		if test_private(c.file, file) {
 			continue
 		}
-		if qual == '' && c.parent == scope.mod && (!scope.is_main || c.file == file) {
+		// a standalone program's own file, or any file of a `main` module that is one
+		// program, as call resolution takes it (DeclSite.solo)
+		if qual == '' && c.parent == scope.mod
+			&& (!scope.is_main || c.file == file || (inf.site_of[c.id] or { DeclSite{} }).solo) {
 			own << c
 		}
 		if (qual != '' && import_reaches(c.parent, qual))
@@ -781,7 +811,8 @@ fn split_type_args(t string) []string {
 // qualify_type_names names the unqualified types in a type text as declared in
 // module `mod`, so that a type argument taken from one module still means the
 // same type where it is substituted into another module's declaration: `[]Config`
-// in `main` becomes `[]main.Config`. A name already qualified stays as written.
+// in `main` becomes `[]main.Config`. A name already qualified stays as written, and so
+// does a type parameter, `T`.
 fn qualify_type_names(t string, mod string) string {
 	if mod == '' {
 		return t
@@ -795,7 +826,7 @@ fn qualify_type_names(t string, mod string) string {
 				j++
 			}
 			word := t[i..j]
-			if word[0].is_capital() && !word.contains('.') {
+			if word[0].is_capital() && !word.contains('.') && !is_generic_param(word) {
 				out += '${mod}.${word}'
 			} else {
 				out += word
@@ -1231,6 +1262,21 @@ fn (inf &Infer) field_of(t InferredType, name string, file string, depth int) ?I
 		return inf.field_of(InferredType{ text: target, mod: decl.mod, file: decl.file },
 			name, file, depth + 1)
 	}
+	// a field every variant of a sum type has, `k.text` of `type Key = Bare | Quoted`, which
+	// V lets the sum type's value read; the variants agree on its type, so the first says it.
+	// A field only some variants have is not the sum type's (`str` of `string` in `int | string`)
+	variants := inf.sum_variants[decl.id] or { []string{} }
+	mut shared := ?InferredType(none)
+	for v in variants {
+		ft := inf.field_of(InferredType{ text: v, mod: decl.mod, file: decl.file }, name,
+			file, depth + 1) or { return none }
+		if shared == none {
+			shared = ft
+		}
+	}
+	if st := shared {
+		return st
+	}
 	// a field of an embedded struct, or the embedded struct itself, `s.Base`
 	mut found := []InferredType{}
 	for emb in inf.embedded(decl) {
@@ -1320,6 +1366,20 @@ fn is_named_type(t string) bool {
 	}
 	c := t[0]
 	return c.is_letter() || c == `_`
+}
+
+// called_field is the result of calling the function-typed field `name` of `t`, as
+// `p.factory()` does: the return type of the field's function type.
+fn (inf &Infer) called_field(t InferredType, name string, file string) ?InferredType {
+	// the field's type may be an alias of a function type, `type Factory = fn () &Conn`
+	ft := inf.unalias(inf.field_of(t, name, file, 0)?, file)
+	if !bare_type(ft.text).starts_with('fn') {
+		return none
+	}
+	mut out := ft
+	out.text = fn_return(bare_type(ft.text))?
+	out.field_id = ''
+	return out
 }
 
 // elem_type is the type of one element: of an array, `[]T` and `[N]T`, a

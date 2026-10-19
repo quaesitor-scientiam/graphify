@@ -1135,6 +1135,7 @@ fn resolve_edges(mut g Graph) {
 	mut fn_names := map[string]string{}
 	mut field_type := map[string]string{}
 	mut alias_of := map[string]string{}
+	mut sum_variants := map[string][]string{}
 	mut embeds_of := map[string][]Edge{}
 	mut field_ids := map[string]string{}
 	mut consts := map[string][]Symbol{}
@@ -1181,6 +1182,7 @@ fn resolve_edges(mut g Graph) {
 				rhs := s.signature.all_after(' = ')
 				if rhs.contains(' | ') {
 					dynamic_ids[s.id] = true
+					sum_variants[s.id] = rhs.split('|').map(it.trim_space())
 				} else {
 					alias_of[s.id] = rhs
 				}
@@ -1202,6 +1204,7 @@ fn resolve_edges(mut g Graph) {
 		name_of:      fn_names
 		field_type:   field_type
 		alias_of:     alias_of
+		sum_variants: sum_variants
 		embeds_of:    embeds_of
 		field_id:     field_ids
 		consts:       consts

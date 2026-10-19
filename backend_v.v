@@ -1412,7 +1412,8 @@ mut:
 	pins map[string]string
 }
 
-// TypeCheck is a variable narrowed to a type by `name is typ`, as written.
+// TypeCheck is a variable, or a field of one (`x.base_type`), narrowed to a type by
+// `name is typ`, as written.
 struct TypeCheck {
 	name string
 	typ  string
@@ -1802,10 +1803,13 @@ fn (mut f V3File) walk(id flat.NodeId, ctx V3CallCtx, mut edges []Edge, mut seen
 			}
 		}
 		.comptime_for {
-			// `$for field in T.fields`: each field is a builtin FieldData
+			// `$for field in T.fields`: each field is a builtin FieldData, and each of
+			// `$for a in T.attributes` a VAttribute
 			parts := n.value.split('|')
-			if parts.len == 2 && parts[1] == 'fields' {
-				f.walk_list(kids, ctx.with_vars([parts[0]], ['t:builtin.FieldData']), mut edges, mut seen)
+			if parts.len == 2 && parts[1] in ['fields', 'attributes'] {
+				typ := if parts[1] == 'fields' { 'FieldData' } else { 'VAttribute' }
+				f.walk_list(kids, ctx.with_vars([parts[0]], ['t:builtin.${typ}']), mut edges, mut
+					seen)
 				return ctx
 			}
 		}
@@ -1844,11 +1848,17 @@ fn (mut f V3File) walk(id flat.NodeId, ctx V3CallCtx, mut edges []Edge, mut seen
 				return ctx
 			}
 			// `if x is T { ... }`: `x` is a T in the block, and the else
-			// branches keep the type it had
+			// branches keep the type it had. `if x !is T { ... }` makes `x` a T in the
+			// else branches, and after the `if` when its block always leaves
+			// (`return`, `continue`, `panic()`)
 			if kids.len >= 2 {
 				f.walk(kids[0], ctx, mut edges, mut seen)
 				f.walk(kids[1], ctx.narrowed_by(f.type_checks(kids[0])), mut edges, mut seen)
-				f.walk_list(kids[2..], ctx, mut edges, mut seen)
+				otherwise := ctx.narrowed_by(f.false_checks(kids[0]))
+				f.walk_list(kids[2..], otherwise, mut edges, mut seen)
+				if kids.len == 2 && f.always_leaves(kids[1]) {
+					return otherwise
+				}
 				return ctx
 			}
 		}
@@ -1859,22 +1869,21 @@ fn (mut f V3File) walk(id flat.NodeId, ctx V3CallCtx, mut edges []Edge, mut seen
 				f.walk(kids[1], ctx.narrowed_by(f.type_checks(kids[0])), mut edges, mut seen)
 				return ctx
 			}
+			// `x !is T || x.f()`: so does the right side of an `||`
+			if n.op == .logical_or && kids.len == 2 {
+				f.walk(kids[0], ctx, mut edges, mut seen)
+				f.walk(kids[1], ctx.narrowed_by(f.false_checks(kids[0])), mut edges, mut seen)
+				return ctx
+			}
 		}
 		.match_stmt {
 			// `match x { T { ... } }`: `x` is a T in a branch with one type
 			// pattern; a branch of values or `else` keeps its type
 			if kids.len >= 1 {
-				subject := f.node(kids[0])
 				f.walk(kids[0], ctx, mut edges, mut seen)
 				for k in kids[1..] {
-					branch := f.kids(k)
-					mut body := ctx
-					if subject.kind == .ident && f.node(k).value == '1' && branch.len >= 2 {
-						if pt := f.match_pattern_type(branch[0]) {
-							body = ctx.narrowed(subject.value, 't:' + f.type_text(pt))
-						}
-					}
-					f.walk_list(branch, body, mut edges, mut seen)
+					f.walk_list(f.kids(k), f.match_branch_ctx(kids[0], k, ctx), mut edges, mut
+						seen)
 				}
 				return ctx
 			}
@@ -1911,11 +1920,51 @@ fn (mut f V3File) walk(id flat.NodeId, ctx V3CallCtx, mut edges []Edge, mut seen
 		}
 		else {}
 	}
+	if n.kind == .expr_stmt && kids.len == 1 && f.node(kids[0]).kind == .if_expr {
+		// an `if` statement can narrow what follows it (see the if_expr case)
+		return f.walk(kids[0], ctx, mut edges, mut seen)
+	}
 	f.walk_list(kids, ctx, mut edges, mut seen)
 	if n.kind == .decl_assign {
 		return f.declare(n, kids, ctx)
 	}
 	return ctx
+}
+
+// match_branch_ctx is `ctx` in the match branch `branch` on `subject`: a branch with
+// one type pattern, `T { ... }`, sees a subject it can name (value_path) as a T; a
+// branch of values or `else` keeps its type.
+fn (f &V3File) match_branch_ctx(subject flat.NodeId, branch flat.NodeId, ctx V3CallCtx) V3CallCtx {
+	path := f.value_path(subject)
+	bk := f.kids(branch)
+	if path != '' && f.node(branch).value == '1' && bk.len >= 2 {
+		if pt := f.match_pattern_type(bk[0]) {
+			return ctx.narrowed(path, 't:' + f.type_text(pt))
+		}
+	}
+	return ctx
+}
+
+// always_leaves reports whether a block never runs past its end: its last statement is a
+// `return`, `break`, `continue` or `goto`, or a call of `panic` or `exit`.
+fn (f &V3File) always_leaves(block flat.NodeId) bool {
+	kids := f.kids(block)
+	if kids.len == 0 {
+		return false
+	}
+	last := f.node(kids.last())
+	if last.kind in [.return_stmt, .break_stmt, .continue_stmt, .goto_stmt] {
+		return true
+	}
+	if last.kind == .expr_stmt {
+		lk := f.kids(kids.last())
+		if lk.len == 1 && f.node(lk[0]).kind == .call {
+			ck := f.kids(lk[0])
+			return ck.len > 0 && f.node(ck[0]).kind == .ident
+				&& f.node(ck[0]).value in ['panic', 'exit']
+		}
+	}
+	return false
 }
 
 // declare returns `ctx` with the variables a `:=` declares. `a := x` has the
@@ -2043,9 +2092,10 @@ fn (f &V3File) type_checks(cond flat.NodeId) []TypeCheck {
 	n := f.node(cond)
 	kids := f.kids(cond)
 	if n.kind == .is_expr && kids.len == 1 && n.value != '' && n.op != .not {
-		if f.node(kids[0]).kind == .ident {
+		path := f.value_path(kids[0])
+		if path != '' {
 			return [TypeCheck{
-				name: f.node(kids[0]).value
+				name: path
 				typ:  n.value
 			}]
 		}
@@ -2059,6 +2109,53 @@ fn (f &V3File) type_checks(cond flat.NodeId) []TypeCheck {
 		return f.type_checks(kids[0])
 	}
 	return []TypeCheck{}
+}
+
+// false_checks are the `x is T` checks that hold where `cond` is false: those of
+// `x !is T` (`!(x is T)`), or of both sides of an `||`.
+fn (f &V3File) false_checks(cond flat.NodeId) []TypeCheck {
+	if int(cond) < 0 {
+		return []TypeCheck{}
+	}
+	n := f.node(cond)
+	kids := f.kids(cond)
+	if n.kind == .prefix && n.op == .not && kids.len == 1 {
+		mut inner := kids[0]
+		for f.node(inner).kind == .paren && f.kids(inner).len == 1 {
+			inner = f.kids(inner)[0]
+		}
+		if f.node(inner).kind == .is_expr {
+			return f.type_checks(inner)
+		}
+	}
+	if n.kind == .infix && n.op == .logical_or && kids.len == 2 {
+		mut out := f.false_checks(kids[0])
+		out << f.false_checks(kids[1])
+		return out
+	}
+	if n.kind == .paren && kids.len == 1 {
+		return f.false_checks(kids[0])
+	}
+	return []TypeCheck{}
+}
+
+// value_path is the variable or field a type check can narrow, as written: `x`, or
+// `x.base_type`; '' for any other expression.
+fn (f &V3File) value_path(id flat.NodeId) string {
+	n := f.node(id)
+	if n.kind == .ident {
+		return n.value
+	}
+	if n.kind == .selector && n.value != '$' {
+		kids := f.kids(id)
+		if kids.len == 1 {
+			base := f.value_path(kids[0])
+			if base != '' {
+				return base + '.' + n.value
+			}
+		}
+	}
+	return ''
 }
 
 // struct_init_type is the type of a struct literal written directly, `Foo{}`
@@ -2240,6 +2337,15 @@ fn (f &V3File) recipe(id flat.NodeId, ctx V3CallCtx) string {
 				return 't:' + f.type_text(n.value)
 			}
 		}
+		.assoc {
+			// `Foo{ ...x, a: 1 }`, or `{ ...x, a: 1 }` with the type of the `x` it copies
+			if n.value != '' {
+				return 't:' + f.type_text(n.value)
+			}
+			if kids.len > 0 {
+				return f.recipe(kids[0], ctx)
+			}
+		}
 		.map_init {
 			if n.value != '' {
 				return 't:' + f.type_text(n.value)
@@ -2316,14 +2422,24 @@ fn (f &V3File) recipe(id flat.NodeId, ctx V3CallCtx) string {
 		.index {
 			if kids.len > 0 {
 				r := f.recipe(kids[0], ctx)
-				if r == '' || n.value == 'range' {
-					// a slice has the type of what it slices
+				if r == '' {
 					return r
+				}
+				if n.value == 'range' {
+					// a slice has the type of what it slices, or a fixed array's elements
+					return r + recipe_sep + 'sl'
 				}
 				return r + recipe_sep + '[]'
 			}
 		}
 		.selector {
+			// a field a type check narrowed, `x.base_type` in `if x.base_type is Alias { ... }`
+			if n.value != '$' && ctx.vars.len > 0 {
+				path := f.value_path(id)
+				if path != '' && path in ctx.vars {
+					return ctx.vars[path]
+				}
+			}
 			if n.value == '$' && kids.len == 2 {
 				// `x.$(field.name)` is the field an enclosing `$if field.name == 'x'` names, of
 				// x's type, or else has the type an enclosing `$if` fixes its field to
@@ -2429,7 +2545,29 @@ fn (f &V3File) recipe(id flat.NodeId, ctx V3CallCtx) string {
 		.if_expr {
 			// a branch that names no type (an interpolated string, say) is passed over: V
 			// gives the expression the type its branches share, so the first branch that
-			// has one gives it
+			// has one gives it. A branch sees what its condition narrows, as the walk does:
+			// `if x is Alias { x.base_type } else { x }`
+			if kids.len >= 2 && f.node(kids[0]).kind != .decl_assign {
+				r := f.last_value(kids[1], ctx.narrowed_by(f.type_checks(kids[0])))
+				if r != '' {
+					return r
+				}
+				otherwise := ctx.narrowed_by(f.false_checks(kids[0]))
+				for k in kids[2..] {
+					kind := f.node(k).kind
+					e := if kind == .block {
+						f.last_value(k, otherwise)
+					} else if kind == .if_expr {
+						f.recipe(k, otherwise)
+					} else {
+						''
+					}
+					if e != '' {
+						return e
+					}
+				}
+				return ''
+			}
 			for k in kids {
 				if f.node(k).kind == .block {
 					r := f.last_value(k, ctx)
@@ -2439,10 +2577,16 @@ fn (f &V3File) recipe(id flat.NodeId, ctx V3CallCtx) string {
 				}
 			}
 		}
+		.lock_expr {
+			// `rlock s { s.items[i] }` has the value of its block
+			if kids.len > 0 && f.node(kids.last()).kind == .block {
+				return f.last_value(kids.last(), ctx)
+			}
+		}
 		.match_stmt {
 			for k in kids {
 				if f.node(k).kind == .match_branch {
-					r := f.last_value(k, ctx)
+					r := f.last_value(k, f.match_branch_ctx(kids[0], k, ctx))
 					if r != '' {
 						return r
 					}
@@ -2716,7 +2860,14 @@ fn (f &V3File) last_value(id flat.NodeId, ctx V3CallCtx) string {
 	last := f.node(kids.last())
 	lk := f.kids(kids.last())
 	if last.kind == .expr_stmt && lk.len > 0 {
-		return f.recipe(lk[0], ctx)
+		// the block's own `:=` names type its value, `parts := s.split('/'); parts[0]`
+		mut bctx := ctx
+		for k in kids[..kids.len - 1] {
+			if f.node(k).kind == .decl_assign {
+				bctx = f.declare(f.node(k), f.kids(k), bctx)
+			}
+		}
+		return f.recipe(lk[0], bctx)
 	}
 	return ''
 }

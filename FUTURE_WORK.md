@@ -417,8 +417,45 @@ go through a `$for` field, `x.$(field.name).m()`. Four are on a generic `A` in
 in vlang's comptime test fixtures. Resolving the rest would give one
 call an edge to the method of every field type that declares it. The
 one-edge-per-call model does not express that, so they stay unresolved. Still
-open: a receiver from a call with a computed argument, and a sum type's shared
-field.
+open: a receiver from a call with a computed argument.
+
+**The rest of the unresolved calls outside tests (October 2026).** Of the 279
+unresolved calls on the V tree (614db074f6), 83 were outside test code. Most were a
+sum type's value read after a type check the walk didn't follow: a value built in a
+branch, `clean := if t is Alias { t.base_type } else { t }`, or in a `match` on it;
+a check on a field, `match x.base_type { Alias { x.base_type.base_type } ... }`;
+`t !is Struct || t.f()`; and the code after `if t !is Struct { return }`, or in its
+`else`. These now narrow as `if t is T { ... }` and `&&` did (`false_checks`,
+`value_path`, `always_leaves` in backend_v.v). A recipe also follows:
+
+- a field that every variant of a sum type has, `k.text` of `type Key = Bare | Quoted`
+  (one that only some variants have, `str` of `string` in `int | string`, is not the
+  sum type's);
+- a call of a function-typed field, `p.conn_factory()`;
+- a slice of a fixed array, `digest[..]`, as a `[]u8`;
+- an element read through a pointer, `b.data[i]`;
+- the value of an `rlock` block;
+- a branch's own `:=` names when typing the branch's value;
+- a struct literal with `...spread`;
+- the variable of `$for a in T.attributes` (a `VAttribute`);
+- a `@[flag]` enum's `T.zero()`;
+- a const in another file of a `main` module that is one program, `cmd/tools/vpm`;
+- a generic call's type argument in the caller's module, so `json.decode[[]Envelope](s)`
+  in mcp gives mcp's `Envelope`.
+
+Unresolved calls go from 279 to 225, and from 83 to 39 outside tests. Five more are
+undeclared (a `@[flag]` enum's `has` and `set`). References are unchanged. In 27
+functions a call changes target, each a correction checked against the source: in 23
+it now goes to the narrowed type's own method (`Type.source_type_id` to
+`Struct.source_type_id`, which V calls on a value narrowed to `Struct`, or
+`IError.msg` to `CommandError.msg` after `err is CommandError`), and four had been name
+matches (`msg[..n].bytestr()` on a `[4096]u8` had gone to
+`http.Response.bytestr`, `c.client.close()` to `websocket.Server.close`). Ten edges
+merge with an edge of the same function that now has the same target. Of the 39 left, 26 are calls on a type parameter that no
+instance in the tree decides, 6 are in modules outside the tree (vdoc's `markdown`,
+the JS prelude's `stats_import`), 3 are JS-only, and 4 are single cases: a const
+holding a function, `ctx` in a veb example that never declares it, an untyped
+array literal, and json2's `T{}.clear()`.
 
 The raw edge is retained and `explain` reports ambiguous callers rather than
 inventing links. A future opt-in deep mode could run the checker over a whole
