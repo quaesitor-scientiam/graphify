@@ -1411,5 +1411,23 @@ answer that names another directory chooses the project and worktree again from 
 the base again only when it is another graph.json. A client without roots keeps the
 working directory, as before.
 
+**On V's `mcp` module (October 2026).** The server's JSON-RPC was its own; it is now
+`vlib/mcp`'s, which brings the 2026-07-28 revision, `server/discover` among it (Claude
+Code 2.1.299 sends it before `initialize`; the old server answered -32601), and the
+standard error codes. A 2026-07-28 client has no session to be asked for its roots in,
+so the first tool call asks for them through its result (MRTR, `require_roots`). Over
+stdio the module can't ask a 2025-11-25 client itself: no handler sees a notification,
+so nothing knows the handshake is done or the roots changed; the `roots/list` that
+`Server.list_roots` sends is queued until the module has answered the next message the
+client sends; and `list_roots` blocks, so a tool handler calling it waits for an answer
+that the loop running the handler would have to read. So the server sits between the
+client and the module (`tap_stdin`): the client's messages reach the module through a
+pipe put on fd 0, and the tap asks for the roots and takes the answer, as the server
+did before. Tool results are the same, and so is what the session allocates (4.26 GB
+over a run of 42 tool calls on the vlang graph, against 4.26 GB). The run's peak was
+1.45 GB or 1.57 GB from one run to the next, with either server: the graph read leaves
+0.7 GB of garbage that the first calls added to before the collector ran. One collection
+before the first call (`gc_collect`) keeps it at 1.45–1.49 GB.
+
 Still open: two sessions in one worktree extract into one store, each its own extract;
 and a worktree of a project the store has no graph of gets none, as before.

@@ -453,7 +453,7 @@ println(g.query('auth flow', 2000, false))
 
 ## MCP server (for Claude Code and Codex)
 
-`cmd/mcp` is a JSON-RPC-over-stdio MCP server that loads a persisted
+`cmd/mcp` is an MCP server over stdio, on V's `mcp` module, that loads a persisted
 `graph.json` and exposes graph traversal as tools, so the model queries
 the graph instead of reading source files. It reloads the graph when an
 extract replaces `graph.json`, so re-extracting needs no client restart. The

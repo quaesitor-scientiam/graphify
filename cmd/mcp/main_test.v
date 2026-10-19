@@ -42,3 +42,66 @@ fn test_a_windows_file_uri_has_no_slash_before_its_drive() {
 		assert dir_of_uri('file:///tmp') or { '' } == '/tmp'
 	}
 }
+
+fn test_a_client_has_roots_when_its_capabilities_say_so() {
+	assert caps_have_roots('{"roots":{"listChanged":true}}')
+	assert caps_have_roots('{"roots":{}}')
+	assert !caps_have_roots('{"sampling":{}}')
+	assert !caps_have_roots('')
+}
+
+// The tap passes the client's messages on, asks for the roots after the handshake,
+// and keeps the answer from the mcp module.
+fn test_the_stdin_tap_asks_for_roots_and_takes_the_answer() {
+	dir := os.join_path(os.temp_dir(), 'graphify tap ${os.getpid()}')
+	os.mkdir_all(dir) or { panic(err) }
+	requests := os.join_path(dir, 'requests')
+	defer {
+		os.rmdir_all(dir) or {}
+	}
+	initialize := '{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{"roots":{}}}}\n'
+	initialized := '{"jsonrpc":"2.0","method":"notifications/initialized"}\n'
+	answer := '{"jsonrpc":"2.0","id":"graphify-roots","result":{"roots":[{"uri":"file://${dir.replace(' ', '%20')}"}]}}\n'
+	call := '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"overview"}}'
+	mut client := os.pipe() or { panic(err) }
+	mut server := os.pipe() or { panic(err) }
+	os.fd_write(client.write_fd, initialize + initialized + answer + call)
+	os.fd_close(client.write_fd)
+	mut out := os.create(requests) or { panic(err) }
+	dirs := chan string{cap: 1}
+	pass_stdin(client.read_fd, server.write_fd, out, dirs)
+	out.close()
+	os.fd_close(client.read_fd)
+	// the call, with no newline, is passed on at the end of the input
+	mut passed := ''
+	for {
+		s, n := os.fd_read(server.read_fd, 65536)
+		if n <= 0 {
+			break
+		}
+		passed += s
+	}
+	os.fd_close(server.read_fd)
+	assert passed == initialize + initialized + call
+	assert os.read_file(requests) or { '' } == roots_request + '\n'
+	mut got := ''
+	assert dirs.try_pop(mut got) == .success
+	assert got == dir
+}
+
+fn test_a_client_without_roots_is_not_asked() {
+	path := os.join_path(os.temp_dir(), 'graphify tap requests ${os.getpid()}')
+	defer {
+		os.rm(path) or {}
+	}
+	mut client := os.pipe() or { panic(err) }
+	mut server := os.pipe() or { panic(err) }
+	os.fd_write(client.write_fd, '{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{}}}\n{"jsonrpc":"2.0","method":"notifications/initialized"}\n')
+	os.fd_close(client.write_fd)
+	mut out := os.create(path) or { panic(err) }
+	pass_stdin(client.read_fd, server.write_fd, out, chan string{cap: 1})
+	out.close()
+	os.fd_close(client.read_fd)
+	os.fd_close(server.read_fd)
+	assert os.read_file(path) or { 'x' } == ''
+}
