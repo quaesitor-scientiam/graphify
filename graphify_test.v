@@ -9232,3 +9232,141 @@ fn test_a_module_installed_under_its_owner_is_tracked_by_its_own_clone() {
 	note := stale_note(os.join_path(out, 'graph.json'), '', '')
 	assert note.contains('its module owner/pkg was read from ${pkg} at ${first[..10]}'), note
 }
+
+fn test_a_worktree_of_a_project_or_of_the_v_tree_is_found_as_one() {
+	tree := os.real_path(write_tree('worktrees', {
+		'proj/a.v':       'module main\n'
+		'mono/app/a.v':   'module main\n'
+		'mono/other/b.v': 'module other\n'
+		'vlang/v.v':      'module main\n'
+	}))
+	defer {
+		os.rmdir_all(tree) or {}
+	}
+	git := fn (dir string, args ...string) string {
+		mut cmd := ['git', '-C', dir, '-c', 'user.name=t', '-c', 'user.email=t@t', '-c',
+			'commit.gpgsign=false']
+		cmd << args
+		return os.exec(cmd).output.trim_space()
+	}
+	for repo in ['proj', 'mono', 'vlang'] {
+		dir := os.join_path(tree, repo)
+		git(dir, 'init', '-q')
+		git(dir, 'add', '.')
+		git(dir, 'commit', '-q', '-m', 'one')
+	}
+	proj := os.join_path(tree, 'proj')
+	vlang := os.join_path(tree, 'vlang')
+	// a worktree inside the project, as Claude Code makes one, and one beside it
+	inside := os.join_path(proj, '.claude', 'worktrees', 'wt')
+	git(proj, 'worktree', 'add', '-q', inside, '-b', 'wt')
+	beside := os.join_path(tree, 'proj-wt')
+	git(proj, 'worktree', 'add', '-q', beside, '-b', 'beside')
+	mono_wt := os.join_path(tree, 'mono-wt')
+	git(os.join_path(tree, 'mono'), 'worktree', 'add', '-q', mono_wt, '-b', 'wt')
+	vlang_wt := os.join_path(tree, 'vlang-wt')
+	git(vlang, 'worktree', 'add', '-q', vlang_wt, '-b', 'wt')
+
+	assert worktree_root(proj, proj) == none
+	assert worktree_root(inside, proj) or { '' } == inside
+	assert worktree_root(os.join_path(beside), proj) or { '' } == beside
+	// a project in a directory of its repository is there in the worktree too
+	assert worktree_root(os.join_path(mono_wt, 'app'), os.join_path(tree, 'mono', 'app')) or {
+		''
+	} == os.join_path(mono_wt, 'app')
+	// another repository's checkout is no worktree of it
+	assert worktree_root(vlang, proj) == none
+	assert worktree_root(os.join_path(tree, 'proj-wt-missing'), proj) == none
+
+	store := os.join_path(tree, 'store')
+	for name, root in {
+		'proj': proj
+		'app':  os.join_path(tree, 'mono', 'app')
+	} {
+		os.mkdir_all(os.join_path(store, name)) or { panic(err) }
+		os.write_file(os.join_path(store, name, 'graph.json'), '{}') or { panic(err) }
+		os.write_file(os.join_path(store, name, 'manifest.json'), json_root(root)) or {
+			panic(err)
+		}
+	}
+	graph := fn [store] (name string) string {
+		return os.join_path(store, name, 'graph.json')
+	}
+	base := os.join_path(tree, 'vlang-graph', 'graph.json')
+	found := fn [store, base, vlang] (dir string) WorktreeGraph {
+		project := project_for(store, dir, vlang) or { '' }
+		return worktree_graph(store, dir, project, base, vlang) or { WorktreeGraph{} }
+	}
+	// project_for finds the project's graph for the worktree inside it
+	assert found(inside) == WorktreeGraph{graph('proj'), inside}
+	// and none for the one beside it, found by its repository
+	assert found(beside) == WorktreeGraph{graph('proj'), beside}
+	assert found(os.join_path(mono_wt, 'app')) == WorktreeGraph{graph('app'), os.join_path(mono_wt,
+		'app')}
+	// a worktree of the V tree is the base's
+	assert found(vlang_wt) == WorktreeGraph{base, vlang_wt}
+	// the checkouts themselves, and a directory of the worktree outside the project
+	assert found(proj) == WorktreeGraph{}
+	assert found(vlang) == WorktreeGraph{}
+	assert found(os.join_path(mono_wt, 'other')) == WorktreeGraph{}
+}
+
+fn test_a_worktree_store_is_seeded_refreshed_and_pruned() {
+	tree := os.real_path(write_tree('worktree_store', {
+		'proj/a.v':                    'module main\n'
+		'checkout/graph.json':         '{}'
+		'checkout/${cache_file_name}': 'cache'
+	}))
+	defer {
+		os.rmdir_all(tree) or {}
+	}
+	proj := os.join_path(tree, 'proj')
+	git := fn [proj] (args ...string) string {
+		mut cmd := ['git', '-C', proj, '-c', 'user.name=t', '-c', 'user.email=t@t', '-c',
+			'commit.gpgsign=false']
+		cmd << args
+		return os.exec(cmd).output.trim_space()
+	}
+	git('init', '-q')
+	git('add', '.')
+	git('commit', '-q', '-m', 'one')
+	stores := os.join_path(tree, 'stores')
+	store := worktree_store(stores, proj)
+	assert os.dir(store) == stores && os.base(store).starts_with('proj-')
+	// two worktrees of one name have stores of their own
+	assert worktree_store(stores, os.join_path(tree, 'other', 'proj')) != store
+	seed_worktree_store(store, os.join_path(tree, 'checkout', 'graph.json')) or { panic(err) }
+	assert os.read_file(os.join_path(store, cache_file_name)) or { '' } == 'cache'
+	// the store's own cache is kept, once it has one
+	os.write_file(os.join_path(store, cache_file_name), 'mine') or { panic(err) }
+	seed_worktree_store(store, os.join_path(tree, 'checkout', 'graph.json')) or { panic(err) }
+	assert os.read_file(os.join_path(store, cache_file_name)) or { '' } == 'mine'
+
+	clean := worktree_state(proj)
+	a := os.join_path(proj, 'a.v')
+	os.write_file(a, 'module main\n\nfn f() {}\n') or { panic(err) }
+	edited := worktree_state(proj)
+	assert edited != clean
+	// a file changed already, changed again: git reports it the same
+	os.write_file(a, 'module main\n\nfn f() {}\n\nfn g() {}\n') or { panic(err) }
+	assert worktree_state(proj) != edited
+	os.write_file(os.join_path(proj, 'b.v'), 'module main\n') or { panic(err) }
+	assert worktree_state(proj).contains('?? b.v')
+	// a file that isn't V is no change to the graph
+	before := worktree_state(proj)
+	os.write_file(os.join_path(proj, 'notes.md'), 'x') or { panic(err) }
+	assert worktree_state(proj) == before
+
+	// a store whose worktree is gone is removed; one whose worktree is there, and
+	// one without a manifest yet, are kept
+	os.write_file(os.join_path(store, 'manifest.json'), json_root(proj)) or { panic(err) }
+	gone := worktree_store(stores, os.join_path(tree, 'gone'))
+	os.mkdir_all(gone) or { panic(err) }
+	os.write_file(os.join_path(gone, 'manifest.json'), json_root(os.join_path(tree, 'gone'))) or {
+		panic(err)
+	}
+	partial := os.join_path(stores, 'partial')
+	os.mkdir_all(partial) or { panic(err) }
+	prune_worktree_stores(stores)
+	assert os.is_dir(store) && os.is_dir(partial) && !os.exists(gone)
+}

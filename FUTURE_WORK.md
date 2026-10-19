@@ -1318,8 +1318,8 @@ Still open:
 
 - ~~A project's modules from VMODULES are layered only as the library declarations
   its calls reach.~~ Done, see below.
-- A worktree inside a project gets the graph of the project's checkout, as a worktree
-  of vlang gets vlang's.
+- ~~A worktree inside a project gets the graph of the project's checkout, as a
+  worktree of vlang gets vlang's.~~ Done, see below.
 - Each session's server holds its own copy of the vlang graph, as one did before.
 
 **The index is built once (October 2026).** Each tool call built the whole index
@@ -1360,3 +1360,31 @@ was read); graph.json from 5.1 MB to 5.8 MB. gui's own edges are unchanged. One
 `shortest_path` goes from `gui.renderers_draw` through `vglyph.TextSystem.commit` to
 `vglyph.accessibility.AccessibilityManager.commit`, or through
 `vglyph.Renderer.commit` to `vlib.gg.Image.update_pixel_data`.
+
+**A worktree's own graph (October 2026).** A session in a git worktree got the graph of
+the checkout, so what its branch had added or changed was missing or out of date, in
+the code being worked on. The MCP server now finds the worktree it starts in
+(`worktree_graph`, in worktree.v): one of a project in the store or of the V tree,
+told by its repository (`git rev-parse --git-common-dir`), inside the checkout or
+beside it, with the project's root at its place in the worktree for a project in a
+directory of its repository. It extracts the worktree with the CLI beside it into a
+store of its own (`worktree_store`, under the user's cache directory), seeded with
+the checkout's `.gf_cache.ndjson`, which is keyed by each file's text, so only the
+files the branch changed are parsed, and serves that graph, layered as the project's
+is, in place of the checkout's. The extract runs in a thread of its own; the
+checkout's graph is served, with a note, until it is there. The worktree's commit
+and the size and time of each V file git reports as changed (`worktree_state`) are
+looked at on a tool call at most every two seconds, and a change starts another
+extract, so the graph has edits not yet committed. A store whose worktree is gone is
+removed when a server starts.
+
+Measured on vebidor (1,273 symbols) layered on vlang: a warm extract of the worktree
+takes 0.5 s, and is done before the vlang graph is read, which the server starts it
+ahead of, so the worktree's graph is the first served; gui's takes 0.5 s, and the
+whole V tree's 6.2 s, in a process of its own peaking at 2.2 GB. A session with one
+edit made during it, so served twice, peaked at 1.65 GB, against 1.36 GB for the same
+session in the checkout. The graph served before is let go before the next is built
+(`gc_collect`), which took about 0.1 GB off that.
+
+Still open: two sessions in one worktree extract into one store, each its own extract;
+and a worktree of a project the store has no graph of gets none, as before.
