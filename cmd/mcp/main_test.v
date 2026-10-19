@@ -23,9 +23,8 @@ fn test_the_session_dir_is_the_first_root_the_client_answers_with() {
 		os.rmdir_all(dir) or {}
 	}
 	// Claude Code's answer, for a session in a worktree; a space is percent-encoded
-	uri := 'file://' + dir.replace(' ', '%20')
-	answer := '{"result":{"roots":[{"uri":"${uri}"},{"uri":"file:///elsewhere"}]},"jsonrpc":"2.0","id":"graphify-roots"}'
-	assert session_dir(answer) or { '' } == dir
+	answer := '{"result":{"roots":[{"uri":"${file_uri(dir)}"},{"uri":"file:///elsewhere"}]},"jsonrpc":"2.0","id":"graphify-roots"}'
+	assert slashed(session_dir(answer) or { '' }) == slashed(dir)
 	// an answer to another request, an empty one, and a root that is no directory
 	assert session_dir(answer.replace('"graphify-roots"', '"other"')) == none
 	assert session_dir('{"result":{"roots":[]},"jsonrpc":"2.0","id":"graphify-roots"}') == none
@@ -61,7 +60,7 @@ fn test_the_stdin_tap_asks_for_roots_and_takes_the_answer() {
 	}
 	initialize := '{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{"roots":{}}}}\n'
 	initialized := '{"jsonrpc":"2.0","method":"notifications/initialized"}\n'
-	answer := '{"jsonrpc":"2.0","id":"graphify-roots","result":{"roots":[{"uri":"file://${dir.replace(' ', '%20')}"}]}}\n'
+	answer := '{"jsonrpc":"2.0","id":"graphify-roots","result":{"roots":[{"uri":"${file_uri(dir)}"}]}}\n'
 	call := '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"overview"}}'
 	mut client := os.pipe() or { panic(err) }
 	mut server := os.pipe() or { panic(err) }
@@ -86,7 +85,7 @@ fn test_the_stdin_tap_asks_for_roots_and_takes_the_answer() {
 	assert os.read_file(requests) or { '' } == roots_request + '\n'
 	mut got := ''
 	assert dirs.try_pop(mut got) == .success
-	assert got == dir
+	assert slashed(got) == slashed(dir)
 }
 
 fn test_a_client_without_roots_is_not_asked() {
@@ -104,4 +103,16 @@ fn test_a_client_without_roots_is_not_asked() {
 	os.fd_close(client.read_fd)
 	os.fd_close(server.read_fd)
 	assert os.read_file(path) or { 'x' } == ''
+}
+
+// file_uri is the `file://` URI of the directory `dir`, as a client sends it: with
+// forward slashes, a slash before a Windows drive, and a space percent-encoded.
+fn file_uri(dir string) string {
+	path := dir.replace('\\', '/').replace(' ', '%20')
+	return if path.starts_with('/') { 'file://${path}' } else { 'file:///${path}' }
+}
+
+// slashed is `path` with forward slashes, which dir_of_uri gives on Windows.
+fn slashed(path string) string {
+	return path.replace('\\', '/')
 }
