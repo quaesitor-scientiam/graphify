@@ -25,6 +25,7 @@ module main
 // it atomically), and a tool result starts with a note when the graph looks
 // out of date (graphify.stale_note).
 import os
+import net.urllib
 import time
 import x.json2
 import graphify
@@ -63,12 +64,15 @@ fn main() {
 	} else {
 		''
 	}
-	mut project_path := graphify.project_for(projects_dir, os.getwd(), base_root) or { '' }
+	// the session's directory: where the server was started until the client says
+	// otherwise (session_dir)
+	mut here := os.getwd()
+	mut project_path := graphify.project_for(projects_dir, here, base_root) or { '' }
 	// a worktree's extract starts before the base graph is read, which takes longer
 	// than a project's extract, so that the worktree's graph is the first one served
 	mut wt := Worktree{}
 	if src_dir == '' {
-		wt = start_worktree(projects_dir, project_path, graph_path, base_root)
+		wt = start_worktree(projects_dir, here, project_path, graph_path, base_root)
 	}
 	mut base := load(if wt.ready && wt.graph == graph_path { wt.path } else { graph_path },
 		src_dir) or {
@@ -92,6 +96,8 @@ fn main() {
 	cli := if src_dir != '' { '' } else { graphify.cli_beside() }
 	mut note := notes(base_path, project_path, served, cli)
 	mut note_at := time.now().unix()
+	// whether the client said it has roots to answer roots_request with
+	mut has_roots := false
 
 	for {
 		raw := os.get_raw_line()
@@ -100,6 +106,45 @@ fn main() {
 		}
 		line := raw.trim_space()
 		if line == '' {
+			continue
+		}
+		// The client names the session's directory as its root: Claude Code starts a
+		// server in the project's own checkout, not the worktree a session is in. The
+		// server asks once the handshake is done, and again when the roots change.
+		if line.contains('"initialize"') {
+			has_roots = client_has_roots(line)
+		}
+		if has_roots && roots_asked(line) {
+			println(roots_request)
+			flush_stdout()
+			continue
+		}
+		if dir := session_dir(line) {
+			if os.real_path(dir) != os.real_path(here) {
+				here = dir
+				eprintln('graphify-mcp: the session is in ${here}')
+				project_path = graphify.project_for(projects_dir, here, base_root) or { '' }
+				wt = Worktree{}
+				was_base := base_path
+				base_path = graph_path
+				if src_dir == '' {
+					wt = start_worktree(projects_dir, here, project_path, graph_path,
+						base_root)
+					if wt.ready {
+						if wt.graph == graph_path {
+							base_path = wt.path
+						} else {
+							project_path = wt.path
+						}
+					}
+				}
+				// the next tool call reads what changed and serves it: the base only when
+				// it is another graph.json
+				if base_path != was_base {
+					stamp = ''
+				}
+				project_stamp = ''
+			}
 			continue
 		}
 		if line.contains('"tools/call"') {
@@ -122,7 +167,7 @@ fn main() {
 			now_project := if project_path != '' { file_stamp(project_path) } else { '' }
 			if now_stamp != stamp || now_project != project_stamp {
 				if now_stamp != stamp {
-					if fresh := load(base_path, src_dir) {
+					if fresh := load(base_path, if base_path == graph_path { src_dir } else { '' }) {
 						base = fresh
 					}
 				}
@@ -454,15 +499,16 @@ mut:
 	done     chan string
 }
 
-// start_worktree finds the worktree this server was started in (graphify.worktree_graph)
+// start_worktree finds the worktree `dir`, the session's directory, is in (graphify.worktree_graph)
 // and starts extracting its graph; a Worktree with no root when there is none, or
 // no graphify beside this server to extract it with. A graph a server extracted for
 // the worktree before is served from the start, while it is extracted again.
-fn start_worktree(projects_dir string, project_path string, graph_path string, base_root string) Worktree {
+fn start_worktree(projects_dir string, dir string, project_path string, graph_path string, base_root string) Worktree {
 	stores := graphify.worktree_stores()
 	graphify.prune_worktree_stores(stores)
-	found := graphify.worktree_graph(projects_dir, os.getwd(), project_path, graph_path,
-		base_root) or { return Worktree{} }
+	found := graphify.worktree_graph(projects_dir, dir, project_path, graph_path, base_root) or {
+		return Worktree{}
+	}
 	cli := graphify.cli_beside()
 	if !os.exists(cli) {
 		eprintln('graphify-mcp: ${found.root} is a worktree, but there is no ${cli} to extract it with')
@@ -577,4 +623,65 @@ fn join_notes(a string, b string) string {
 	} else {
 		'${a} ${b}'
 	}
+}
+
+// roots_request asks the client for its roots, the directories it works in.
+const roots_request = '{"jsonrpc":"2.0","id":"graphify-roots","method":"roots/list"}'
+
+// client_has_roots reports whether `line` is the client's `initialize` request and
+// says the client can list its roots.
+fn client_has_roots(line string) bool {
+	any := json2.decode[json2.Any](line) or { return false }
+	msg := any.as_map()
+	if (msg['method'] or { return false }).str() != 'initialize' {
+		return false
+	}
+	params := (msg['params'] or { return false }).as_map()
+	caps := (params['capabilities'] or { return false }).as_map()
+	return 'roots' in caps
+}
+
+// roots_asked reports whether `line` is a notification after which the server asks
+// for the client's roots: the end of the handshake, or the roots changing.
+fn roots_asked(line string) bool {
+	if !line.contains('notifications/') {
+		return false
+	}
+	any := json2.decode[json2.Any](line) or { return false }
+	method := (any.as_map()['method'] or { return false }).str()
+	return method in ['notifications/initialized', 'notifications/roots/list_changed']
+}
+
+// session_dir is the directory of the first root in `line` when it is the client's
+// answer to roots_request; none for any other line, or a root that isn't a local
+// directory.
+fn session_dir(line string) ?string {
+	if !line.contains('"graphify-roots"') {
+		return none
+	}
+	any := json2.decode[json2.Any](line) or { return none }
+	msg := any.as_map()
+	if (msg['id'] or { return none }).str() != 'graphify-roots' {
+		return none
+	}
+	result := (msg['result'] or { return none }).as_map()
+	roots := (result['roots'] or { return none }).as_array()
+	if roots.len == 0 {
+		return none
+	}
+	uri := (roots[0].as_map()['uri'] or { return none }).str()
+	return dir_of_uri(uri)
+}
+
+// dir_of_uri is the local directory a `file://` URI names, percent-decoded, with
+// the slash before a Windows drive left out; none when it names no directory.
+fn dir_of_uri(uri string) ?string {
+	if !uri.starts_with('file://') {
+		return none
+	}
+	mut path := urllib.path_unescape(uri['file://'.len..]) or { return none }
+	if path.len > 2 && path[0] == `/` && path[2] == `:` {
+		path = path[1..]
+	}
+	return if os.is_dir(path) { path } else { none }
 }

@@ -1398,5 +1398,18 @@ edit made during it, so served twice, peaked at 1.65 GB, against 1.36 GB for the
 session in the checkout. The graph served before is let go before the next is built
 (`gc_collect`), which took about 0.1 GB off that.
 
+**The session's directory is the client's root (October 2026).** The server took its
+working directory for the session's, but the Claude desktop app starts a server in the
+project's own checkout (`CLAUDE_PROJECT_DIR`), not the worktree a session is in, so no
+real session got its worktree's graph; the tests and the measurements above started
+the server in the worktree. The app does say where the session is: its `initialize`
+declares `roots`, and its answer to `roots/list` is the session's directory,
+`file:///…/.claude/worktrees/<name>`. The server now asks after the handshake, and
+again on `notifications/roots/list_changed`, when the client declared roots, and on an
+answer that names another directory chooses the project and worktree again from it
+(`session_dir`, in cmd/mcp/main.v); the next tool call serves what that chose, reading
+the base again only when it is another graph.json. A client without roots keeps the
+working directory, as before.
+
 Still open: two sessions in one worktree extract into one store, each its own extract;
 and a worktree of a project the store has no graph of gets none, as before.
