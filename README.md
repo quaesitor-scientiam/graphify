@@ -637,7 +637,7 @@ A graph, vlang's or a project's, is out of date when it has none yet, or its
 `manifest.json` says it was extracted from another commit of its repo, by
 another build of `bin/graphify`, or, for a project, from vlang's `vlib` at
 another commit, or from a module under `~/.vmodules` at another commit of its
-clone (`v install --update`, or a pull in it: `extracting gui (vglyph moved)...`).
+clone (`v update`, or a pull in it: `extracting gui (vglyph moved)...`).
 A pull or a rebuild therefore shows up on its own, and a run
 after your own `v up` with `-NoPull` extracts what moved and skips the rest,
 each with its reason in the log (`extracting graph (its commit moved)...`).
