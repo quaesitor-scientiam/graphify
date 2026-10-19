@@ -29,6 +29,17 @@ pub:
 	stale         []string
 	partial       []string
 	source_files  []SourceFile
+	// the library roots the extract read (Graph.library), with the commit each was
+	// at, so stale_note can say the library has moved since
+	library []LibraryState
+}
+
+// LibraryState is one library root as an extract read it.
+pub struct LibraryState {
+pub:
+	label  string
+	root   string
+	commit string
 }
 
 // SourceFile is one source file's text hash as the extract read it, so
@@ -109,6 +120,14 @@ pub fn (g Graph) report() string {
 	b << '- files: ${files.len}'
 	b << '- symbols: ${g.symbols.len}'
 	b << '- edges: ${g.edges.len}'
+	if g.library.symbols.len > 0 {
+		mut roots := []string{}
+		for label, root in g.library.roots {
+			roots << '${label} `${root}`'
+		}
+		roots.sort()
+		b << '- library: ${g.library.symbols.len} declarations the project reaches, from ${roots.join(' and ')}'
+	}
 	b << ''
 	b << '## Symbols by kind'
 	for k, n in sym_kinds {
@@ -121,7 +140,7 @@ pub fn (g Graph) report() string {
 	}
 	b << ''
 	b << '## Edges by provenance'
-	b << '`extracted` = unique name or (calls only) a parser-typed receiver; `inferred` = picked among several real candidates by the inferred receiver type or by locality/visibility; `built-in` = a primitive type such as `int`, which has no declaration to resolve to; `external` = a call to a `C.` or `JS.` function, or a `C.` or `JS.` type that nothing in the program declares; `undeclared` = a call with no declaration to resolve to, of a function value or a method V provides itself (`thread.wait()`); `unresolved` = name stayed ambiguous or unknown.'
+	b << '`extracted` = unique name or (calls only) a parser-typed receiver; `inferred` = picked among several real candidates by the inferred receiver type or by locality/visibility; `built-in` = a primitive type such as `int`, which has no declaration to resolve to; `library` = a declaration in a module the project imports from vlib or ~/.vmodules, outside its tree; `external` = a call to a `C.` or `JS.` function, or a `C.` or `JS.` type that nothing in the program declares; `undeclared` = a call with no declaration to resolve to, of a function value or a method V provides itself (`thread.wait()`); `unresolved` = name stayed ambiguous or unknown.'
 	b << '- calls: ${calls_prov.str()}'
 	b << '- references: ${refs_prov.str()}'
 	b << '- embeds: ${embeds_prov.str()}'
@@ -149,6 +168,19 @@ pub fn (g Graph) manifest_json(report ExtractReport) string {
 		files[s.file] = true
 	}
 	source_files := source_files_of(g)
+	mut library := []LibraryState{}
+	if g.library.symbols.len > 0 {
+		mut labels := g.library.roots.keys()
+		labels.sort()
+		for label in labels {
+			root := g.library.roots[label]
+			library << LibraryState{
+				label:  label
+				root:   root
+				commit: git_commit_of(root)
+			}
+		}
+	}
 	m := Manifest{
 		tool:          'graphify'
 		version:       '0.0.1'
@@ -163,6 +195,7 @@ pub fn (g Graph) manifest_json(report ExtractReport) string {
 		stale:         report.stale
 		partial:       report.partial
 		source_files:  source_files
+		library:       library
 	}
 	return json2.encode(m, prettify: true)
 }
@@ -200,6 +233,7 @@ mut:
 	extracted  int
 	inferred   int
 	builtin    int // a primitive type name, see builtin_type_names
+	library    int // a declaration in the library, Graph.library
 	external   int // a call to a `C.` or `JS.` function, or a `C.` or `JS.` type nothing declares
 	undeclared int // a call with no declaration, see EdgeProvenance
 	unresolved int
@@ -207,9 +241,10 @@ mut:
 
 fn (c ProvCounts) str() string {
 	builtin := if c.builtin > 0 { ', built-in ${c.builtin}' } else { '' }
+	library := if c.library > 0 { ', library ${c.library}' } else { '' }
 	external := if c.external > 0 { ', external ${c.external}' } else { '' }
 	undeclared := if c.undeclared > 0 { ', undeclared ${c.undeclared}' } else { '' }
-	return 'extracted ${c.extracted}, inferred ${c.inferred}${builtin}${external}${undeclared}, unresolved ${c.unresolved}'
+	return 'extracted ${c.extracted}, inferred ${c.inferred}${library}${builtin}${external}${undeclared}, unresolved ${c.unresolved}'
 }
 
 // builtin_type_names are V's primitive types. Unlike `string`, `array` and
@@ -232,7 +267,9 @@ fn count_provenance(idx Index, edges []Edge, kind EdgeKind) ProvCounts {
 			continue
 		}
 		if e.to !in idx.by_id {
-			if e.kind != .calls && e.to in builtin_type_names {
+			if e.to in idx.lib_by_id {
+				c.library++
+			} else if e.kind != .calls && e.to in builtin_type_names {
 				c.builtin++
 			} else if e.kind == .calls && (e.to.starts_with('C.') || e.to.starts_with('JS.')) {
 				// the binding `fn C.foo(...)` is deliberately not a symbol (see

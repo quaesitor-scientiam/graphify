@@ -11,6 +11,11 @@ pub mut:
 	by_name map[string][]string // short name -> distinct ids
 	adj     map[string][]string // undirected neighbor ids
 	edges   []Edge              // edges with `to` resolved to an id where possible
+	// the library declarations the project reaches (Graph.library), and the edges
+	// into them: they label edges in explain and answer get_body, but join no
+	// traversal, ranking or name resolution, which stay the project's
+	lib_by_id map[string]Symbol
+	lib_edges []Edge
 }
 
 // index builds the lookup structures for a graph.
@@ -29,7 +34,16 @@ pub fn (g Graph) index() Index {
 			idx.by_id[s.id] = s
 		}
 	}
+	for s in g.library.symbols {
+		if s.id !in idx.lib_by_id {
+			idx.lib_by_id[s.id] = s
+		}
+	}
 	for e in g.edges {
+		if e.to in idx.lib_by_id && e.from in idx.by_id {
+			idx.lib_edges << e
+			continue
+		}
 		if e.provenance == .undeclared {
 			// no declaration to resolve to (see EdgeProvenance): a unique
 			// name match would pin the call on an unrelated declaration, the
@@ -283,11 +297,15 @@ fn reconstruct(prev map[string]string, start string, goal string) []string {
 // defined by, and what it calls / is called by.
 pub fn (g Graph) explain(node string) string {
 	idx := g.index()
-	id := g.resolve_one(node)
+	mut id := g.resolve_one(node)
+	if id == '' && node in idx.lib_by_id {
+		// a library declaration, named by its id (`vlib.os.join_path`)
+		id = node
+	}
 	if id == '' {
 		return 'no symbol matches: ${node}'
 	}
-	s := idx.by_id[id] or { return 'no symbol matches: ${node}' }
+	s := idx.by_id[id] or { idx.lib_by_id[id] or { return 'no symbol matches: ${node}' } }
 
 	mut out := ['${s.kind.str()} ${s.name}  (${s.loc()})', s.render()]
 	// The doc comment is often the whole answer to "what does this do", which
@@ -311,7 +329,8 @@ pub fn (g Graph) explain(node string) string {
 	mut referenced_by := []string{}
 	mut embeds := []string{}
 	mut any_inferred := false
-	for e in idx.edges {
+	related := if idx.lib_edges.len == 0 { idx.edges } else { arrays_concat(idx.edges, idx.lib_edges) }
+	for e in related {
 		if e.from == id {
 			match e.kind {
 				.calls {
@@ -425,9 +444,22 @@ fn name_of(idx Index, id string) string {
 }
 
 // label renders `name (file:line)` for a related symbol, falling back to its raw id.
+// A library declaration is marked, `contains (vlib/builtin/string.v:1773) [library]`.
 fn label(idx Index, id string) string {
-	s := idx.by_id[id] or { return id }
-	return '${s.name} (${s.loc()})'
+	if s := idx.by_id[id] {
+		return '${s.name} (${s.loc()})'
+	}
+	if s := idx.lib_by_id[id] {
+		return '${s.name} (${s.loc()}) [library]'
+	}
+	return id
+}
+
+fn arrays_concat(a []Edge, b []Edge) []Edge {
+	mut out := []Edge{cap: a.len + b.len}
+	out << a
+	out << b
+	return out
 }
 
 // prov_suffix marks a resolved `calls` edge that resolve_callee had to
@@ -469,6 +501,9 @@ pub fn (g Graph) get_body(node string) string {
 	idx := g.index()
 	id := g.resolve_one(node)
 	if id == '' {
+		if ls := idx.lib_by_id[node] {
+			return g.library_body(ls)
+		}
 		return 'no symbol matches: ${node}'
 	}
 	s := idx.by_id[id] or { return 'no symbol matches: ${node}' }
@@ -488,6 +523,36 @@ pub fn (g Graph) get_body(node string) string {
 		}
 	}
 	start := if s.line > 0 { s.line - 1 } else { 0 }
+	end := decl_end(lines, s, g.symbols)
+	if start >= lines.len {
+		return '(no source)'
+	}
+	return drift + '// ${s.file}:${s.line}-${end}\n' + lines[start..end].join('\n')
+}
+
+// library_body is get_body for a library declaration, read from the library's root.
+// Its end_line is the last line of its body, found at extraction from all the
+// declarations of its file (with_body_ends), since the graph keeps only some.
+fn (g Graph) library_body(s Symbol) string {
+	path := g.library.path_of(s.file) or { return 'cannot read ${s.file}: no library root' }
+	src := os.read_file(path) or { return 'cannot read ${s.file}: ${err}' }
+	lines := src.replace('\r\n', '\n').split('\n')
+	start := if s.line > 0 { s.line - 1 } else { 0 }
+	mut end := if s.end_line >= s.line { s.end_line } else { decl_end(lines, s, []Symbol{}) }
+	if end > lines.len {
+		end = lines.len
+	}
+	if start >= lines.len || end <= start {
+		return '(no source)'
+	}
+	return '// ${s.file}:${s.line}-${end} (library)\n' + lines[start..end].join('\n')
+}
+
+// decl_end is the last line, 1-based, of declaration `s` in its file's `lines`;
+// `siblings` are the declarations extracted from that file, which bound it when its
+// own end line can't be told (a function's end_line is the end of its header).
+fn decl_end(lines []string, s Symbol, siblings []Symbol) int {
+	start := if s.line > 0 { s.line - 1 } else { 0 }
 	mut end := if s.end_line > s.line { s.end_line } else { 0 }
 	if s.kind in [.function, .method] {
 		// A function's end_line is the last line of its header. When no `{`
@@ -505,7 +570,7 @@ pub fn (g Graph) get_body(node string) string {
 		// no reliable end line (e.g. fn bodies) — stop just before the next
 		// same-level declaration in this file, or at EOF.
 		mut next := lines.len + 1
-		for o in g.symbols {
+		for o in siblings {
 			if o.file == s.file && o.parent == s.parent && o.line > s.line && o.line < next {
 				next = o.line
 			}
@@ -518,7 +583,7 @@ pub fn (g Graph) get_body(node string) string {
 		// it, so it takes the trim below, which also survives a `}` at column 0
 		// inside a multi-line string.
 		// (start can lie past the end of a file that shrank since the graph was
-		// built; the `(no source)` check below handles that.)
+		// built; the `(no source)` check in get_body handles that.)
 		indent := if start < lines.len {
 			lines[start][..lines[start].len - lines[start].trim_left(' \t').len]
 		} else {
@@ -534,7 +599,7 @@ pub fn (g Graph) get_body(node string) string {
 			// they were part of this body. Trim back to this declaration's own
 			// closing brace, which vfmt puts alone on its line.
 			for e := end; e > start; e-- {
-				if lines[e - 1].trim_space() == '}' {
+				if e - 1 < lines.len && lines[e - 1].trim_space() == '}' {
 					end = e
 					break
 				}
@@ -544,10 +609,7 @@ pub fn (g Graph) get_body(node string) string {
 	if end > lines.len {
 		end = lines.len
 	}
-	if start >= lines.len {
-		return '(no source)'
-	}
-	return drift + '// ${s.file}:${s.line}-${end}\n' + lines[start..end].join('\n')
+	return end
 }
 
 // nested_decl_end finds where a declaration that is indented inside a block

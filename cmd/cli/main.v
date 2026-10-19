@@ -6,7 +6,10 @@ import graphify
 const usage = 'graphify - build a queryable code graph to cut AI token usage
 
 usage:
-  graphify extract <path> [--out D]        build the graph (default ./graphify-out/)
+  graphify extract <path> [--out D] [--no-library]
+                                            build the graph (default ./graphify-out/);
+                                            calls into vlib and ~/.vmodules resolve
+                                            unless --no-library
   graphify overview                        compact summary: counts + most-connected symbols
   graphify query   <text> [opts]           traverse from matching symbols (token-bounded)
   graphify path    <A> <B>                 shortest path between two symbols
@@ -103,8 +106,10 @@ fn cmd_extract(args []string) {
 	// parse each file in its own worker process, so one file that panics V's
 	// parser is skipped (and reported) rather than aborting the whole extract.
 	// Files unchanged since the last extract to `out` are reused from its
-	// cache instead of being reparsed.
-	g, report := graphify.build_graph_resilient(path, os.executable(), out)
+	// cache instead of being reparsed. The modules the project imports from vlib
+	// and ~/.vmodules are read too, so its calls into them resolve.
+	lib := if '--no-library' in args { graphify.LibraryRoots{} } else { graphify.detect_library_roots() }
+	g, report := graphify.build_graph_with_library(path, os.executable(), out, lib)
 	graphify.write_bundle(g, out, report) or { fail('write failed: ${err}') }
 	println('extracted ${g.symbols.len} symbols, ${g.edges.len} edges')
 	if report.failed.len > 0 {

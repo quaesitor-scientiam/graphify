@@ -4518,6 +4518,14 @@ fn test_stale_note() {
 	assert stale_note(graph, repo, exe).contains('different graphify build')
 	// unless the graph came from another machine, whose build always differs
 	assert stale_note(graph, repo, '') == ''
+	// the library it read has moved: the V checkout was updated since
+	head := git('rev-parse', 'HEAD')
+	json_repo := repo.replace('\\', '\\\\')
+	os.write_file(os.join_path(out, 'manifest.json'), '{"source_commit": "${head}", "library": [{"label": "vlib", "root": "${json_repo}", "commit": "${first}"}]}') or {
+		panic(err)
+	}
+	lib_note := stale_note(graph, repo, '')
+	assert lib_note.contains('its library (vlib) was read from ${repo} at ${first[..10]}'), lib_note
 	// no manifest, no opinion
 	os.rm(os.join_path(out, 'manifest.json')) or {}
 	assert stale_note(graph, repo, exe) == ''
@@ -8293,4 +8301,190 @@ fn test_a_field_named_by_a_comptime_check_in_a_field_loop_is_the_field_the_call_
 	targets := g.edges.filter(it.kind == .calls && it.from == 'vlib.veb.app_global_handlers').map(it.to)
 	assert 'vlib.veb.Middleware.get_global_handlers' in targets, targets.str()
 	assert 'vlib.veb.Other.get_global_handlers' !in targets, targets.str()
+}
+
+// library_fixture writes a V checkout (vroot), a VMODULES directory and a project
+// beside them, as the library layer reads them (FUTURE_WORK.md §10).
+fn library_fixture(name string) (string, LibraryRoots) {
+	base := write_tree(name, {
+		'v/vlib/builtin/string.v':  'module builtin
+
+pub struct string {
+	len int
+}
+
+pub fn (s string) contains(sub string) bool {
+	return true
+}
+'
+		'v/vlib/os/os.v':           'module os
+
+// join_path joins its parts.
+pub fn join_path(base string, dirs ...string) string {
+	return base
+}
+
+pub fn rm(path string) ! {
+	return
+}
+'
+		'v/vlib/json2/decode.v':    'module json2
+
+pub fn decode[T](src string) !T {
+	return T{}
+}
+'
+		'v/vlib/x/json2/alias.v':   "@[alias: '@VMODROOT/vlib/json2']
+module json2
+"
+		'vmodules/glyph/glyph.v':   'module glyph
+
+pub struct Ctx {}
+
+pub fn new() Ctx {
+	return Ctx{}
+}
+'
+		'proj/v.mod':               "Module {
+	name: 'proj'
+}
+"
+		'proj/main.v':              'module main
+
+import os
+import x.json2 as json
+import glyph
+
+struct Widget {}
+
+fn (w Widget) contains(sub string) bool {
+	return false
+}
+
+struct Conf {
+	name string
+}
+
+fn run(s string) bool {
+	p := os.join_path(s, "b")
+	_ := glyph.new()
+	c := json.decode[Conf](s) or { Conf{} }
+	return s.contains(p + c.name)
+}
+
+fn main() {}
+'
+	})
+	roots := LibraryRoots{
+		vroot:    os.real_path(os.join_path(base, 'v'))
+		vmodules: os.real_path(os.join_path(base, 'vmodules'))
+	}
+	return base, roots
+}
+
+fn test_a_project_resolves_its_calls_into_the_library() {
+	// A project's tree has no vlib, so `s.contains` linked by name to the project's
+	// only `contains` (Widget's), and `os.join_path`, `json.decode` and `glyph.new`
+	// had nothing to resolve to. With the library read, each goes to its declaration,
+	// and only the declarations the project reaches are kept, apart from its own.
+	base, roots := library_fixture('library_calls')
+	defer {
+		os.rmdir_all(base) or {}
+		os.setenv('GRAPHIFY_LIB_VROOT', '', true)
+		os.setenv('GRAPHIFY_LIB_VMODULES', '', true)
+	}
+	g, _ := build_graph_with_library(os.join_path(base, 'proj'), '', os.join_path(base,
+		'out'), roots)
+	calls := g.edges.filter(it.kind == .calls && it.from == 'main.run').map(it.to)
+	assert 'vlib.builtin.string.contains' in calls, calls.str()
+	assert 'main.Widget.contains' !in calls, calls.str()
+	assert 'vlib.os.join_path' in calls, calls.str()
+	assert 'vlib.json2.decode' in calls, calls.str()
+	assert 'vmodules.glyph.new' in calls, calls.str()
+	lib_ids := g.library.symbols.map(it.id)
+	assert 'vlib.os.join_path' in lib_ids && 'vlib.builtin.string' in lib_ids, lib_ids.str()
+	// nothing the project reaches, so not kept
+	assert 'vlib.os.rm' !in lib_ids, lib_ids.str()
+	assert !g.symbols.any(it.file.starts_with('vlib/') || it.file.starts_with('vmodules/'))
+	assert g.library.roots['vlib'] == roots.vroot
+	r := g.report()
+	assert r.contains('- library: '), r
+	assert r.contains('- calls: extracted') && r.contains(', library '), r
+	// get_body of a library declaration ends with it, though the next one in its
+	// file (`rm`) is not kept
+	body := g.get_body('vlib.os.join_path')
+	assert body.contains('pub fn join_path') && body.contains('return base') && !body.contains('fn rm'), body
+	assert g.explain('main.run').contains('join_path (vlib/os/os.v:4) [library]'), g.explain('main.run')
+}
+
+fn test_a_module_linked_into_vmodules_from_the_project_is_the_projects_own() {
+	// `import proj.web` in proj names its own `web` module, which V finds through
+	// ~/.vmodules/proj, a link to the checkout. It was read again as a library, and
+	// the project's calls went to that copy.
+	base, roots := library_fixture('library_self_link')
+	defer {
+		os.rmdir_all(base) or {}
+		os.setenv('GRAPHIFY_LIB_VROOT', '', true)
+		os.setenv('GRAPHIFY_LIB_VMODULES', '', true)
+	}
+	proj := os.join_path(base, 'proj')
+	os.mkdir_all(os.join_path(proj, 'web')) or { panic(err) }
+	os.write_file(os.join_path(proj, 'web', 'web.v'), 'module web\n\npub fn get(url string) string {\n\treturn url\n}\n') or {
+		panic(err)
+	}
+	os.write_file(os.join_path(proj, 'example.v'), 'module main\n\nimport proj.web\n\nfn fetch() string {\n\treturn web.get("x")\n}\n') or {
+		panic(err)
+	}
+	os.symlink(proj, os.join_path(roots.vmodules, 'proj')) or { return }
+	g, _ := build_graph_with_library(proj, '', os.join_path(base, 'out'), roots)
+	calls := g.edges.filter(it.kind == .calls && it.from == 'main.fetch').map(it.to)
+	assert calls == ['web.get'], calls.str()
+	assert !g.library.symbols.any(it.id.starts_with('vmodules.proj')), g.library.symbols.map(it.id).str()
+}
+
+fn test_a_call_in_a_field_default_resolves_by_its_module() {
+	// A field's site took its struct as its module, so a call in the field's default
+	// that two modules declare (`rgba` in gui and in gg) was not placed by module, as
+	// the same call in a function of the module is.
+	g := graph_of({
+		'gui/color.v': 'module gui\n\npub struct Color {\n\tr u8\n}\n\npub fn rgba(r u8, g u8, b u8, a u8) Color {\n\treturn Color{r}\n}\n'
+		'gui/view.v':  'module gui\n\npub struct Style {\n\tbg Color = rgba(0, 0, 0, 50)\n}\n'
+		'gg/color.v':  'module gg\n\npub struct Color {\n\tr u8\n}\n\npub fn rgba(r u8, g u8, b u8, a u8) Color {\n\treturn Color{r}\n}\n'
+	})
+	calls := g.edges.filter(it.kind == .calls && it.from == 'gui.Style.bg').map(it.to)
+	assert calls == ['gui.rgba'], calls.str()
+}
+
+fn test_graph_json_has_a_library_section_only_when_it_reads_one() {
+	// a graph without a library is written as before, and one with it keeps its
+	// declarations apart from the project's when it is read back
+	mut g := Graph{
+		root: '/p'
+	}
+	g.symbols << Symbol{
+		id:   'main.run'
+		name: 'run'
+		kind: .function
+		file: 'main.v'
+	}
+	assert !graph_to_json(g).contains('"library"')
+	g.library.roots['vlib'] = '/v'
+	g.library.symbols << Symbol{
+		id:   'vlib.os.join_path'
+		name: 'join_path'
+		kind: .function
+		file: 'vlib/os/os.v'
+		line: 4
+	}
+	dir := os.join_path(os.temp_dir(), 'graphify_test_library_json_${os.getpid()}')
+	os.mkdir_all(dir) or { panic(err) }
+	defer {
+		os.rmdir_all(dir) or {}
+	}
+	path := os.join_path(dir, 'graph.json')
+	save_graph(g, path) or { panic(err) }
+	back := load_graph(path) or { panic(err) }
+	assert back.symbols.map(it.id) == ['main.run']
+	assert back.library.symbols.map(it.id) == ['vlib.os.join_path']
+	assert back.library.roots['vlib'] == '/v'
 }

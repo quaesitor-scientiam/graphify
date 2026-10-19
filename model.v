@@ -154,6 +154,19 @@ pub mut:
 	// Not in graph.json: load_graph reads it from manifest.json, and a
 	// merged graph (which has roots) carries none.
 	file_hashes map[string]string @[json: '-']
+	// library holds the declarations outside the project that its edges reach, in
+	// the vlib and VMODULES modules it imports (see FUTURE_WORK.md §10). They are
+	// not in `symbols`: an edge names one by its id, and the index keeps them apart.
+	library Library
+}
+
+// Library is the part of the standard library and of installed modules that a
+// project's edges reach. `roots` maps `vlib` to VROOT and `vmodules` to VMODULES,
+// the directories a library symbol's `file` is read from (Library.path_of).
+pub struct Library {
+pub mut:
+	roots   map[string]string
+	symbols []Symbol
 }
 
 // add_symbol appends a symbol and returns its id for convenient edge wiring.

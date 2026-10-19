@@ -1044,3 +1044,153 @@ describe stale code; the main checkout's own result is the line for
 `graphify_test.v` at the root. (With V 0.5.2, `v test graphify_test.v`
 tested just that file; V3 compiles a file given that way on its own, without
 the rest of the module, so it fails.)
+
+## 10. Calls into vlib and ~/.vmodules from a project outside the V tree (done, October 2026)
+
+A project is extracted on its own, so the modules it imports from vlib and
+`~/.vmodules` are not in its tree, and nothing they declare can be resolved to.
+Measured October 2026 with the current extractor:
+
+| Project | Files | Unresolved calls | Unresolved type references |
+|---|---|---|---|
+| `~/.vmodules/gui` | 343 | 2,201 of 11,990 (18%) | 1,377 |
+| vebidor | 95 | 850 of 2,273 (37%) | 397 |
+| vglyph | 68 | 508 of 1,689 (30%) | 176 |
+| vxui | 53 | 611 of 1,433 (43%) | 416 |
+| graphify | 27 | 936 of 2,546 (37%) | 360 |
+
+On the V tree itself it is 268 of 304,579 (0.09%). The top unresolved callees in gui
+are `panic`, `contains`, `trim_space`, `msg`, `error`, `starts_with`, `os.join_path`
+and `time.now`, and `string` itself is an unresolved type reference 1,159 times:
+builtin declares it as a struct, and builtin is not in the tree. Each miss also
+breaks the receiver inference after it (`x.trim_space().split(',')`).
+
+The upper bound, measured by extracting a tree that holds the project and all of
+vlib (and vglyph for gui): gui's unresolved calls go from 2,201 to 12, 2,468 calls
+resolve into the library, and no type reference stays unresolved; graphify's go
+from 936 to 27, most of the 27 an artifact of that tree's layout.
+
+### Design
+
+**Which declarations.** The modules a project imports that are not in its tree,
+looked up as V3 does after the project: `$VROOT/vlib/<path>`, then
+`$VMODULES/<path>` (`~/.vmodules` by default), followed through each loaded
+module's own imports, plus builtin, which every file imports. A module is the
+`.v` files directly in its directory, without `_test.v` files; every platform
+file is read, as for the project. VROOT is the `VROOT` environment variable, or
+the directory of the `v` on PATH when it holds `vlib/builtin`. Nothing is loaded
+for a module that the project's tree has, so extracting the V tree itself loads
+nothing. For gui that is 92 vlib module directories and 879 files, for graphify
+35 and 448; a cold extract of the whole V tree takes about 6 s, so the closure
+costs well under a second, and it is cached like the project's files.
+
+**How they get into resolution.** Library files are parsed by the same workers
+and cache as the project's, before `disambiguate_ids` and `resolve_edges`. Their
+symbols and their `embeds` and `references` edges join the project's for
+resolution, so `resolve_edges` and infer.v see their declarations, return types,
+fields and embeds. Their `calls` edges are dropped: calls inside the library are
+not the project's. `resolve_import` gains the same two lookups after the
+project's, so a project's `import x.json2` is `json2` (vlib/x/json2 is an alias
+directory) as it is inside the V tree; the library roots are part of the cache
+envelope, since an import's name now depends on them.
+
+**How ids line up.** A vlib file is extracted with VROOT as its root, so its rel
+is `vlib/os/os.v` and its ids are `vlib.os.join_path`, `vlib.builtin.string`,
+exactly as in the V tree's own graph. Imports already name vlib modules without
+the prefix (`os`), and `import_names` and `import_reaches` already match
+`vlib.os` to it. A `~/.vmodules` file gets the rel `vmodules/vglyph/x.v`, so its
+ids are `vmodules.vglyph.Foo`, and `import_names` matches `vmodules.` as it
+matches `vlib.`. The prefix keeps a library module apart from a project module of
+the same name (`ui` in the project and `~/.vmodules/ui`).
+
+**What goes into graph.json.** After resolution only the library declarations
+the project's edges reach are kept, with their parents (a method's struct, a
+module), in a separate `library` section: `{"roots": {"vlib": VROOT,
+"vmodules": VMODULES}, "symbols": [...]}`. They are not in `symbols`. Measured:
+431 for gui (10,257 project symbols) and 140 for graphify (926). Edges keep the
+library ids as their `to`. Old readers skip the unknown key. The alternatives
+were worse: putting library symbols in `symbols` makes `string`, `contains` and
+`panic` the top hubs of `query`, `path`, the report, communities and the SVG
+layout, lets `Index.resolve`'s unique-name fallback hijack or drop project
+edges, churns `diff` as the project's stdlib use changes, and makes the hook
+match `vlib/os/os.v` against project files; keeping only ids, with no
+declarations, leaves `explain` and `get_body` nothing to show; and putting the
+library under `roots` turns off the drift check and confuses `merge-graphs`.
+
+**Consumers.** The index keeps library declarations apart (`lib_by_id`): they
+label edges in `explain` and answer `get_body` (read from the library's root),
+but never join traversal (`query`, `path`, neighbours), ranking (most connected,
+communities, SVG and HTML) or name resolution, and `diff`, the skeleton and the
+hook see only project symbols, as before. The report counts an edge into the
+library as `library`, apart from `extracted` and `inferred`, so `unresolved`
+stays an honest count of what the project's own names leave open. The manifest
+records each library root with its commit (`git rev-parse` in VROOT) so a stale
+note can say the library moved.
+
+**Switch.** On by default when a VROOT is found; `graphify extract --no-library`
+turns it off, and so does an empty `VROOT`. The in-process `build_graph` that the
+tests and `skeleton` use stays without a library.
+
+**Risks.** The `v` on PATH may not be the V the project builds with. A function
+declared once per platform in vlib resolves to the shared id, as it does inside
+the V tree. `get_body` on a library declaration reads the file the library has
+now.
+
+### What was built, and measured
+
+As designed above (`library.v`, `build_graph_with_library`, `keep_reached_library`
+in graphify.v), with these details found on the way:
+
+- An id can be both the project's and the library's: a `fn C.name` binding both
+  declare is `C.name` for each. The library's edges are therefore told apart by
+  the file they were made in, not by their `from`, and such an id stays the
+  project's. Copies of a library id, one per platform, are kept once, the one the
+  index shows (`shown_before`).
+- A function's `end_line` is the end of its header, and get_body finds the end of
+  a body from the next declaration of its file, which the library section keeps
+  only some of. A kept library declaration's `end_line` is set to the last line
+  of its body at extraction, from all the declarations of its file
+  (`with_body_ends`, `decl_end`).
+- `~/.vmodules/vebidor` is a link to the vebidor checkout, so `import
+  vebidor.webdriver` in vebidor's own examples was its own module, read again as
+  a library, and its calls went to that copy. A VMODULES module whose real path is
+  inside the tree is named by its path in the tree (`resolve_import`), and is
+  never read as a library.
+- A call in a field's default value, `bg Color = rgba(0, 0, 0, 50)`, was placed
+  by module only through its struct: a field's site took the struct as its
+  module. With `rgba` declared by gui and by vlib's gg and gx, that left it
+  unresolved. A field's site is its struct's module now (`decl_mod`). It changes
+  nothing on the V tree.
+
+Measured with each project extracted on its own, against the extractor before
+this change (vlang adea615a6b as VROOT):
+
+| Project | Unresolved calls | Into the library | Library declarations kept | Cold extract |
+|---|---|---|---|---|
+| `~/.vmodules/gui` | 2,201 → 6 | 2,468 | 429 | 0.7 s |
+| vebidor | 850 → 0 | 824 | 131 | 0.3 s |
+| vglyph | 508 → 0 | 537 | 116 | 0.4 s |
+| vxui | 611 → 7 | 707 | 164 | 0.3 s |
+| vpm | 145 → 2 | 175 | 114 | 0.3 s |
+| graphify | 970 → 2 | 1,311 | 144 | 0.3 s |
+
+Unresolved type references go to 0 in each. No project edge loses its
+target. The edges that change target were name matches to a project declaration
+of the same name, checked by sample in each project: `s.split(...)` had gone to
+gui's own `split`, `m.lock()` on a `sync.Mutex` to `gui.Window.lock`, `x.str()`
+on a `json2.Any` to vebidor's only `str` (54 calls) and vxui's (44), `err.msg()`
+to `VxuiErrorDetail.msg`, and `text_width` to gui's own where vglyph's is called.
+The V tree's graph is the same byte for byte with the library on, off, and
+before the change, since it imports nothing from outside itself.
+
+Still open:
+
+- `merge-graphs` keeps no library: the merged graph's edges into one name ids it
+  doesn't have, so they count as unresolved there.
+- A library file's syntax errors and crashes are not reported, and a library is
+  re-read from the project's own cache, so two projects read vlib twice.
+- The `v` on PATH decides which vlib is read. A graph's library section names the
+  roots, and the stale note says when VROOT's commit moved, but not when a
+  project builds with another V.
+- A call inside a library generic function that an instance from the project
+  makes (`arrays.map[T]` calling `T.str()`) is not recorded.
