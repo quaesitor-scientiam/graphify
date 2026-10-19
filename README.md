@@ -562,7 +562,8 @@ vlang graph is of. See FUTURE_WORK.md §11.
 of a tool result) say when the graph may be out of date, from the
 `manifest.json` beside it: when the source checkout has moved past the commit
 the graph was extracted from (`... is at 89371e2b13 (3 commits ahead)`), or
-when the graphify that would extract it again isn't the build that did. A
+when the graphify that would extract it again isn't the build that did, or
+when the vlib or a module under `~/.vmodules` that it read has moved on. A
 graph read with `--source-dir` / `GRAPHIFY_SOURCE_DIR`, shared from another
 machine, is compared by commit only. Uncommitted edits aren't reported. Smoke-test the protocol independently of either
 client with:
@@ -635,11 +636,13 @@ stamp and stops.
 A graph, vlang's or a project's, is out of date when it has none yet, or its
 `manifest.json` says it was extracted from another commit of its repo, by
 another build of `bin/graphify`, or, for a project, from vlang's `vlib` at
-another commit. A pull or a rebuild therefore shows up on its own, and a run
+another commit, or from a module under `~/.vmodules` at another commit of its
+clone (`v install --update`, or a pull in it: `extracting gui (vglyph moved)...`).
+A pull or a rebuild therefore shows up on its own, and a run
 after your own `v up` with `-NoPull` extracts what moved and skips the rest,
 each with its reason in the log (`extracting graph (its commit moved)...`).
-Uncommitted edits, and a module under `~/.vmodules` updated in place, aren't
-seen; `-Force` re-extracts every graph.
+Uncommitted edits, and a module there that isn't a git clone, aren't seen;
+`-Force` re-extracts every graph.
 
 graphify's own checkout is fast-forwarded first, so a change merged to
 master reaches every machine on its next scheduled run. A checkout with
