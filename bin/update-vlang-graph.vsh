@@ -27,8 +27,8 @@
 // A graph is out of date when it doesn't exist yet, or its manifest.json says it was
 // extracted from another commit of its repo or by another graphify build than
 // bin/graphify, or, for a project, read its vlib at another commit of the target
-// repo (graph_out_of_date). Uncommitted edits, and a module under VMODULES updated in
-// place, aren't seen: -Force re-extracts every graph.
+// repo, or a module under VMODULES at another commit of its clone (graph_out_of_date).
+// Uncommitted edits aren't seen: -Force re-extracts every graph.
 //
 // The config's `projects` are extracted after the target repo, each into the store
 // beside it, so the MCP server can layer each on it (`--projects`, FUTURE_WORK.md
@@ -60,7 +60,14 @@ struct GraphManifest {
 }
 
 struct GraphLibrary {
-	label  string
+	label   string
+	root    string
+	commit  string
+	modules []GraphModule
+}
+
+struct GraphModule {
+	name   string
 	commit string
 }
 
@@ -497,7 +504,8 @@ fn extract_project(log_path string, exe string, project string, store string, ex
 // graph_out_of_date says why the graph in `dir` is out of date, or '' when it isn't:
 // it doesn't exist, or its manifest says it was extracted from another commit than
 // `head`, by another graphify than the one hashing to `exe_hash`, or, given
-// `vlib_head`, from a vlib at another commit than that. A commit that can't be told
+// `vlib_head`, from a vlib at another commit than that, or from a module under
+// VMODULES at another commit than its clone is at now. A commit that can't be told
 // ('', not a git checkout) is not compared.
 fn graph_out_of_date(dir string, head string, exe_hash string, vlib_head string) string {
 	if !os.exists(os.join_path(dir, 'graph.json')) {
@@ -516,6 +524,13 @@ fn graph_out_of_date(dir string, head string, exe_hash string, vlib_head string)
 		for l in m.library {
 			if l.label == 'vlib' && l.commit != '' && l.commit != vlib_head {
 				return 'vlib moved'
+			}
+		}
+	}
+	for l in m.library {
+		for mod in l.modules {
+			if mod.commit != '' && mod.commit != head_of(os.join_path(l.root, mod.name)) {
+				return '${mod.name} moved'
 			}
 		}
 	}

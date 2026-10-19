@@ -40,6 +40,41 @@ pub:
 	label  string
 	root   string
 	commit string
+	// for VMODULES, which is no repository itself: each module the graph keeps
+	// declarations of, with the commit its clone was at, so a module updated in place
+	// (`v install`, a pull) is seen as a vlib that moved is
+	modules []ModuleState
+}
+
+// ModuleState is one module under VMODULES as an extract read it: its directory
+// there (`vglyph`) and its clone's commit, '' when it isn't one.
+pub struct ModuleState {
+pub:
+	name   string
+	commit string
+}
+
+// vmodules_states lists the modules under `root` (VMODULES) whose declarations the
+// library keeps, by their directory there, with the commit of each that is a clone
+// of its own.
+fn vmodules_states(lib Library, root string) []ModuleState {
+	mut names := map[string]bool{}
+	for s in lib.symbols {
+		if s.file.starts_with(lib_vmodules_prefix) {
+			names[s.file[lib_vmodules_prefix.len..].all_before('/')] = true
+		}
+	}
+	mut sorted := names.keys()
+	sorted.sort()
+	mut out := []ModuleState{cap: sorted.len}
+	for name in sorted {
+		dir := os.join_path(root, name)
+		out << ModuleState{
+			name:   name
+			commit: if os.exists(os.join_path(dir, '.git')) { git_commit_of(dir) } else { '' }
+		}
+	}
+	return out
 }
 
 // SourceFile is one source file's text hash as the extract read it, so
@@ -182,9 +217,10 @@ pub fn (g Graph) manifest_json(report ExtractReport) string {
 		for label in labels {
 			root := g.library.roots[label]
 			library << LibraryState{
-				label:  label
-				root:   root
-				commit: git_commit_of(root)
+				label:   label
+				root:    root
+				commit:  git_commit_of(root)
+				modules: if label == 'vmodules' { vmodules_states(g.library, root) } else { [] }
 			}
 		}
 	}

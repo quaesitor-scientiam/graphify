@@ -9152,3 +9152,40 @@ pub fn unused() {}
 	project_calls := g.edges.filter(it.kind == .calls && !it.from.starts_with('vmodules.')).len
 	assert g.report().contains('- calls: ${project_calls}\n'), g.report()
 }
+
+fn test_a_module_from_vmodules_updated_in_place_makes_the_graph_stale() {
+	// VMODULES is no repository, but each module `v install` put there is a clone of its
+	// own: the manifest records the commit of each the graph keeps, so that a module
+	// pulled since says the graph is behind, as a moved vlib does
+	base, roots := library_fixture('library_module_commit')
+	defer {
+		os.rmdir_all(base) or {}
+	}
+	glyph := os.join_path(roots.vmodules, 'glyph')
+	git := fn [glyph] (args ...string) string {
+		mut cmd := ['git', '-C', glyph, '-c', 'user.name=t', '-c', 'user.email=t@t', '-c',
+			'commit.gpgsign=false']
+		cmd << args
+		return os.exec(cmd).output.trim_space()
+	}
+	git('init', '-q')
+	git('add', '.')
+	git('commit', '-q', '-m', 'one')
+	first := git('rev-parse', 'HEAD')
+	out := os.join_path(base, 'out')
+	g, report := build_graph_with_library(os.join_path(base, 'proj'), '', out, roots)
+	write_bundle(g, out, report) or { panic(err) }
+	m := load_manifest(os.join_path(out, 'manifest.json')) or { panic(err) }
+	vmods := m.library.filter(it.label == 'vmodules')
+	assert vmods.len == 1 && vmods[0].commit == ''
+	assert vmods[0].modules.len == 1, vmods.str()
+	assert vmods[0].modules[0].name == 'glyph' && vmods[0].modules[0].commit == first
+	graph := os.join_path(out, 'graph.json')
+	assert !stale_note(graph, '', '').contains('glyph')
+
+	os.write_file(os.join_path(glyph, 'more.v'), 'module glyph\n') or { panic(err) }
+	git('add', '.')
+	git('commit', '-q', '-m', 'two')
+	note := stale_note(graph, '', '')
+	assert note.contains('its module glyph was read from ${glyph} at ${first[..10]}'), note
+}

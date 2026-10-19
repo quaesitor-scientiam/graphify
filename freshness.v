@@ -9,7 +9,8 @@ import os
 //   - the commit the graph was extracted from with the commit `root` (the
 //     source checkout) is at now, and
 //   - the commit each library root it read (VROOT, see Graph.library) was at
-//     with the commit that root is at now, and
+//     with the commit that root is at now, and each module under VMODULES it
+//     kept was at with the commit that module's clone is at now, and
 //   - the graphify build that extracted it with `cli_exe`, the graphify that
 //     would extract it again; skipped when `cli_exe` is '', as for a graph
 //     shared from another machine, whose build always differs.
@@ -29,6 +30,16 @@ pub fn stale_note(graph_path string, root string, cli_exe string) string {
 	}
 	// the library the project's calls resolve into: V updated, or a module reinstalled
 	for l in m.library {
+		for mod in l.modules {
+			if mod.commit == '' {
+				continue
+			}
+			dir := os.join_path(l.root, mod.name)
+			head := git_commit_of(dir)
+			if head != '' && head != mod.commit {
+				notes << 'its module ${mod.name} was read from ${dir} at ${short_commit(mod.commit)}, which is at ${short_commit(head)} now'
+			}
+		}
 		if l.commit == '' {
 			continue
 		}
