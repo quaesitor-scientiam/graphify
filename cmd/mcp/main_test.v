@@ -22,10 +22,12 @@ fn test_the_session_dir_is_the_first_root_the_client_answers_with() {
 	defer {
 		os.rmdir_all(dir) or {}
 	}
-	// Claude Code's answer, for a session in a worktree; a space is percent-encoded
-	uri := 'file://' + dir.replace(' ', '%20')
+	// Claude Code's answer, for a session in a worktree: a URI has forward slashes,
+	// a slash before a Windows drive (`file:///C:/…`), and a space percent-encoded
+	path := dir.replace('\\', '/')
+	uri := 'file://' + (if path.starts_with('/') { '' } else { '/' }) + path.replace(' ', '%20')
 	answer := '{"result":{"roots":[{"uri":"${uri}"},{"uri":"file:///elsewhere"}]},"jsonrpc":"2.0","id":"graphify-roots"}'
-	assert session_dir(answer) or { '' } == dir
+	assert (session_dir(answer) or { '' }).replace('\\', '/') == path
 	// an answer to another request, an empty one, and a root that is no directory
 	assert session_dir(answer.replace('"graphify-roots"', '"other"')) == none
 	assert session_dir('{"result":{"roots":[]},"jsonrpc":"2.0","id":"graphify-roots"}') == none
