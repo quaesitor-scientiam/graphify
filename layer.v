@@ -19,8 +19,10 @@ fn layered_file(file string) bool {
 // project's library ids are the V tree's own, so nothing is renamed. Its symbols come
 // first, then each of base's declared in a vlib file (not a test) whose id the project doesn't
 // have; its edges, then base's from those symbols, as base's own index resolved
-// them. The project's library section keeps what base doesn't stand in for: modules
-// from VMODULES, and a vlib id base doesn't have.
+// them. The modules from VMODULES the project's graph keeps whole
+// (keep_reached_library) join them, after the project's own symbols too, so a
+// traversal goes on into vglyph as into vlib. The library section keeps a vlib id
+// base doesn't have.
 pub fn layer_graph(project Graph, base Graph) Graph {
 	mut own := map[string]bool{}
 	for s in project.symbols {
@@ -30,7 +32,6 @@ pub fn layer_graph(project Graph, base Graph) Graph {
 		root:        project.root
 		roots:       project.roots.clone()
 		symbols:     project.symbols.clone()
-		edges:       project.edges.clone()
 		file_hashes: project.file_hashes.clone()
 	}
 	mut ids := map[string]bool{}
@@ -44,6 +45,32 @@ pub fn layer_graph(project Graph, base Graph) Graph {
 			}
 		}
 	}
+	out.library.roots = project.library.roots.clone()
+	mut modules := map[string]bool{}
+	for s in project.library.symbols {
+		if s.id in ids || s.id in own {
+			continue
+		}
+		if s.file.starts_with(lib_vmodules_prefix) {
+			out.symbols << s
+			modules[s.id] = true
+		} else {
+			out.library.symbols << s
+		}
+	}
+	mut lib_ids := map[string]bool{}
+	for s in out.library.symbols {
+		lib_ids[s.id] = true
+	}
+	// a module's edge that names no declaration is left out: the index would link a raw
+	// name to the project's declaration of it, which the module can't call
+	for e in project.edges {
+		if e.from in modules && e.to !in own && e.to !in ids && e.to !in modules
+			&& e.to !in lib_ids {
+			continue
+		}
+		out.edges << e
+	}
 	// resolved by base's index: a raw name of base's is resolved among base's own
 	// declarations, never the project's
 	for e in base.index().edges {
@@ -51,11 +78,8 @@ pub fn layer_graph(project Graph, base Graph) Graph {
 			out.edges << e
 		}
 	}
-	out.library.roots = project.library.roots.clone()
-	for s in project.library.symbols {
-		if s.id !in ids && s.id !in own {
-			out.library.symbols << s
-		}
+	for id in modules.keys() {
+		ids[id] = true
 	}
 	out.base = Base{
 		root:        base.root

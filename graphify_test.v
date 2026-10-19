@@ -8819,6 +8819,7 @@ fn layer_fixture() (Graph, Graph) {
 		'vlib/gg/gg_test.v':   'module gg\n\nfn test_draw() {}\n'
 		'vlib/gg/gg_test.c.v': 'module gg\n\nfn test_native() {}\n'
 		'cmd/tool.v':          'module main\n\nfn main() {}\n'
+		'vmodules/ext/ext.v':  'module ext\n\npub fn f() {\n\tgg.flush()\n}\n'
 	})
 	base := Graph{
 		root:    base_root
@@ -8917,10 +8918,28 @@ fn layer_fixture() (Graph, Graph) {
 				to:   'helper'
 				kind: .calls
 			},
+			Edge{
+				from: 'proj.helper'
+				to:   'vmodules.ext.f'
+				kind: .calls
+			},
+			// a module from VMODULES, kept whole, calls into vlib, and has a call its
+			// extract left unresolved
+			Edge{
+				from: 'vmodules.ext.f'
+				to:   'vlib.gg.flush'
+				kind: .calls
+			},
+			Edge{
+				from: 'vmodules.ext.f'
+				to:   'helper'
+				kind: .calls
+			},
 		]
 		library: Library{
 			roots:   {
-				'vlib': base_root
+				'vlib':     base_root
+				'vmodules': os.join_path(base_root, 'vmodules')
 			}
 			symbols: [
 				Symbol{
@@ -8931,11 +8950,13 @@ fn layer_fixture() (Graph, Graph) {
 					line: 3
 				},
 				Symbol{
-					id:   'vmodules.ext.f'
-					name: 'f'
-					kind: .function
-					file: 'vmodules/ext/ext.v'
-					line: 1
+					id:        'vmodules.ext.f'
+					name:      'f'
+					kind:      .function
+					signature: 'pub fn f()'
+					file:      'vmodules/ext/ext.v'
+					line:      3
+					end_line:  5
 				},
 			]
 		}
@@ -8964,8 +8985,14 @@ fn test_a_project_layered_on_the_v_tree_carries_on_into_vlib() {
 	ex := g.explain('vlib.gg.draw')
 	assert ex.contains('[library]')
 	assert ex.contains('redraw (proj.v:3)')
-	// the library section keeps only what the V tree doesn't stand in for
-	assert g.library.symbols.map(it.id) == ['vmodules.ext.f']
+	// a module from VMODULES joins the traversal as vlib does, read from where it is
+	// installed, and its unresolved call isn't linked to the project's `helper`
+	assert g.shortest_path('proj.helper', 'vlib.gg.flush') == ['proj.helper', 'vmodules.ext.f',
+		'vlib.gg.flush']
+	assert g.get_body('vmodules.ext.f').contains('gg.flush()')
+	assert !idx.edges.any(it.from == 'vmodules.ext.f' && it.to == 'proj.helper')
+	assert g.explain('vmodules.ext.f').contains('[library]')
+	assert g.library.symbols.len == 0
 	// the project's graph itself is untouched
 	assert project.base.ids.len == 0
 }
@@ -9060,4 +9087,68 @@ fn test_a_module_is_shown_from_its_own_file_not_a_test_of_it() {
 	})
 	assert g.index().by_id['gg'].file == 'gg/gg.v'
 	assert g.explain('gg').contains('(gg/gg.v:1)')
+}
+
+fn test_a_module_from_vmodules_is_kept_whole_with_its_calls() {
+	// The project calls glyph.new only, but the module it builds against is kept whole,
+	// with the calls it makes, into itself and into vlib, resolved as the project's are,
+	// so the MCP server can layer it under the project (layer_graph).
+	base, fixture_roots := library_fixture('library_whole_module')
+	defer {
+		os.rmdir_all(base) or {}
+		os.setenv('GRAPHIFY_LIB_VROOT', '', true)
+		os.setenv('GRAPHIFY_LIB_VMODULES', '', true)
+	}
+	// VMODULES as it is named on a machine, ~/.vmodules: its files' paths don't end in
+	// their rels, `vmodules/glyph/glyph.v`
+	os.mv(os.join_path(base, 'vmodules'), os.join_path(base, '.vmodules')) or { panic(err) }
+	roots := LibraryRoots{
+		vroot:    fixture_roots.vroot
+		vmodules: os.real_path(os.join_path(base, '.vmodules'))
+	}
+	glyph := os.join_path(roots.vmodules, 'glyph')
+	os.write_file(os.join_path(glyph, 'glyph.v'), 'module glyph
+
+import os
+import sub
+
+pub struct Ctx {}
+
+pub fn new() Ctx {
+	setup()
+	return Ctx{}
+}
+
+fn setup() {
+	os.rm("x") or {}
+	sub.helper()
+}
+
+pub fn unused() {}
+') or {
+		panic(err)
+	}
+	// a module of its own, which V finds beside the module's v.mod: `import sub`
+	os.write_file(os.join_path(glyph, 'v.mod'), "Module {\n\tname: 'glyph'\n}\n") or { panic(err) }
+	os.mkdir_all(os.join_path(glyph, 'sub')) or { panic(err) }
+	os.write_file(os.join_path(glyph, 'sub', 'sub.v'), 'module sub\n\npub fn helper() {}\n') or {
+		panic(err)
+	}
+	g, _ := build_graph_with_library(os.join_path(base, 'proj'), '', os.join_path(base,
+		'out'), roots)
+	lib_ids := g.library.symbols.map(it.id)
+	for id in ['vmodules.glyph.new', 'vmodules.glyph.setup', 'vmodules.glyph.unused'] {
+		assert id in lib_ids, id
+	}
+	// reached only from the module, and kept for it
+	assert 'vlib.os.rm' in lib_ids, lib_ids.str()
+	glyph_calls := g.edges.filter(it.kind == .calls && it.from.starts_with('vmodules.glyph.'))
+	assert glyph_calls.any(it.from == 'vmodules.glyph.new' && it.to == 'vmodules.glyph.setup')
+	assert glyph_calls.any(it.from == 'vmodules.glyph.setup' && it.to == 'vlib.os.rm')
+	assert glyph_calls.any(it.from == 'vmodules.glyph.setup' && it.to == 'vmodules.glyph.sub.helper'), glyph_calls.str()
+	// vlib keeps only what is reached, without its own edges
+	assert !g.edges.any(it.from.starts_with('vlib.'))
+	// the report counts the project's edges, not the module's
+	project_calls := g.edges.filter(it.kind == .calls && !it.from.starts_with('vmodules.')).len
+	assert g.report().contains('- calls: ${project_calls}\n'), g.report()
 }
