@@ -1,6 +1,7 @@
 module graphify
 
 import os
+import v.pref
 
 // Index is a precomputed lookup over a Graph: symbols by id and name, plus an
 // undirected adjacency of *internal* edges (edges whose target resolves to a
@@ -97,15 +98,39 @@ fn (g Graph) build_index() Index {
 // from one of its own files and not `wayland_pipe_abi_test.c.v`; then a file for
 // the C backend (plain `.v` or `.c.v`) before one for another backend, and the JS
 // backend's `.js.v` last, since it is the copy furthest from what ordinary V code
-// calls. Between files of the same rank the later one wins, as it did before
-// backends were ranked; g.symbols follows graph.json, which the same-graph CI
-// job keeps identical across hosts.
+// calls; then, between files of one backend, one this host compiles before one
+// only another OS or architecture does (`os_nix.c.v` before `os_windows.c.v` on
+// macOS), and an OS's own file before the `_default` one V falls back to without it.
+// Between files of the same rank the later one wins, as it did before backends were
+// ranked; g.symbols follows graph.json, which the same-graph CI job keeps identical
+// across hosts.
 fn shown_before(a Symbol, b Symbol) bool {
 	a_test := is_test_file(a.file)
 	if a_test != is_test_file(b.file) {
 		return !a_test
 	}
-	return backend_rank(a.file) <= backend_rank(b.file)
+	a_backend, b_backend := backend_rank(a.file), backend_rank(b.file)
+	if a_backend != b_backend {
+		return a_backend < b_backend
+	}
+	return host_rank(a.file) <= host_rank(b.file)
+}
+
+// the OS and architecture graphify runs on, which a declaration shown is compiled for
+const host_target = pref.host_target()
+
+// host_rank orders a file by whether this host compiles it: one V compiles here,
+// then a `_default` one, which V compiles only when the OS has no file of its own,
+// then one for another OS or architecture (pref.file_has_incompatible_target_suffix).
+fn host_rank(file string) int {
+	name := os.file_name(file)
+	if pref.file_has_incompatible_target_suffix(name, host_target) {
+		return 2
+	}
+	if name.ends_with('_default.c.v') || name.ends_with('_default.v') {
+		return 1
+	}
+	return 0
 }
 
 // is_test_file reports whether `file` is a test, which only `v test` compiles:

@@ -1058,6 +1058,18 @@ no file node and no error; it declares nothing and V builds it, so it is no long
 `partial` either (`only_comments`). What remains is the checker fixture whose error is
 its point, `module_alias_started_with_underscore`.
 
+**The declaration shown is the host's (October 2026).** A function declared once per
+platform, as `os.ls` is in os_nix.c.v and os_windows.c.v, is one id, and the index shows
+one of its declarations (`shown_before`). Between files of one backend that was the later
+in the graph, so on macOS `get_node`, `get_body` and a call's location went to
+os_windows.c.v. A file that this host compiles now comes first, then a `_default` one,
+which V compiles only when the OS has no file of its own, then one for another OS or
+architecture, as V itself decides (`pref.file_has_incompatible_target_suffix`, in
+`host_rank`). This is the index's choice, made when a graph is read, so graph.json is
+unchanged and stays the same on every host. On the V compiler's tree, on macOS, 612 of
+the 3,789 shared ids are shown from another file, 592 of them from one macOS doesn't
+compile; 84 are still shown from such a file, having no copy for macOS.
+
 ## 9. Building inside a git worktree compiles the main checkout (fixed, October 2026)
 
 `cmd/cli`, `cmd/mcp`, and `cmd/hooks/graphify_hook.vsh` all `import graphify`.

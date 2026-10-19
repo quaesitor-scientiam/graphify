@@ -4622,6 +4622,59 @@ fn test_index_representative_ranks_backends() {
 	}.index().by_id['os.f'].file == 'os/f_nix.v'
 }
 
+fn test_index_representative_is_the_file_this_host_compiles() {
+	// `os.ls` is declared in os_nix.c.v and os_windows.c.v, both for the C backend;
+	// the one shown was the later in the graph, os_windows.c.v on macOS too
+	decl := fn (file string) Symbol {
+		return Symbol{
+			id:   'os.ls'
+			name: 'ls'
+			kind: .function
+			file: file
+		}
+	}
+	nix, windows := decl('os/os_nix.c.v'), decl('os/os_windows.c.v')
+	mut own_os := nix
+	$if windows {
+		own_os = windows
+	}
+	for syms in [[nix, windows], [windows, nix]] {
+		assert Graph{
+			symbols: syms
+		}.index().by_id['os.ls'].file == own_os.file
+	}
+	// an OS's own file before the `_default` one V compiles only without it
+	default := decl('os/fd_default.c.v')
+	mut own_name := 'os/fd_linux.c.v'
+	$if windows {
+		own_name = 'os/fd_windows.c.v'
+	}
+	$if macos {
+		own_name = 'os/fd_macos.c.v'
+	}
+	own := decl(own_name)
+	for syms in [[default, own], [own, default]] {
+		assert Graph{
+			symbols: syms
+		}.index().by_id['os.ls'].file == own.file
+	}
+	// another architecture's file is passed over as another OS's is
+	mut here, mut other := decl('os/f_amd64.c.v'), decl('os/f_arm64.c.v')
+	$if arm64 {
+		here, other = other, here
+	}
+	for syms in [[here, other], [other, here]] {
+		assert Graph{
+			symbols: syms
+		}.index().by_id['os.ls'].file == here.file
+	}
+	// the backend comes first: a C file for another OS before the JS backend's
+	js := decl('os/os.js.v')
+	assert Graph{
+		symbols: [windows, js]
+	}.index().by_id['os.ls'].file == windows.file
+}
+
 fn test_index_lists_a_shared_id_once_by_name() {
 	// Two declarations of one id are not two candidates: a bare-name edge to
 	// them resolves, and explain doesn't say the name has 2 declarations.
