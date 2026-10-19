@@ -1,13 +1,13 @@
 module main
 
-// graphify MCP server — speaks JSON-RPC 2.0 over stdio (newline-delimited),
-// the transport Claude Code uses for local MCP servers. It loads a persisted
+// graphify MCP server — speaks MCP over stdio through V's mcp module, the
+// transport Claude Code uses for local MCP servers. It loads a persisted
 // graph.json once and exposes graph traversal as tools, so the model queries
 // the graph instead of re-reading source files.
 //
 //   v run cmd/mcp [graphify-out/graph.json] [source-dir] [--projects <dir>]
 //
-// Tools: query_graph, get_node, get_neighbors, shortest_path.
+// Tools: query_graph, get_node, get_neighbors, shortest_path, get_body, overview.
 //
 // With --projects, a directory of project graphs (`extract --store`), it serves the
 // project whose root holds its working directory, layered on the graph it was given
@@ -28,6 +28,7 @@ import os
 import net.urllib
 import time
 import x.json2
+import mcp
 import graphify
 
 // Served is what the tools answer from: `g`, the graph served, and when it is a
@@ -37,6 +38,33 @@ struct Served {
 	g       graphify.Graph
 	project graphify.Graph
 	layered bool
+}
+
+// App is what the tools answer from, and where it comes from: the base graph read
+// from `base_path`, the project's graph from `project_path`, and the worktree of
+// the session's directory, `here`. Each tool call brings it up to date (refresh).
+@[heap]
+struct App {
+	graph_path   string
+	projects_dir string
+	src_dir      string
+	base_root    string
+	cli          string
+mut:
+	here          string
+	project_path  string
+	wt            Worktree
+	base          graphify.Graph
+	base_path     string
+	served        Served
+	stamp         string
+	project_stamp string
+	note          string
+	note_at       i64
+	// the session's directory, from the client's roots (tap_stdin): the latest only
+	dirs chan string = chan string{cap: 1}
+	// whether a 2026-07-28 client was asked for its roots, which it is once
+	roots_asked bool
 }
 
 fn main() {
@@ -66,7 +94,7 @@ fn main() {
 	}
 	// the session's directory: where the server was started until the client says
 	// otherwise (session_dir)
-	mut here := os.getwd()
+	here := os.getwd()
 	mut project_path := graphify.project_for(projects_dir, here, base_root) or { '' }
 	// a worktree's extract starts before the base graph is read, which takes longer
 	// than a project's extract, so that the worktree's graph is the first one served
@@ -85,112 +113,150 @@ fn main() {
 	if wt.ready && wt.graph != graph_path {
 		project_path = wt.path
 	}
-	mut served := serve(base, project_path)
 	// the graph.json the base is read from: the worktree's, once it is there, for a
 	// worktree of the V tree; mtime has one-second resolution, so the size is
 	// compared as well
-	mut base_path := if wt.ready && wt.graph == graph_path { wt.path } else { graph_path }
-	mut stamp := file_stamp(base_path)
-	mut project_stamp := if project_path != '' { file_stamp(project_path) } else { '' }
+	base_path := if wt.ready && wt.graph == graph_path { wt.path } else { graph_path }
+	served := serve(base, project_path)
 	// a shared graph was built by another machine's graphify: compare commits only
 	cli := if src_dir != '' { '' } else { graphify.cli_beside() }
-	mut note := notes(base_path, project_path, served, cli)
-	mut note_at := time.now().unix()
-	// whether the client said it has roots to answer roots_request with
-	mut has_roots := false
+	mut app := &App{
+		graph_path:    graph_path
+		projects_dir:  projects_dir
+		src_dir:       src_dir
+		base_root:     base_root
+		cli:           cli
+		here:          here
+		project_path:  project_path
+		wt:            wt
+		base:          base
+		base_path:     base_path
+		served:        served
+		stamp:         file_stamp(base_path)
+		project_stamp: if project_path != '' { file_stamp(project_path) } else { '' }
+		note:          notes(base_path, project_path, served, cli)
+		note_at:       time.now().unix()
+	}
 
-	for {
-		raw := os.get_raw_line()
-		if raw.len == 0 {
-			break // EOF
-		}
-		line := raw.trim_space()
-		if line == '' {
-			continue
-		}
-		// The client names the session's directory as its root: Claude Code starts a
-		// server in the project's own checkout, not the worktree a session is in. The
-		// server asks once the handshake is done, and again when the roots change.
-		if line.contains('"initialize"') {
-			has_roots = client_has_roots(line)
-		}
-		if has_roots && roots_asked(line) {
-			println(roots_request)
-			flush_stdout()
-			continue
-		}
-		if dir := session_dir(line) {
-			if os.real_path(dir) != os.real_path(here) {
-				here = dir
-				eprintln('graphify-mcp: the session is in ${here}')
-				project_path = graphify.project_for(projects_dir, here, base_root) or { '' }
-				wt = Worktree{}
-				was_base := base_path
-				base_path = graph_path
-				if src_dir == '' {
-					wt = start_worktree(projects_dir, here, project_path, graph_path,
-						base_root)
-					if wt.ready {
-						if wt.graph == graph_path {
-							base_path = wt.path
-						} else {
-							project_path = wt.path
-						}
-					}
-				}
-				// the next tool call reads what changed and serves it: the base only when
-				// it is another graph.json
-				if base_path != was_base {
-					stamp = ''
-				}
-				project_stamp = ''
-			}
-			continue
-		}
-		if line.contains('"tools/call"') {
-			if wt.root != '' {
-				// the worktree's graph is there now: serve it in place of the checkout's
-				if wt.poll() {
-					// only the graph replaced is read again
-					if wt.graph == graph_path {
-						base_path = wt.path
-						stamp = ''
-					} else {
-						project_path = wt.path
-						project_stamp = ''
-					}
-				}
-				wt.refresh()
-			}
-			// a re-extract replaced a graph.json: serve the new graph
-			now_stamp := file_stamp(base_path)
-			now_project := if project_path != '' { file_stamp(project_path) } else { '' }
-			if now_stamp != stamp || now_project != project_stamp {
-				if now_stamp != stamp {
-					if fresh := load(base_path, if base_path == graph_path { src_dir } else { '' }) {
-						base = fresh
-					}
-				}
-				// the graph served before is let go first, so that the new one can take
-				// its memory: a worktree's is served again after each change
-				served = Served{}
-				gc_collect()
-				served = serve(base, project_path)
-				stamp = now_stamp
-				project_stamp = now_project
-				note_at = 0
-			}
-			// the checkout moves on its own; look again at most once a minute
-			if time.now().unix() - note_at >= 60 {
-				note = notes(base_path, project_path, served, cli)
-				note_at = time.now().unix()
+	mut server := mcp.new_server(name: 'graphify', version: '0.0.1')
+	for t in tool_list() {
+		name := t.name
+		server.add_tool(t, fn [mut app, name] (ctx mcp.Context, arguments string) !mcp.ToolResult {
+			return app.call(ctx, name, arguments)
+		}) or { panic(err) }
+	}
+	// reading the graph leaves as much garbage again: let it go before the first
+	// tool call adds its own, which would grow the heap past it
+	gc_collect()
+	tap_stdin(app.dirs) or { eprintln("graphify-mcp: cannot watch for the client's roots: ${err}") }
+	server.serve_stdio() or {
+		eprintln('graphify-mcp: ${err}')
+		exit(1)
+	}
+}
+
+// call runs the tool `name` on the graph served, brought up to date first.
+fn (mut app App) call(ctx mcp.Context, name string, arguments string) !mcp.ToolResult {
+	// A 2026-07-28 client has no session to be asked for its roots in: the first
+	// tool call asks, and the client calls again with them (MRTR).
+	if res := ctx.take_roots_result('roots') {
+		if res.roots.len > 0 {
+			if dir := dir_of_uri(res.roots[0].uri) {
+				app.move_to(dir)
 			}
 		}
-		resp := handle(line, served, join_notes(wt.note(), note))
-		if resp != '' {
-			println(resp)
-			flush_stdout()
+	} else if ctx.protocol_version == mcp.protocol_version_2026_07_28 && !app.roots_asked
+		&& caps_have_roots(ctx.client_capabilities) {
+		app.roots_asked = true
+		return ctx.require_roots('roots')
+	}
+	mut dir := ''
+	if app.dirs.try_pop(mut dir) == .success {
+		app.move_to(dir)
+	}
+	app.refresh()
+	args := (json2.decode[json2.Any](arguments) or { json2.null }).as_map()
+	text, is_error := call_tool(name, args, app.served, join_notes(app.wt.note(), app.note))
+	return mcp.ToolResult{
+		content:  '[${mcp.text_content(text)}]'
+		is_error: is_error
+	}
+}
+
+// move_to picks the project and the worktree again for `dir`, the session's
+// directory; the next refresh reads what changed and serves it.
+fn (mut app App) move_to(dir string) {
+	if os.real_path(dir) == os.real_path(app.here) {
+		return
+	}
+	app.here = dir
+	eprintln('graphify-mcp: the session is in ${dir}')
+	app.project_path = graphify.project_for(app.projects_dir, dir, app.base_root) or { '' }
+	app.wt = Worktree{}
+	was_base := app.base_path
+	app.base_path = app.graph_path
+	if app.src_dir == '' {
+		app.wt = start_worktree(app.projects_dir, dir, app.project_path, app.graph_path,
+			app.base_root)
+		if app.wt.ready {
+			if app.wt.graph == app.graph_path {
+				app.base_path = app.wt.path
+			} else {
+				app.project_path = app.wt.path
+			}
 		}
+	}
+	// the base only when it is another graph.json
+	if app.base_path != was_base {
+		app.stamp = ''
+	}
+	app.project_stamp = ''
+}
+
+// refresh serves the worktree's graph once it is there, and a graph.json a
+// re-extract replaced, and looks again whether the graph is out of date.
+fn (mut app App) refresh() {
+	if app.wt.root != '' {
+		// the worktree's graph is there now: serve it in place of the checkout's
+		if app.wt.poll() {
+			// only the graph replaced is read again
+			if app.wt.graph == app.graph_path {
+				app.base_path = app.wt.path
+				app.stamp = ''
+			} else {
+				app.project_path = app.wt.path
+				app.project_stamp = ''
+			}
+		}
+		app.wt.refresh()
+	}
+	// a re-extract replaced a graph.json: serve the new graph
+	now_stamp := file_stamp(app.base_path)
+	now_project := if app.project_path != '' { file_stamp(app.project_path) } else { '' }
+	if now_stamp != app.stamp || now_project != app.project_stamp {
+		if now_stamp != app.stamp {
+			if fresh := load(app.base_path, if app.base_path == app.graph_path {
+				app.src_dir
+			} else {
+				''
+			})
+			{
+				app.base = fresh
+			}
+		}
+		// the graph served before is let go first, so that the new one can take
+		// its memory: a worktree's is served again after each change
+		app.served = Served{}
+		gc_collect()
+		app.served = serve(app.base, app.project_path)
+		app.stamp = now_stamp
+		app.project_stamp = now_project
+		app.note_at = 0
+	}
+	// the checkout moves on its own; look again at most once a minute
+	if time.now().unix() - app.note_at >= 60 {
+		app.note = notes(app.base_path, app.project_path, app.served, app.cli)
+		app.note_at = time.now().unix()
 	}
 }
 
@@ -259,47 +325,10 @@ fn notes(graph_path string, project_path string, served Served, cli string) stri
 	return out.join(' ')
 }
 
-// handle parses one JSON-RPC request and returns the response line, or '' for
-// notifications (no id) and unparseable input.
-fn handle(line string, served Served, note string) string {
-	any := json2.decode[json2.Any](line) or { return rpc_error(json2.null, -32700, 'parse error') }
-	req := any.as_map()
-	method := req['method'] or { return '' }.str()
-	has_id := 'id' in req
-	id := req['id'] or { json2.null }
-
-	// notifications carry no id and expect no response
-	if !has_id {
-		return ''
-	}
-
-	match method {
-		'initialize' {
-			return rpc_result(id, initialize_result())
-		}
-		'tools/list' {
-			return rpc_result(id, jobj({
-				'tools': jarr(tool_list())
-			}))
-		}
-		'tools/call' {
-			params := (req['params'] or { json2.null }).as_map()
-			name := (params['name'] or { json2.null }).str()
-			args := (params['arguments'] or { json2.null }).as_map()
-			return rpc_result(id, call_tool(name, args, served, note))
-		}
-		'ping' {
-			return rpc_result(id, jobj(map[string]json2.Any{}))
-		}
-		else {
-			return rpc_error(id, -32601, 'method not found: ${method}')
-		}
-	}
-}
-
-// call_tool runs one tool; `note`, when set, says the graph may be stale and
-// goes first in the result.
-fn call_tool(name string, args map[string]json2.Any, served Served, note string) json2.Any {
+// call_tool runs one tool and returns its text, and whether it is a tool error the
+// client should surface rather than treat as an answer; `note`, when set, says the
+// graph may be stale and goes first in the result.
+fn call_tool(name string, args map[string]json2.Any, served Served, note string) (string, bool) {
 	g := served.g
 	mut str_args := map[string]string{}
 	for k, v in args {
@@ -309,7 +338,7 @@ fn call_tool(name string, args map[string]json2.Any, served Served, note string)
 	}
 	missing := graphify.missing_tool_arg(name, str_args)
 	if missing != '' {
-		return tool_result(missing, true)
+		return missing, true
 	}
 	text := match name {
 		'query_graph' {
@@ -353,44 +382,14 @@ fn call_tool(name string, args map[string]json2.Any, served Served, note string)
 		}
 	}
 	if note != '' {
-		return tool_result('(note: ${note})\n\n${text}', false)
+		return '(note: ${note})\n\n${text}', false
 	}
-	return tool_result(text, false)
-}
-
-// tool_result wraps `text` as an MCP tools/call result; `is_error` marks it as a
-// tool error the client should surface rather than treat as an answer.
-fn tool_result(text string, is_error bool) json2.Any {
-	mut res := {
-		'content': jarr([
-			jobj({
-				'type': jstr('text')
-				'text': jstr(text)
-			}),
-		])
-	}
-	if is_error {
-		res['isError'] = json2.Any(true)
-	}
-	return jobj(res)
+	return text, false
 }
 
 // --- MCP metadata ---
 
-fn initialize_result() json2.Any {
-	return jobj({
-		'protocolVersion': jstr('2024-11-05')
-		'capabilities':    jobj({
-			'tools': jobj(map[string]json2.Any{})
-		})
-		'serverInfo':      jobj({
-			'name':    jstr('graphify')
-			'version': jstr('0.0.1')
-		})
-	})
-}
-
-fn tool_list() []json2.Any {
+fn tool_list() []mcp.Tool {
 	return [
 		tool('query_graph',
 			'Traverse the code graph from symbols matching a search text, breadth-first (or depth-first), returning a token-bounded body-less view with file:line locations. Use this instead of reading whole files.', schema({
@@ -454,31 +453,12 @@ fn schema(props map[string]json2.Any, required []string) json2.Any {
 	})
 }
 
-fn tool(name string, desc string, input_schema json2.Any) json2.Any {
-	return jobj({
-		'name':        jstr(name)
-		'description': jstr(desc)
-		'inputSchema': input_schema
-	})
-}
-
-fn rpc_result(id json2.Any, result json2.Any) string {
-	return jobj({
-		'jsonrpc': jstr('2.0')
-		'id':      id
-		'result':  result
-	}).json_str()
-}
-
-fn rpc_error(id json2.Any, code int, message string) string {
-	return jobj({
-		'jsonrpc': jstr('2.0')
-		'id':      id
-		'error':   jobj({
-			'code':    json2.Any(code)
-			'message': jstr(message)
-		})
-	}).json_str()
+fn tool(name string, desc string, input_schema json2.Any) mcp.Tool {
+	return mcp.Tool{
+		name:         name
+		description:  desc
+		input_schema: input_schema.json_str()
+	}
 }
 
 // Worktree is the git worktree this server was started in, when it is another
@@ -625,8 +605,78 @@ fn join_notes(a string, b string) string {
 	}
 }
 
+// tap_stdin puts itself between the client and the mcp module's stdio loop, which
+// reads fd 0: the client's messages go on to it through a pipe, and the tap asks the
+// client for its roots after the handshake and when they change, and sends the
+// session's directory it reads from the answer on `dirs`. The module can't do this
+// itself over stdio: a notification reaches no handler, and the roots/list
+// `Server.list_roots` sends is written only after the next message the client sends
+// is answered, and waits for an answer that the loop running a handler can't read.
+fn tap_stdin(dirs chan string) ! {
+	client := os.fd_dup(0)
+	if client < 0 {
+		return error('cannot duplicate stdin')
+	}
+	mut p := os.pipe()!
+	if os.fd_dup2(p.read_fd, 0) < 0 {
+		p.close()
+		return error('cannot replace stdin')
+	}
+	os.fd_close(p.read_fd)
+	spawn pass_stdin(client, p.write_fd, os.stdout(), dirs)
+}
+
+// pass_stdin passes the lines read from `from` on to `to`, all but the client's
+// answer to roots_request, and closes `to` at the end of the input; it writes
+// roots_request to `out`, stdout.
+fn pass_stdin(from int, to int, out os.File, dirs chan string) {
+	mut requests := out
+	mut has_roots := false
+	mut pending := ''
+	for {
+		chunk, n := os.fd_read(from, 65536)
+		if n <= 0 {
+			break
+		}
+		pending += chunk
+		for {
+			i := pending.index_u8(`\n`)
+			if i < 0 {
+				break
+			}
+			line := pending[..i + 1]
+			pending = pending[i + 1..]
+			if line.contains('"initialize"') {
+				has_roots = client_has_roots(line)
+			}
+			if dir := session_dir(line) {
+				// only the latest is wanted: the tool call takes it from here
+				mut old := ''
+				dirs.try_pop(mut old)
+				dirs.try_push(dir)
+				continue
+			}
+			os.fd_write(to, line)
+			if has_roots && roots_asked(line) {
+				// a whole line in one write: the mcp module writes to stdout as well
+				requests.write_string(roots_request + '\n') or {}
+				requests.flush()
+			}
+		}
+	}
+	os.fd_write(to, pending)
+	os.fd_close(to)
+}
+
 // roots_request asks the client for its roots, the directories it works in.
 const roots_request = '{"jsonrpc":"2.0","id":"graphify-roots","method":"roots/list"}'
+
+// caps_have_roots reports whether the client's capabilities, a JSON object, say it
+// can list its roots.
+fn caps_have_roots(caps string) bool {
+	any := json2.decode[json2.Any](caps) or { return false }
+	return 'roots' in any.as_map()
+}
 
 // client_has_roots reports whether `line` is the client's `initialize` request and
 // says the client can list its roots.
