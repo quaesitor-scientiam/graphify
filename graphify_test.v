@@ -2437,6 +2437,16 @@ fn after() int {
 }
 '
 
+fn test_a_file_of_only_comments_has_no_parse_error() {
+	for src in ['', '\n', '/*\nmodule demo\n*/\n', '// note\n/* a /* nested */ one */\n'] {
+		fr := extract_v_text_result(src, 'demo.v')
+		assert fr.parse_error == '', src
+		assert fr.symbols.len == 0
+	}
+	// an unclosed comment is no file V builds
+	assert extract_v_text_result('/* open\nmodule demo\n', 'demo.v').parse_error != ''
+}
+
 fn test_extract_clean_file_has_no_parse_error() {
 	fr := extract_v_text_result('module demo\n\nfn ok() int {\n\treturn 1\n}\n', 'demo.v')
 	assert fr.parse_error == ''
