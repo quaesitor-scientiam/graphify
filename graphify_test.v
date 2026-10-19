@@ -5284,6 +5284,301 @@ pub fn (sh Shape) describe() int {
 	assert describe.any(it.to == 'lib.Circle.area')
 }
 
+fn test_a_type_check_narrows_values_the_else_branch_and_what_follows() {
+	// `label` and `wide` are each declared on two types, so only the type a
+	// check narrows to settles a call
+	g := graph_of({
+		'lib/kinds.v': 'module lib
+
+pub struct Alias {
+	base Kind
+}
+
+pub struct Prim {
+	bits int
+}
+
+pub type Kind = Alias | Prim
+
+pub fn (k Kind) label() string {
+	return ""
+}
+
+pub fn (p Prim) wide() bool {
+	return p.bits > 32
+}
+
+pub struct Other {}
+
+pub fn (o Other) label() string {
+	return ""
+}
+
+pub fn (o Other) wide() bool {
+	return false
+}
+
+pub fn if_value(k Kind) string {
+	c := if k is Alias { k.base } else { k }
+	return c.label()
+}
+
+pub fn match_value(k Kind) string {
+	c := match k {
+		Alias { k.base }
+		else { k }
+	}
+	return c.label()
+}
+
+pub fn field_match(a Alias) string {
+	b := match a.base {
+		Alias { a.base.base }
+		else { a.base }
+	}
+	return b.label()
+}
+
+pub fn field_if(a Alias) bool {
+	if a.base is Prim {
+		return a.base.wide()
+	}
+	return false
+}
+
+pub fn or_rhs(k Kind) bool {
+	return k !is Prim || k.wide()
+}
+
+pub fn after_return(k Kind) bool {
+	if k !is Prim {
+		return false
+	}
+	return k.wide()
+}
+
+pub fn in_else(k Kind) bool {
+	if k !is Prim {
+		println("no")
+	} else {
+		return k.wide()
+	}
+	return false
+}
+
+pub fn not_after(k Kind) bool {
+	if k !is Prim {
+		println("no")
+	}
+	return k.wide()
+}
+'
+	})
+	calls := fn [g] (from string) []string {
+		return g.edges.filter(it.kind == .calls && it.from == from).map(it.to)
+	}
+	for f in ['if_value', 'match_value', 'field_match'] {
+		assert 'lib.Kind.label' in calls('lib.${f}'), f
+	}
+	for f in ['field_if', 'or_rhs', 'after_return', 'in_else'] {
+		assert 'lib.Prim.wide' in calls('lib.${f}'), f
+	}
+	// a block that runs on narrows nothing after it
+	assert 'lib.Prim.wide' !in calls('lib.not_after')
+}
+
+fn test_receivers_through_shared_fields_called_fields_slices_and_spreads() {
+	// `show` is declared on two types, so only the receiver's type settles a call
+	g := graph_of({
+		'lib/lib.v':      'module lib
+
+import lib2
+
+pub struct Name {}
+
+pub fn (n Name) show() string {
+	return ""
+}
+
+pub struct Other {}
+
+pub fn (o Other) show() string {
+	return ""
+}
+
+pub fn (ns []Name) all_show() {}
+
+pub fn (os []Other) all_show() {}
+
+pub struct Bare {
+	text Name
+}
+
+pub struct Quoted {
+	text Name
+	q    int
+}
+
+pub type Key = Bare | Quoted
+
+pub fn shared_field(k Key) string {
+	return k.text.show()
+}
+
+pub type Some = Bare | Holder
+
+pub fn partial_field(s Some) string {
+	return s.text.show()
+}
+
+pub struct Pool {
+	factory fn () Name
+}
+
+pub fn called_field(p Pool) string {
+	n := p.factory()
+	return n.show()
+}
+
+pub fn fixed_slice(a [3]Name) {
+	a[..].all_show()
+}
+
+pub struct Store {
+mut:
+	items []Name
+}
+
+pub fn locked(shared s Store) string {
+	n := rlock s {
+		s.items[0]
+	}
+	return n.show()
+}
+
+pub fn branch_local(ns []Name, ok bool) string {
+	n := if ok {
+		first := ns[0]
+		first
+	} else {
+		panic("none")
+	}
+	return n.show()
+}
+
+pub struct Holder {
+	name Name
+}
+
+pub fn spread(h Holder) string {
+	c := Holder{
+		...h
+	}
+	return c.name.show()
+}
+
+pub struct Buf {
+	data &Name
+}
+
+pub fn pointer_index(b Buf) string {
+	return unsafe { b.data[1].show() }
+}
+
+pub fn attrs[T]() {
+	\$for a in T.attributes {
+		a.arg.show()
+	}
+}
+
+pub fn decoded() {
+	for x in lib2.decode[[]Name]("") {
+		x.show()
+	}
+}
+
+@[flag]
+pub enum Hints {
+	a
+	b
+}
+
+pub fn zero_flags() bool {
+	mut h := Hints.zero()
+	h.set(.a)
+	return h.has(.b)
+}
+'
+		'lib2/dec.v':     'module lib2
+
+pub fn decode[T](s string) T {
+	return T{}
+}
+'
+		'builtin/meta.v': 'module builtin
+
+pub struct Tag {}
+
+pub fn (t Tag) show() string {
+	return ""
+}
+
+pub struct VAttribute {
+pub:
+	arg Tag
+}
+'
+		// a `main` module that is one program reads its consts from any of its files
+		'app/consts.v':   'module main
+
+const settings = make()
+
+struct Conf {
+	name Label
+}
+
+struct Label {}
+
+fn (l Label) show() string {
+	return ""
+}
+
+struct Spare {}
+
+fn (s Spare) show() string {
+	return ""
+}
+
+fn make() Conf {
+	return Conf{}
+}
+'
+		'app/main.v':     'module main
+
+fn main() {
+	settings.name.show()
+}
+'
+	})
+	calls := fn [g] (from string) []Edge {
+		return g.edges.filter(it.kind == .calls && it.from == from)
+	}
+	for f in ['shared_field', 'called_field', 'locked', 'branch_local', 'spread', 'pointer_index',
+		'decoded'] {
+		assert calls('lib.${f}').any(it.to == 'lib.Name.show'), f
+	}
+	// a field only some variants have is not the sum type's
+	assert !calls('lib.partial_field').any(it.to == 'lib.Name.show')
+	assert calls('lib.fixed_slice').any(it.to == 'lib.[]Name.all_show')
+	assert calls('lib.attrs').any(it.to == 'builtin.Tag.show')
+	assert calls('app.main').any(it.to == 'app.Label.show')
+	// a `@[flag]` enum's `zero()` is a value of it, whose `has` and `set` V provides
+	for e in calls('lib.zero_flags').filter(it.to in ['has', 'set']) {
+		assert e.provenance == .undeclared, e.to
+	}
+	assert calls('lib.zero_flags').filter(it.to in ['has', 'set']).len == 2
+}
+
 fn test_an_unsafe_block_and_an_untyped_map_literal_have_types() {
 	g := graph_of({
 		'lib/lib.v': 'module lib
