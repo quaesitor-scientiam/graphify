@@ -1,12 +1,13 @@
 #!/usr/bin/env -S v -raw-vsh-tmp-prefix tmp
 
 // Pulls graphify and the target repo, rebuilds graphify when it is out of
-// date, and re-extracts when anything changed. Wired into a daily scheduler
+// date, and re-extracts each graph that is out of date. Wired into a daily scheduler
 // (Windows Task Scheduler / macOS launchd / Linux cron); can also be run by
 // hand.
 //
-//   v run bin/update-vlang-graph.vsh                    # pull both; extract if anything changed
-//   v run bin/update-vlang-graph.vsh -NoPull            # pull neither, always re-extract
+//   v run bin/update-vlang-graph.vsh                    # pull both; extract what is out of date
+//   v run bin/update-vlang-graph.vsh -NoPull            # pull neither (after your own `v up`)
+//   v run bin/update-vlang-graph.vsh -Force             # re-extract every graph, out of date or not
 //   v run bin/update-vlang-graph.vsh -Commit <sha>      # move up to that commit, not the newest
 //   v run bin/update-vlang-graph.vsh -NoBuild           # never rebuild graphify
 //   v run bin/update-vlang-graph.vsh -PrintStamp        # print the build stamp and stop
@@ -23,11 +24,15 @@
 // -Commit makes two machines extract exactly the same source: it fast-forwards
 // the repo to that commit and never moves it back or off its branch.
 //
+// A graph is out of date when it doesn't exist yet, or its manifest.json says it was
+// extracted from another commit of its repo or by another graphify build than
+// bin/graphify, or, for a project, read its vlib at another commit of the target
+// repo (graph_out_of_date). Uncommitted edits, and a module under VMODULES updated in
+// place, aren't seen: -Force re-extracts every graph.
+//
 // The config's `projects` are extracted after the target repo, each into the store
 // beside it, so the MCP server can layer each on it (`--projects`, FUTURE_WORK.md
-// §11). A project is re-extracted when its commit differs from its graph's, when
-// graphify was rebuilt or the target repo moved (its vlib is the project's library),
-// or when it has no graph yet. A project is never pulled: it is someone's checkout.
+// §11). A project is never pulled: it is someone's checkout.
 //
 // graphify's own checkout is fast-forwarded too, so a merged change reaches
 // every machine on its next run; it is left alone when it has local changes
@@ -46,10 +51,17 @@ struct Config {
 	projects   []string
 }
 
-// ProjectManifest is the part of a project graph's manifest.json that says
-// whether it is out of date.
-struct ProjectManifest {
+// GraphManifest is the part of a graph's manifest.json that says whether it is out
+// of date (graph_out_of_date).
+struct GraphManifest {
 	source_commit string
+	binary_hash   string
+	library       []GraphLibrary
+}
+
+struct GraphLibrary {
+	label  string
+	commit string
 }
 
 struct Options {
@@ -57,6 +69,7 @@ mut:
 	no_pull     bool
 	no_build    bool
 	print_stamp bool
+	force       bool
 	commit      string
 }
 
@@ -94,6 +107,9 @@ fn parse_args(args []string) !Options {
 			}
 			'-NoBuild' {
 				o.no_build = true
+			}
+			'-Force' {
+				o.force = true
 			}
 			'-PrintStamp' {
 				o.print_stamp = true
@@ -391,7 +407,6 @@ fn main() {
 	}
 
 	// pull first: the pull can bring V parser changes the rebuild must see
-	mut changed := opts.no_pull
 	if opts.commit != '' {
 		log_line(log_path, 'moving to ${opts.commit}...')
 		before := head_of(vlang)
@@ -400,7 +415,6 @@ fn main() {
 			return
 		}
 		log_line(log_path, msg)
-		changed = changed || head_of(vlang) != before
 	} else if !opts.no_pull {
 		log_line(log_path, 'git pull...')
 		before := head_of(vlang)
@@ -416,21 +430,24 @@ fn main() {
 			n := git(vlang, 'rev-list', '--count', '${before}..${after}').output.trim_space()
 			log_line(log_path, 'Updated ${before#[..10]} -> ${after#[..10]} (${n} commits).')
 		}
-		changed = changed || after != before
 	}
 
 	if !opts.no_build {
-		rebuilt := rebuild_if_stale(log_path, root, graphify_exe) or {
+		rebuild_if_stale(log_path, root, graphify_exe) or {
 			fail(log_path, err.msg())
 			return
 		}
-		changed = changed || rebuilt
 	}
 
-	if !changed {
-		log_line(log_path, 'Nothing changed. Skipping extract.')
+	// a pull or a rebuild shows as a graph out of date
+	exe_hash := sha256.hexhash(os.read_file(graphify_exe) or { '' })
+	vlang_head := head_of(vlang)
+	vlang_graph := os.join_path(store, os.base(os.real_path(vlang)))
+	why := if opts.force { 'forced' } else { graph_out_of_date(vlang_graph, vlang_head, exe_hash, '') }
+	if why == '' {
+		log_line(log_path, 'The graph is up to date. Skipping extract.')
 	} else {
-		log_line(log_path, 'extracting graph...')
+		log_line(log_path, 'extracting graph (${why})...')
 		start := time.now()
 		result := os.exec([graphify_exe, 'extract', vlang, '--store', store])
 		log_output(log_path, result.output)
@@ -442,7 +459,7 @@ fn main() {
 	}
 	mut failed := []string{}
 	for project in config.projects {
-		extract_project(log_path, graphify_exe, project, store, changed) or {
+		extract_project(log_path, graphify_exe, project, store, exe_hash, vlang_head, opts.force) or {
 			log_line(log_path, 'ERROR: ${err}')
 			failed << project
 		}
@@ -454,27 +471,53 @@ fn main() {
 }
 
 // extract_project extracts one project into the store, as `extract --store` names
-// it, unless its graph is of its current commit and `force` (graphify rebuilt, or the
-// target repo moved) isn't set.
-fn extract_project(log_path string, exe string, project string, store string, force bool) ! {
+// it, when its graph is out of date (graph_out_of_date) or `force` is set.
+fn extract_project(log_path string, exe string, project string, store string, exe_hash string, vlang_head string, force bool) ! {
 	if !os.is_dir(project) {
 		return error('${project}: no such directory')
 	}
 	out := os.join_path(store, os.base(os.real_path(project)))
-	head := head_of(project)
-	if !force && head != '' && os.exists(os.join_path(out, 'graph.json')) {
-		m := json2.decode[ProjectManifest](os.read_file(os.join_path(out, 'manifest.json')) or {
-			''
-		}) or { ProjectManifest{} }
-		if m.source_commit == head {
-			log_line(log_path, '${project}: up to date')
-			return
-		}
+	why := if force {
+		'forced'
+	} else {
+		graph_out_of_date(out, head_of(project), exe_hash, vlang_head)
 	}
-	log_line(log_path, 'extracting ${project}...')
+	if why == '' {
+		log_line(log_path, '${project}: up to date')
+		return
+	}
+	log_line(log_path, 'extracting ${project} (${why})...')
 	result := os.exec([exe, 'extract', project, '--store', store])
 	log_output(log_path, result.output)
 	if result.exit_code != 0 {
 		return error('${project}: extract failed')
 	}
+}
+
+// graph_out_of_date says why the graph in `dir` is out of date, or '' when it isn't:
+// it doesn't exist, or its manifest says it was extracted from another commit than
+// `head`, by another graphify than the one hashing to `exe_hash`, or, given
+// `vlib_head`, from a vlib at another commit than that. A commit that can't be told
+// ('', not a git checkout) is not compared.
+fn graph_out_of_date(dir string, head string, exe_hash string, vlib_head string) string {
+	if !os.exists(os.join_path(dir, 'graph.json')) {
+		return 'no graph yet'
+	}
+	m := json2.decode[GraphManifest](os.read_file(os.join_path(dir, 'manifest.json')) or {
+		''
+	}) or { return 'no manifest' }
+	if head != '' && m.source_commit != head {
+		return 'its commit moved'
+	}
+	if exe_hash != '' && m.binary_hash != exe_hash {
+		return 'graphify was rebuilt'
+	}
+	if vlib_head != '' {
+		for l in m.library {
+			if l.label == 'vlib' && l.commit != '' && l.commit != vlib_head {
+				return 'vlib moved'
+			}
+		}
+	}
+	return ''
 }
