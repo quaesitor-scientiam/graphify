@@ -602,13 +602,14 @@ using the wrong paths.
 ### `bin/update-vlang-graph.vsh` — scheduled graph refresh
 
 Pulls graphify and the target repo, rebuilds graphify if it is out of date,
-and re-extracts if anything changed. Wired into a scheduler — Windows Task
+and re-extracts each graph that is out of date. Wired into a scheduler — Windows Task
 Scheduler, macOS `launchd`, or Linux `cron`, see **Scheduling** below; can
 also be run by hand.
 
 ```
-v run bin/update-vlang-graph.vsh                  # pull both; extract if anything changed
-v run bin/update-vlang-graph.vsh -NoPull          # pull neither, always re-extract
+v run bin/update-vlang-graph.vsh                  # pull both; extract what is out of date
+v run bin/update-vlang-graph.vsh -NoPull          # pull neither (after your own `v up`)
+v run bin/update-vlang-graph.vsh -Force           # re-extract every graph, out of date or not
 v run bin/update-vlang-graph.vsh -Commit <sha>    # move up to that commit, not the newest
 v run bin/update-vlang-graph.vsh -NoBuild         # never rebuild graphify
 v run bin/update-vlang-graph.vsh -PrintStamp      # print the build stamp and stop
@@ -630,6 +631,15 @@ rebuild by itself; a pull that only touches the rest of `vlib` (`os`,
 `v` isn't a git checkout, or the compiler can't list the directories, the stamp
 falls back to `v version` and the whole of `vlib`. `-PrintStamp` prints the
 stamp and stops.
+
+A graph, vlang's or a project's, is out of date when it has none yet, or its
+`manifest.json` says it was extracted from another commit of its repo, by
+another build of `bin/graphify`, or, for a project, from vlang's `vlib` at
+another commit. A pull or a rebuild therefore shows up on its own, and a run
+after your own `v up` with `-NoPull` extracts what moved and skips the rest,
+each with its reason in the log (`extracting graph (its commit moved)...`).
+Uncommitted edits, and a module under `~/.vmodules` updated in place, aren't
+seen; `-Force` re-extracts every graph.
 
 graphify's own checkout is fast-forwarded first, so a change merged to
 master reaches every machine on its next scheduled run. A checkout with
