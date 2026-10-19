@@ -9,10 +9,9 @@ const layer_dir = 'vlib/'
 // layered_file reports whether a file of the V tree goes under a project: one in
 // vlib, other than its tests, which no project calls.
 fn layered_file(file string) bool {
-	// `os_test.v`, and a platform's `wayland_test.c.v`
-	is_test := os.file_name(file).all_before('.').ends_with('_test')
-	return file.starts_with(layer_dir) && !is_test && !file.contains('/tests/') && !file.contains('/slow_tests/')
-		&& !file.contains('/compiler_tests/') && !file.contains('/testdata/')
+	return file.starts_with(layer_dir) && !is_test_file(file) && !file.contains('/tests/')
+		&& !file.contains('/slow_tests/') && !file.contains('/compiler_tests/')
+		&& !file.contains('/testdata/')
 }
 
 // layer_graph is `project` with the vlib of `base`, the V tree's graph, under it, so

@@ -162,6 +162,9 @@ pub mut:
 	// declarations and edges follow the project's own in `symbols` and `edges`. Empty
 	// for a graph served on its own. Not in graph.json: the layer is made when served.
 	base Base @[json: '-']
+	// index_cache is the index cache_index built, which index() returns instead of
+	// building it again; nil until then. Not in graph.json.
+	index_cache &Index = unsafe { nil } @[json: '-']
 }
 
 // Base marks the symbols a layered graph took from the graph under it, and says
