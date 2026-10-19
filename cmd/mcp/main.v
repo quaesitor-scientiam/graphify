@@ -122,18 +122,24 @@ fn load(graph_path string, src_dir string) !graphify.Graph {
 // serve is the graph to answer from: the project at `project_path` layered on
 // `base`, or `base` alone when there is no project, or it can't be read.
 fn serve(base graphify.Graph, project_path string) Served {
+	// each tool call uses the graph's index: build it once, for the graph served
 	if project_path == '' {
+		mut alone := base
+		alone.cache_index()
 		return Served{
-			g: base
+			g: alone
 		}
 	}
 	project := load(project_path, '') or {
 		eprintln('graphify-mcp: cannot load ${project_path}: ${err}; serving the base graph alone')
+		mut alone := base
+		alone.cache_index()
 		return Served{
-			g: base
+			g: alone
 		}
 	}
-	g := graphify.layer_graph(project, base)
+	mut g := graphify.layer_graph(project, base)
+	g.cache_index()
 	eprintln('graphify-mcp: layered ${project_path} on the base graph: ${g.base.ids.len} vlib symbols under it')
 	return Served{
 		g:       g

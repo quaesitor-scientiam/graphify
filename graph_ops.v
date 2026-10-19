@@ -20,8 +20,27 @@ pub mut:
 	base map[string]bool
 }
 
-// index builds the lookup structures for a graph.
+// index builds the lookup structures for a graph, or returns the ones cache_index
+// kept.
 pub fn (g Graph) index() Index {
+	if !isnil(g.index_cache) {
+		return *g.index_cache
+	}
+	return g.build_index()
+}
+
+// cache_index builds the graph's index once and keeps it, so that each tool call on
+// a graph served for many (the MCP server's) doesn't build it again: on the V tree
+// that cost about 0.4 s a call. Only for a graph that isn't changed afterwards, since
+// the kept index wouldn't follow a change.
+pub fn (mut g Graph) cache_index() {
+	idx := g.build_index()
+	g.index_cache = &Index{
+		...idx
+	}
+}
+
+fn (g Graph) build_index() Index {
 	mut idx := Index{
 		base: g.base.ids
 	}
@@ -73,14 +92,26 @@ pub fn (g Graph) index() Index {
 }
 
 // shown_before reports whether declaration `a`, met after `b` in g.symbols,
-// should represent their shared id in its place: a file for the C backend
-// (plain `.v` or `.c.v`) before one for another backend, and the JS backend's
-// `.js.v` last, since it is the copy furthest from what ordinary V code calls.
-// Between files of the same backend the later one wins, as it did before
+// should represent their shared id in its place: a file that isn't a test before
+// one that is, so that a module, whose symbol each of its files declares, is shown
+// from one of its own files and not `wayland_pipe_abi_test.c.v`; then a file for
+// the C backend (plain `.v` or `.c.v`) before one for another backend, and the JS
+// backend's `.js.v` last, since it is the copy furthest from what ordinary V code
+// calls. Between files of the same rank the later one wins, as it did before
 // backends were ranked; g.symbols follows graph.json, which the same-graph CI
 // job keeps identical across hosts.
 fn shown_before(a Symbol, b Symbol) bool {
+	a_test := is_test_file(a.file)
+	if a_test != is_test_file(b.file) {
+		return !a_test
+	}
 	return backend_rank(a.file) <= backend_rank(b.file)
+}
+
+// is_test_file reports whether `file` is a test, which only `v test` compiles:
+// `os_test.v`, or a platform's `wayland_test.c.v`.
+fn is_test_file(file string) bool {
+	return os.file_name(file).all_before('.').ends_with('_test')
 }
 
 // backend_rank orders a file by the backend its suffix compiles it for.

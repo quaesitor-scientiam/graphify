@@ -1322,3 +1322,14 @@ Still open:
 - A worktree inside a project gets the graph of the project's checkout, as a worktree
   of vlang gets vlang's.
 - Each session's server holds its own copy of the vlang graph, as one did before.
+
+**The index is built once (October 2026).** Each tool call built the whole index
+again, and some twice: on the V tree that was about 0.4 s a call, and the garbage
+it left raised the server's peak memory with every call. The server now keeps the
+index of the graph it serves (`cache_index`), rebuilt when a graph.json is replaced.
+Loading the vlang graph and answering ten typical calls went from 4.6 s and 2.75 GB
+to 0.8 s and 1.0 GB (gui layered: 2.7 s and 1.75 GB to 1.0 s and 1.25 GB), with the
+same answers byte for byte. A module, whose symbol each of its files declares, is
+shown from one of its own files rather than the last one read, which was often a
+test (`vlib.gg` from `wayland_pipe_abi_test.c.v`): `shown_before` puts a non-test
+file first.

@@ -9029,3 +9029,35 @@ fn test_the_layer_note_says_when_the_project_read_another_vlib() {
 	assert note(esc, 'aaaa', 'bbbb').contains('extracted at bbbb')
 	assert note('/elsewhere', 'aaaa', 'aaaa').contains('read vlib from /elsewhere')
 }
+
+fn test_a_cached_index_answers_as_a_built_one() {
+	project, base := layer_fixture()
+	plain := layer_graph(project, base)
+	mut cached := plain
+	cached.cache_index()
+	assert cached.explain('vlib.gg.draw') == plain.explain('vlib.gg.draw')
+	assert cached.query('draw', 500, false) == plain.query('draw', 500, false)
+	assert cached.shortest_path('proj.redraw', 'vlib.gg.flush') == plain.shortest_path('proj.redraw',
+		'vlib.gg.flush')
+	assert cached.get_body('vlib.gg.flush') == plain.get_body('vlib.gg.flush')
+	assert cached.neighbor_names('vlib.gg.draw') == plain.neighbor_names('vlib.gg.draw')
+	// the kept index is the one built, not one built again: it doesn't follow a change
+	cached.symbols << Symbol{
+		id:   'proj.later'
+		name: 'later'
+		kind: .function
+		file: 'proj.v'
+	}
+	assert 'proj.later' !in cached.index().by_id
+	assert plain.index_cache == unsafe { nil }
+}
+
+fn test_a_module_is_shown_from_its_own_file_not_a_test_of_it() {
+	g := graph_of({
+		'gg/gg.v':            'module gg\n\npub fn draw() {}\n'
+		'gg/zz_test.c.v':     'module gg\n\nfn test_draw() {}\n'
+		'gg/zz_other_test.v': 'module gg\n\nfn test_more() {}\n'
+	})
+	assert g.index().by_id['gg'].file == 'gg/gg.v'
+	assert g.explain('gg').contains('(gg/gg.v:1)')
+}
