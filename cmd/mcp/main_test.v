@@ -127,7 +127,7 @@ fn test_a_daemon_socket_too_long_for_a_unix_socket_goes_under_tmp() {
 	os.setenv('GRAPHIFY_DAEMON_DIR', '/tmp/short', true)
 	assert daemon_dir() == '/tmp/short'
 	os.setenv('GRAPHIFY_DAEMON_DIR', '/tmp/' + 'x'.repeat(90), true)
-	assert daemon_dir() == '/tmp/graphify-${os.getuid()}'
+	assert daemon_dir() == os.join_path('/tmp', 'graphify-${os.getuid()}')
 }
 
 fn test_the_daemon_is_named_after_what_it_serves() {

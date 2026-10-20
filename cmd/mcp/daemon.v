@@ -16,7 +16,6 @@ import sync
 import time
 import x.json2
 import crypto.sha256
-import math
 
 // daemon_idle is how many seconds a daemon, and an App no session asks for, outlive
 // their last use: GRAPHIFY_DAEMON_IDLE, or 15 minutes.
@@ -194,7 +193,11 @@ fn run_daemon(cfg Config) {
 		gc_collect()
 		d.mu.unlock()
 		// look whether it is done at least once a minute
-		listener.set_accept_timeout(time.second * i64(math.min(60, daemon_idle())))
+		listener.set_accept_timeout(time.second * if daemon_idle() < 60 {
+			daemon_idle()
+		} else {
+			60
+		})
 		for {
 			// accept blocks with no timeout of its own: wait_for_accept has one
 			listener.wait_for_accept() or {
