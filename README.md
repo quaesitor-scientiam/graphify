@@ -466,7 +466,7 @@ same server works with both Claude Code and Codex:
 | `get_node(node)` | a symbol + its relationships (defines, references, embeds, calls), each with file:line; a call also with the lines it is made on |
 | `get_body(node)` | the source of ONE declaration by name (instead of reading its file); notes when that file has changed since the graph was built |
 | `get_neighbors(node)` | names of all directly linked symbols |
-| `shortest_path(a, b)` | how `a` reaches `b`: each chain of calls from `a` to `b`, up to 5, shortest first and at most 3 calls longer than the shortest, each call with the line it is made on (or those from `b` to `a`); with none either way, the shortest link through any relation |
+| `shortest_path(a, b)` | how `a` reaches `b`: how many chains of calls lead from `a` to `b` (at most 3 calls longer than the shortest), and the 5 shortest, each call with the line it is made on (or those from `b` to `a`); with none either way, the shortest link through any relation |
 
 A `node` is an id (`net.unix.StreamListener.accept`), a dotted tail of one
 (`StreamListener.accept`, `unix.StreamListener.accept`), a `file:line` inside a

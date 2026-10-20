@@ -723,14 +723,25 @@ const call_path_steps = 200_000
 // through a pooled transport, a fresh connection or a proxy, and the shortest is the
 // one taken least. [] when there is none, or `a` or `b` isn't found.
 pub fn (g Graph) call_paths(a string, b string, max int) [][]string {
+	paths, _, _ := g.count_call_paths(a, b, max)
+	return paths
+}
+
+// how many routes count_call_paths counts before it stops counting
+const call_path_count_cap = 1000
+
+// count_call_paths is call_paths with how many routes there are in all, by the same
+// rules: it goes on past `max`, counting, and says whether the count is all of them
+// (false when it stopped at call_path_count_cap routes or call_path_steps steps).
+pub fn (g Graph) count_call_paths(a string, b string, max int) ([][]string, int, bool) {
 	idx := g.index()
 	start := g.resolve_one(a)
 	goal := g.resolve_one(b)
 	if start == '' || goal == '' || max <= 0 {
-		return [][]string{}
+		return [][]string{}, 0, true
 	}
 	if start == goal {
-		return [[start]]
+		return [[start]], 1, true
 	}
 	// what `a` reaches, and the calls among it
 	mut callees := map[string][]string{}
@@ -754,7 +765,7 @@ pub fn (g Graph) call_paths(a string, b string, max int) [][]string {
 		}
 	}
 	if goal !in callees {
-		return [][]string{}
+		return [][]string{}, 0, true
 	}
 	// how many calls from each of those `b` is, back from `b`
 	mut callers := map[string][]string{}
@@ -778,12 +789,13 @@ pub fn (g Graph) call_paths(a string, b string, max int) [][]string {
 			}
 		}
 	}
-	shortest := to_goal[start] or { return [][]string{} }
+	shortest := to_goal[start] or { return [][]string{}, 0, true }
 	mut w := PathWalk{
 		callees: callees
 		to_goal: to_goal
 		goal:    goal
 		max:     max
+		cap:     call_path_count_cap
 		steps:   call_path_steps
 	}
 	for length in shortest .. shortest + call_path_slack + 1 {
@@ -791,25 +803,27 @@ pub fn (g Graph) call_paths(a string, b string, max int) [][]string {
 			start: true
 		}
 		w.walk([start], length)
-		if w.found.len >= max || w.steps <= 0 {
+		if w.total >= w.cap || w.steps <= 0 {
 			break
 		}
 	}
-	return w.found
+	return w.found, w.total, w.total < w.cap && w.steps > 0
 }
 
 // PathWalk is call_paths' search for the chains of one length: the calls among what
 // `a` reaches, how far each is from the goal, the declarations on the chain so far,
-// and the chains found.
+// the first `max` chains found, and how many it has found in all.
 struct PathWalk {
 	callees map[string][]string
 	to_goal map[string]int
 	goal    string
 	max     int
+	cap     int
 mut:
 	steps int
 	on    map[string]bool
 	found [][]string
+	total int
 }
 
 // walk extends `path` to every chain of `length` calls that ends at the goal.
@@ -817,12 +831,15 @@ fn (mut w PathWalk) walk(path []string, length int) {
 	cur := path.last()
 	if cur == w.goal {
 		if path.len - 1 == length {
-			w.found << path.clone()
+			w.total++
+			if w.found.len < w.max {
+				w.found << path.clone()
+			}
 		}
 		return
 	}
 	for to in w.callees[cur] or { []string{} } {
-		if w.found.len >= w.max || w.steps <= 0 {
+		if w.total >= w.cap || w.steps <= 0 {
 			return
 		}
 		w.steps--
@@ -868,14 +885,14 @@ pub fn (g Graph) render_call_path(ids []string) string {
 // so; else the shortest link through any relation (shortest_path), said so. '' when
 // nothing links them.
 pub fn (g Graph) path_between(a string, b string) string {
-	forward := g.call_paths(a, b, max_call_paths)
+	forward, total, exact := g.count_call_paths(a, b, max_call_paths)
 	if forward.len > 0 {
-		return g.render_call_paths(forward)
+		return g.render_call_paths(forward, total, exact)
 	}
-	back := g.call_paths(b, a, max_call_paths)
+	back, back_total, back_exact := g.count_call_paths(b, a, max_call_paths)
 	if back.len > 0 {
 		return "(`${a}` doesn't reach `${b}` by calls, but `${b}` reaches `${a}`:)\n" +
-			g.render_call_paths(back)
+			g.render_call_paths(back, back_total, back_exact)
 	}
 	any := g.shortest_path(a, b)
 	if any.len > 0 {
@@ -889,20 +906,17 @@ pub fn (g Graph) path_between(a string, b string) string {
 const max_call_paths = 5
 
 // render_call_paths renders chains of calls (render_call_path): one as it is, several
-// numbered, after a line that says how many, and that there may be more when there
-// are max_call_paths.
-pub fn (g Graph) render_call_paths(paths [][]string) string {
-	if paths.len == 1 {
+// numbered, after a line that says how many there are in all (`total`, at least that
+// many when not `exact`) and how many of them follow.
+pub fn (g Graph) render_call_paths(paths [][]string, total int, exact bool) string {
+	if paths.len == 1 && total == 1 {
 		return g.render_call_path(paths[0])
 	}
 	first := g.index().symbol(paths[0][0]) or { Symbol{ name: paths[0][0] } }
 	last := g.index().symbol(paths[0].last()) or { Symbol{ name: paths[0].last() } }
-	more := if paths.len >= max_call_paths {
-		' (the first ${paths.len}; there may be more)'
-	} else {
-		''
-	}
-	mut out := ['${paths.len} chains of calls from ${first.name} to ${last.name}, shortest first${more}:']
+	all := if exact { '${total}' } else { 'at least ${total}' }
+	shown := if paths.len < total { '; the ${paths.len} shortest' } else { '' }
+	mut out := ['${all} chains of calls from ${first.name} to ${last.name}, at most ${call_path_slack} calls longer than the shortest${shown}:']
 	for i, p in paths {
 		out << ''
 		out << '${i + 1}. ' + g.render_call_path(p)
