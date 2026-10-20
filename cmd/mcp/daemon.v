@@ -195,7 +195,7 @@ fn run_daemon(cfg Config) {
 		exit(0)
 	}
 	os.rm(socket) or {}
-	remove_dead_daemons(dir)
+	remove_dead_daemons(dir, name)
 	mut listener := unix.listen_stream(socket) or {
 		eprintln('graphify-mcp daemon: cannot listen at ${socket}: ${err}')
 		exit(1)
@@ -242,24 +242,66 @@ fn run_daemon(cfg Config) {
 	eprintln('graphify-mcp daemon: done')
 }
 
+// orphan_age is how long a daemon's log has to have gone unwritten for a daemon with no
+// socket to count as gone, and not as one that has made its log and is about to listen.
+const orphan_age = 60
+
 // remove_dead_daemons removes the socket, the log, and on Windows the copy of the
-// binary, of each daemon in `dir` that no longer listens: one killed, or one of a
-// binary since rebuilt that went down before it could. A copy still running can't be
-// removed, and stays.
-fn remove_dead_daemons(dir string) {
-	for name in os.ls(dir) or { return } {
-		if !name.ends_with('.sock') {
-			continue
+// binary, of each daemon in `dir` that no longer listens, other than `own`, the one
+// doing the clearing, which has a log and no socket yet. Two kinds are gone: a daemon
+// killed, which leaves its socket with nothing listening at it, and a daemon that went
+// down on its own, which removes only its socket and leaves the rest: that one counts
+// once its log is `orphan_age` old, and when it has a log at all (a copy made for a
+// daemon about to start has none). A copy still running can't be removed, and stays.
+fn remove_dead_daemons(dir string, own string) {
+	remove_gone_daemons(dir, own, orphan_age)
+}
+
+// remove_gone_daemons is remove_dead_daemons with the age of log, in seconds, that a
+// daemon with no socket needs to count as gone.
+fn remove_gone_daemons(dir string, own string, min_age i64) {
+	mut names := map[string]bool{}
+	for file in os.ls(dir) or { return } {
+		if is_daemon_file(file) {
+			names[file.all_before_last('.')] = true
 		}
-		path := os.join_path(dir, name)
-		if mut conn := unix.connect_stream(path) {
-			conn.close() or {}
-			continue
-		}
-		os.rm(path) or {}
-		os.rm(path.all_before_last('.') + '.log') or {}
-		os.rm(path.all_before_last('.') + '.exe') or {}
 	}
+	now := time.now().unix()
+	for name, _ in names {
+		if name == own {
+			continue
+		}
+		base := os.join_path(dir, name)
+		socket := base + '.sock'
+		log := base + '.log'
+		if os.exists(socket) {
+			if mut conn := unix.connect_stream(socket) {
+				conn.close() or {}
+				continue
+			}
+		} else if !os.exists(log) || now - os.file_last_mod_unix(log) < min_age {
+			continue
+		}
+		os.rm(socket) or {}
+		os.rm(log) or {}
+		os.rm(base + '.exe') or {}
+	}
+}
+
+// is_daemon_file reports whether `file` is named as a daemon's: what daemon_name gives
+// (`mcp-` and 16 hex digits) and `.sock`, `.log` or `.exe`. The directory can be one
+// other things write to (GRAPHIFY_DAEMON_DIR), with files of their own named `mcp-...`.
+fn is_daemon_file(file string) bool {
+	// `mcp-` is 4 bytes, the 16 digits end at 20, and the extension follows a dot
+	if file.len < 22 || !file.starts_with('mcp-') || file[20] != `.` {
+		return false
+	}
+	for c in file[4..20] {
+		if !(c.is_digit() || (c >= `a` && c <= `f`)) {
+			return false
+		}
+	}
+	return file[21..] in ['sock', 'log', 'exe']
 }
 
 // done drops each App no session has asked for in daemon_idle(), and reports whether

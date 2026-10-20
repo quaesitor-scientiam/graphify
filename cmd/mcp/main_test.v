@@ -1,6 +1,8 @@
 module main
 
 import os
+import time
+import net.unix
 import x.json2
 import graphify
 
@@ -175,6 +177,120 @@ fn test_the_daemon_is_named_after_what_it_serves() {
 	assert daemon_name(a) == daemon_name(a)
 	assert daemon_name(a) != daemon_name(b)
 	assert daemon_name(a).starts_with('mcp-') && daemon_name(a).len == 20
+}
+
+// a directory of daemon files for the tests below, with a path short enough for a Unix
+// socket's: under /tmp, since the temporary directory on macOS is too long for one
+fn daemon_files_dir(label string) string {
+	root := if os.user_os() == 'windows' { os.temp_dir() } else { '/tmp' }
+	dir := os.join_path(root, 'gfd${label}${os.getpid()}')
+	os.rmdir_all(dir) or {}
+	os.mkdir_all(dir) or { panic(err) }
+	return dir
+}
+
+// touch writes `name` in `dir`, last written `age` seconds ago.
+fn touch(dir string, name string, age i64) {
+	path := os.join_path(dir, name)
+	os.write_file(path, 'x') or { panic(err) }
+	then := time.now().unix() - age
+	os.utime(path, then, then) or { panic(err) }
+}
+
+fn files_in(dir string) []string {
+	mut names := os.ls(dir) or { panic(err) }
+	names.sort()
+	return names
+}
+
+// A daemon that exits on its own removes its socket and nothing else: its log, and on
+// Windows the copy of the binary it ran from, stay behind. The next daemon to start
+// clears them away.
+fn test_a_daemon_that_has_exited_leaves_no_log_or_copy_behind() {
+	dir := daemon_files_dir('gone')
+	defer {
+		os.rmdir_all(dir) or {}
+	}
+	// named as a real one is, in lower-case hex digits
+	touch(dir, 'mcp-931cec369e831a42.log', 3600)
+	touch(dir, 'mcp-931cec369e831a42.exe', 3600)
+	touch(dir, 'mcp-0a1b2c3d4e5f6789.log', 3600)
+	touch(dir, 'mcp-0a1b2c3d4e5f6789.exe', 3600)
+	remove_dead_daemons(dir, 'mcp-2222222222222222')
+	assert files_in(dir) == []
+}
+
+// ...but not those of a daemon that is only starting: it has made its log, and has not
+// yet listened.
+fn test_a_daemon_that_is_still_starting_keeps_its_log_and_copy() {
+	dir := daemon_files_dir('new')
+	defer {
+		os.rmdir_all(dir) or {}
+	}
+	touch(dir, 'mcp-1111111111111111.log', 0)
+	touch(dir, 'mcp-1111111111111111.exe', 3600)
+	// a copy made for a daemon not yet started has no log at all, however old its file
+	touch(dir, 'mcp-3333333333333333.exe', 3600)
+	remove_dead_daemons(dir, 'mcp-2222222222222222')
+	assert files_in(dir) == ['mcp-1111111111111111.exe', 'mcp-1111111111111111.log',
+		'mcp-3333333333333333.exe']
+}
+
+// GRAPHIFY_DAEMON_DIR can be a directory that other things write to: what the sweep
+// removes has the exact name of a daemon's file (`mcp-` and 16 hex digits, then `.sock`,
+// `.log` or `.exe`), and no other file is its business.
+fn test_files_that_are_no_daemons_are_left_alone() {
+	dir := daemon_files_dir('else')
+	defer {
+		os.rmdir_all(dir) or {}
+	}
+	touch(dir, 'mcp-server.log', 3600)
+	touch(dir, 'mcp-server.exe', 3600)
+	touch(dir, 'mcp-11111111111111111.log', 3600)
+	touch(dir, 'mcp-111111111111111.log', 3600)
+	touch(dir, 'mcp-ABCDEFABCDEFABCD.log', 3600)
+	touch(dir, 'mcp-4444444444444444.bak', 3600)
+	touch(dir, 'mcp-4444444444444444', 3600)
+	before := files_in(dir)
+	remove_dead_daemons(dir, 'mcp-2222222222222222')
+	assert files_in(dir) == before
+}
+
+// A killed daemon leaves its socket, which nothing listens at: that one goes with its
+// log and copy, however recently it was written.
+fn test_a_killed_daemons_socket_log_and_copy_are_removed() {
+	dir := daemon_files_dir('dead')
+	defer {
+		os.rmdir_all(dir) or {}
+	}
+	touch(dir, 'mcp-1111111111111111.sock', 0)
+	touch(dir, 'mcp-1111111111111111.log', 0)
+	touch(dir, 'mcp-1111111111111111.exe', 0)
+	remove_dead_daemons(dir, 'mcp-2222222222222222')
+	assert files_in(dir) == []
+}
+
+fn test_a_running_daemon_and_the_one_clearing_up_are_left_alone() {
+	dir := daemon_files_dir('live')
+	defer {
+		os.rmdir_all(dir) or {}
+	}
+	mut listener := unix.listen_stream(os.join_path(dir, 'mcp-1111111111111111.sock')) or {
+		panic(err)
+	}
+	defer {
+		listener.close() or {}
+	}
+	touch(dir, 'mcp-1111111111111111.log', 3600)
+	touch(dir, 'mcp-1111111111111111.exe', 3600)
+	// the daemon doing the clearing has its log and copy, and no socket until it listens
+	touch(dir, 'mcp-2222222222222222.log', 3600)
+	touch(dir, 'mcp-2222222222222222.exe', 3600)
+	// and a file that is no daemon's
+	touch(dir, 'notes.log', 3600)
+	remove_dead_daemons(dir, 'mcp-2222222222222222')
+	assert files_in(dir) == ['mcp-1111111111111111.exe', 'mcp-1111111111111111.log',
+		'mcp-1111111111111111.sock', 'mcp-2222222222222222.exe', 'mcp-2222222222222222.log', 'notes.log']
 }
 
 // The daemon answers the sessions of two directories from one base graph, read once.
