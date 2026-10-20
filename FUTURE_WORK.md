@@ -1463,6 +1463,29 @@ blocks in `accept` whatever its accept timeout (the daemon waits with
 (a quiet session would have lost its connection), and a File from `os.open` or
 `os.open_append` has `fd` 0 (the daemon's log is opened with `os.open_file`).
 
-Still open: each layered graph copies vlang's 69,000 vlib symbols and builds an index
-over them, the 0.3 GB a session; an index over the project that falls through to the
-base's would make a session's layer a few MB.
+**A layer falls through to the base's index (October 2026).** Each layered graph
+copied vlang's 69,000 vlib symbols and the edges from them, and indexed all of it,
+about 0.3 GB a session. A layered graph now holds the project's symbols (and the
+modules' from VMODULES) and an index over them only. Its index falls through to the
+base's (`Index.under`) for the vlib declarations under the project: an id the
+project doesn't have, with a copy in a vlib file that isn't a test. Lookups go
+through accessors that see both (`symbol`, `has`, `named`, `neighbors_into`,
+`edges_of`). A walk of the symbols (`find`, `resolve_one`, `get_body`) goes through
+`all_symbols`, which yields them in the order the copied graph had. What a
+lookup can't tell at a glance is worked out once per base and shared by every layer
+on it (`Layer`, in layer.v): the set of layered ids, where the layered symbols are,
+the copy shown for an id whose preferred copy is a test, and a name's ids in the
+order of their first vlib copies. What only a layer has is small: its own index,
+the base's edges into the project's library, and the exact vlib-side neighbours
+of each declaration a vlib edge links to a project declaration of the same id
+(`Index.fix`). The base's adjacency doesn't record direction, so it can't drop
+the edges of the vlib declaration a project one shadows.
+
+Answers are the same byte for byte. On ~2,700 lines of output per project
+(`get_node`, `get_neighbors`, `get_body` and `shortest_path` on 25 of its symbols
+and 12 of vlib's, `query_graph` breadth- and depth-first, and `overview`), gui,
+vebidor, graphify and vxui each layered on vlang give the same text as before.
+The daemon with the base loaded and four sessions (gui, vebidor, graphify, vxui)
+is 1.18 GB, against 2.26 GB before. The first layer takes 0.11 GB: the shared
+`Layer` and what reading gui's graph leaves. Each further layer takes a few MB:
+the next three took 16 MB together, against 0.32–0.37 GB each before.

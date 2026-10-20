@@ -159,21 +159,26 @@ pub mut:
 	// not in `symbols`: an edge names one by its id, and the index keeps them apart.
 	library Library
 	// base is the graph this one is layered on (layer_graph): the V tree's, whose vlib
-	// declarations and edges follow the project's own in `symbols` and `edges`. Empty
-	// for a graph served on its own. Not in graph.json: the layer is made when served.
+	// declarations and edges its index falls through to. Empty for a graph served on
+	// its own. Not in graph.json: the layer is made when served.
 	base Base @[json: '-']
 	// index_cache is the index cache_index built, which index() returns instead of
 	// building it again; nil until then. Not in graph.json.
 	index_cache &Index = unsafe { nil } @[json: '-']
 }
 
-// Base marks the symbols a layered graph took from the graph under it, and says
-// where their files are read from (see layer_graph).
+// Base is the graph a layered graph is on (see layer_graph): `under`, the V tree's,
+// whose vlib declarations the layered graph reaches through its index without
+// copying them, and the modules from VMODULES it took from the project's library.
 pub struct Base {
 pub mut:
-	root        string
-	ids         map[string]bool
-	file_hashes map[string]string
+	root string
+	// under shares the base graph's symbols, edges and index; nil when not layered
+	under &Graph = unsafe { nil }
+	// own is how many of the layered graph's symbols are the project's; the
+	// modules' follow them
+	own  int
+	mods map[string]bool
 }
 
 // Library is the part of the standard library and of installed modules that a

@@ -16,17 +16,36 @@ fn layered_file(file string) bool {
 
 // layer_graph is `project` with the vlib of `base`, the V tree's graph, under it, so
 // that a traversal from the project carries on into vlib (FUTURE_WORK.md §11). The
-// project's library ids are the V tree's own, so nothing is renamed. Its symbols come
-// first, then each of base's declared in a vlib file (not a test) whose id the project doesn't
-// have; its edges, then base's from those symbols, as base's own index resolved
-// them. The modules from VMODULES the project's graph keeps whole
-// (keep_reached_library) join them, after the project's own symbols too, so a
-// traversal goes on into vglyph as into vlib. The library section keeps a vlib id
-// base doesn't have.
+// project's library ids are the V tree's own, so nothing is renamed. Under the
+// project's symbols are each of base's declared in a vlib file (not a test) whose id
+// the project doesn't have, and base's edges from those symbols, as base's own index
+// resolved them. They aren't copied: the layered graph's index is over the project
+// only and falls through to base's (Index.under), which base keeps for every graph
+// layered on it, so a layer costs what the project does. The modules from VMODULES
+// the project's graph keeps whole (keep_reached_library) join the project's symbols,
+// after its own, so a traversal goes on into vglyph as into vlib. The library section
+// keeps a vlib id base doesn't have. `base` must not be changed while the layered
+// graph is used: the layer shares its symbols, edges and index.
 pub fn layer_graph(project Graph, base Graph) Graph {
+	// a copy of base's header, which shares base's arrays, maps and kept index
+	mut under := &Graph{
+		...base
+	}
+	under.cache_index()
+	if isnil(under.index_cache.layer) {
+		layer := under.layer()
+		unsafe {
+			under.index_cache.layer = &layer
+		}
+	}
+	uidx := under.index_cache
 	mut own := map[string]bool{}
 	for s in project.symbols {
 		own[s.id] = true
+	}
+	// a base id the layer has: one with a vlib copy, which the project doesn't shadow
+	layered := fn [uidx, own] (id string) bool {
+		return id !in own && uidx.layer_has(id)
 	}
 	mut out := Graph{
 		root:        project.root
@@ -34,21 +53,10 @@ pub fn layer_graph(project Graph, base Graph) Graph {
 		symbols:     project.symbols.clone()
 		file_hashes: project.file_hashes.clone()
 	}
-	mut ids := map[string]bool{}
-	mut hashes := map[string]string{}
-	for s in base.symbols {
-		if layered_file(s.file) && s.id !in own {
-			out.symbols << s
-			ids[s.id] = true
-			if h := base.file_hashes[s.file] {
-				hashes[s.file] = h
-			}
-		}
-	}
 	out.library.roots = project.library.roots.clone()
 	mut modules := map[string]bool{}
 	for s in project.library.symbols {
-		if s.id in ids || s.id in own {
+		if s.id in own || layered(s.id) {
 			continue
 		}
 		if s.file.starts_with(lib_vmodules_prefix) {
@@ -65,28 +73,90 @@ pub fn layer_graph(project Graph, base Graph) Graph {
 	// a module's edge that names no declaration is left out: the index would link a raw
 	// name to the project's declaration of it, which the module can't call
 	for e in project.edges {
-		if e.from in modules && e.to !in own && e.to !in ids && e.to !in modules
+		if e.from in modules && e.to !in own && !layered(e.to) && e.to !in modules
 			&& e.to !in lib_ids {
 			continue
 		}
 		out.edges << e
 	}
-	// resolved by base's index: a raw name of base's is resolved among base's own
-	// declarations, never the project's
-	for e in base.index().edges {
-		if e.from in ids {
-			out.edges << e
-		}
-	}
-	for id in modules.keys() {
-		ids[id] = true
-	}
 	out.base = Base{
-		root:        base.root
-		ids:         ids
-		file_hashes: hashes
+		root:  base.root
+		under: under
+		own:   project.symbols.len
+		mods:  modules
 	}
 	return out
+}
+
+// Layer is what a graph layered on this one takes from it (layer_graph), worked out
+// once for all of them where its index can't tell it at a glance. An id is layered
+// when a copy of it is declared in a layered_file; the index shows each id from one
+// copy, the one shown_before prefers among all of them, and lists a name's ids in
+// the order their first copies come in.
+pub struct Layer {
+pub:
+	// ids whose copy shown isn't in a layered_file, though another is: the one of
+	// those shown_before prefers, which the layer shows
+	shown map[string]Symbol
+	// the names one of whose ids has its first copy outside the layered files: the
+	// name's layered ids in the order of their first layered copies
+	named map[string][]string
+	// where in the graph's symbols each declared in a layered_file is
+	at []int
+	// the ids layered: one for each base graph, shared by all layered on it
+	ids map[string]bool
+}
+
+// layer works out the Layer of a graph indexed with cache_index.
+fn (g Graph) layer() Layer {
+	idx := g.index_cache
+	mut first_layered := map[string]bool{}
+	mut seen := map[string]bool{}
+	mut late := map[string]bool{}
+	mut shown := map[string]Symbol{}
+	mut at := []int{}
+	for i, s in g.symbols {
+		lay := layered_file(s.file)
+		if s.id !in first_layered {
+			first_layered[s.id] = lay
+		}
+		if !lay {
+			continue
+		}
+		at << i
+		if s.id !in seen {
+			seen[s.id] = true
+			if !first_layered[s.id] {
+				late[s.name] = true
+			}
+		}
+		if !layered_file(idx.by_id[s.id].file) {
+			if cur := shown[s.id] {
+				if shown_before(s, cur) {
+					shown[s.id] = s
+				}
+			} else {
+				shown[s.id] = s
+			}
+		}
+	}
+	mut named := map[string][]string{}
+	if late.len > 0 {
+		mut listed := map[string]bool{}
+		for i in at {
+			s := g.symbols[i]
+			if s.name in late && s.id !in listed {
+				listed[s.id] = true
+				named[s.name] << s.id
+			}
+		}
+	}
+	return Layer{
+		shown: shown
+		named: named
+		at:    at
+		ids:   seen
+	}
 }
 
 // project_for is the graph.json of the project graph in `projects_dir` whose root

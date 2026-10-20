@@ -9022,7 +9022,7 @@ fn test_a_project_layered_on_the_v_tree_carries_on_into_vlib() {
 		'vlib.gg.flush']
 	// vlib's tests and the rest of the tree stay out
 	for id in ['vlib.gg.test_draw', 'vlib.gg.test_native', 'cmd.main'] {
-		assert !g.symbols.any(it.id == id), id
+		assert !g.index().has(id), id
 	}
 	// a raw name of the project's is still its own declaration, though vlib has one too
 	idx := g.index()
@@ -9044,7 +9044,39 @@ fn test_a_project_layered_on_the_v_tree_carries_on_into_vlib() {
 	assert g.explain('vmodules.ext.f').contains('[library]')
 	assert g.library.symbols.len == 0
 	// the project's graph itself is untouched
-	assert project.base.ids.len == 0
+	assert isnil(project.base.under)
+}
+
+fn test_a_project_declaration_shadows_the_one_of_vlib_with_its_id() {
+	mut project, mut base := layer_fixture()
+	base.edges << Edge{
+		from: 'vlib.gg.flush'
+		to:   'vlib.gg.helper'
+		kind: .calls
+	}
+	// the project declares vlib's `flush` itself, by its id
+	project.symbols << Symbol{
+		id:        'vlib.gg.flush'
+		name:      'flush'
+		kind:      .function
+		signature: 'fn flush()'
+		file:      'proj.v'
+		line:      9
+	}
+	mut g := layer_graph(project, base)
+	g.cache_index()
+	// the project's is the one shown, and vlib's call into it reaches it
+	ex := g.explain('vlib.gg.flush')
+	assert ex.starts_with('fn flush  (proj.v:9)\n'), ex
+	assert ex.contains('called by     : f (vmodules/ext/ext.v:3) [library], draw (vlib/gg/gg.v:3) [library]'), ex
+	assert g.shortest_path('proj.redraw', 'vlib.gg.flush') == ['proj.redraw', 'vlib.gg.draw',
+		'vlib.gg.flush']
+	// what vlib's own `flush` calls isn't the project's
+	assert g.neighbor_names('vlib.gg.flush') == ['f', 'draw']
+	assert g.neighbor_names('vlib.gg.helper') == []string{}
+	assert g.shortest_path('vlib.gg.draw', 'vlib.gg.helper') == []
+	// draw and helper from vlib, and the module from VMODULES
+	assert g.index().base_count == 3
 }
 
 fn test_a_project_graph_is_found_by_the_root_that_holds_the_directory() {
