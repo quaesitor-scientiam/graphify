@@ -35,6 +35,10 @@ pub fn (g Graph) index() Index {
 // that cost about 0.4 s a call. Only for a graph that isn't changed afterwards, since
 // the kept index wouldn't follow a change.
 pub fn (mut g Graph) cache_index() {
+	// once: a copy of a graph shares the index it had when it was copied
+	if !isnil(g.index_cache) {
+		return
+	}
 	idx := g.build_index()
 	g.index_cache = &Index{
 		...idx
