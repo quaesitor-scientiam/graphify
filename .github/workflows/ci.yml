@@ -4,8 +4,16 @@ on:
   push:
   pull_request:
 
+# The vlang commit every job builds V from, when V's newest one is broken: empty
+# takes the newest. Set while vlang/v da62dd4bd7 (v3: represent sum types as tagged
+# unions) crashes its own build on Linux ("V panic: invalid source type ID"); empty
+# it again once a later commit builds.
+env:
+  VLANG_PIN: 7940bb1a8eca9959a5884deb14a80edeb6e3e518
+
 jobs:
   build-and-smoke-test:
+    needs: pin-vlang
     strategy:
       fail-fast: false
       matrix:
@@ -23,8 +31,10 @@ jobs:
       # multi-hour runtime) as if it were part of this project.
       - name: Install V
         run: |
-          git clone --depth 1 https://github.com/vlang/v "$RUNNER_TEMP/v"
+          git init -q "$RUNNER_TEMP/v"
           cd "$RUNNER_TEMP/v"
+          git fetch -q --depth 1 https://github.com/vlang/v ${{ needs.pin-vlang.outputs.sha }}
+          git checkout -q FETCH_HEAD
           make
           sudo ./v symlink
 
@@ -91,7 +101,7 @@ jobs:
       sha: ${{ steps.sha.outputs.sha }}
     steps:
       - id: sha
-        run: echo "sha=$(git ls-remote https://github.com/vlang/v HEAD | cut -f1)" >> "$GITHUB_OUTPUT"
+        run: echo "sha=${VLANG_PIN:-$(git ls-remote https://github.com/vlang/v HEAD | cut -f1)}" >> "$GITHUB_OUTPUT"
 
   extract-on-every-os:
     needs: pin-vlang
