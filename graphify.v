@@ -1274,7 +1274,9 @@ fn resolve_edges(mut g Graph) {
 			if e.provenance == .undeclared {
 				// a call of a function value, found at extraction
 				key := '${e.from}\x00${e.to}'
-				if key !in seen_call {
+				if at := seen_call[key] {
+					add_lines(mut resolved, at, e.lines)
+				} else {
 					seen_call[key] = resolved.len
 					resolved << e
 				}
@@ -1283,7 +1285,9 @@ fn resolve_edges(mut g Graph) {
 			if res := inf.infer_call(e) {
 				if res.undeclared {
 					key := '${e.from}\x00${e.to}'
-					if key !in seen_call {
+					if at := seen_call[key] {
+						add_lines(mut resolved, at, e.lines)
+					} else {
 						seen_call[key] = resolved.len
 						resolved << Edge{
 							...e
@@ -1297,6 +1301,7 @@ fn resolve_edges(mut g Graph) {
 					for id in variants_of[res.id] or { [res.id] } {
 						key := '${e.from}\x00${id}'
 						if at := seen_call[key] {
+							add_lines(mut resolved, at, e.lines)
 							if !res.inferred && resolved[at].provenance == .inferred {
 								resolved[at] = Edge{
 									...resolved[at]
@@ -1313,7 +1318,8 @@ fn resolve_edges(mut g Graph) {
 							is_method:  e.is_method
 							provenance: if res.inferred { .inferred } else { .extracted }
 							file:       e.file
-	arg_sites:  e.arg_sites
+							arg_sites:  e.arg_sites
+							lines:      e.lines
 						}
 					}
 					continue
@@ -1322,7 +1328,9 @@ fn resolve_edges(mut g Graph) {
 			if variants := platform_variants(e, by_name, site_of) {
 				for v in variants {
 					key := '${e.from}\x00${v.id}'
-					if key !in seen_call {
+					if at := seen_call[key] {
+						add_lines(mut resolved, at, e.lines)
+					} else {
 						seen_call[key] = resolved.len
 						resolved << Edge{
 							from:       e.from
@@ -1331,7 +1339,8 @@ fn resolve_edges(mut g Graph) {
 							is_method:  e.is_method
 							provenance: .inferred
 							file:       e.file
-	arg_sites:  e.arg_sites
+							arg_sites:  e.arg_sites
+							lines:      e.lines
 						}
 					}
 				}
@@ -1365,7 +1374,8 @@ fn resolve_edges(mut g Graph) {
 		}
 		if e.kind == .calls {
 			key := if e.guards == '' { '${e.from}\x00${e.to}' } else { '${e.from}\x00${e.to}\x00${e.guards}' }
-			if key in seen_call {
+			if at := seen_call[key] {
+				add_lines(mut resolved, at, e.lines)
 				continue
 			}
 			seen_call[key] = resolved.len
@@ -1381,6 +1391,7 @@ fn resolve_edges(mut g Graph) {
 						to:         id
 						kind:       .calls
 						provenance: .inferred
+						lines:      e.lines
 					}
 					continue
 				}
@@ -2004,4 +2015,16 @@ fn rel_path(root string, path string) string {
 	}
 	// store with forward slashes so the graph resolves on any OS
 	return rel.replace('\\', '/')
+}
+
+// add_lines adds `lines`, the call sites of another raw edge that resolved to the same
+// call, to the resolved edge at `at`.
+fn add_lines(mut edges []Edge, at int, lines []int) {
+	if lines.len == 0 {
+		return
+	}
+	edges[at] = Edge{
+		...edges[at]
+		lines: merge_lines(edges[at].lines, lines)
+	}
 }

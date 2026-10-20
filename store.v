@@ -122,6 +122,16 @@ fn graph_to_json(g Graph) string {
 		sb.write_decimal(i64(e.kind))
 		sb.write_string(',"provenance":')
 		sb.write_decimal(i64(e.provenance))
+		if e.lines.len > 0 {
+			sb.write_string(',"lines":[')
+			for j, l in e.lines {
+				if j > 0 {
+					sb.write_u8(`,`)
+				}
+				sb.write_decimal(l)
+			}
+			sb.write_u8(`]`)
+		}
 		sb.write_u8(`}`)
 	}
 	sb.write_u8(`]`)

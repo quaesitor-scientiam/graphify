@@ -37,6 +37,9 @@ pub mut:
 	// what a graph layered on this one takes from it, worked out by the first
 	// (layer_graph)
 	layer &Layer = unsafe { nil }
+	// the declarations each one calls, from the resolved `calls` edges: what call_path
+	// follows, one way
+	callees map[string][]string
 }
 
 // index builds the lookup structures for a graph, or returns the ones cache_index
@@ -114,9 +117,13 @@ fn (g Graph) build_index() Index {
 			to:         to_id
 			kind:       e.kind
 			provenance: e.provenance
+			lines:      e.lines
 		}
 		idx.adj[e.from] << to_id
 		idx.adj[to_id] << e.from
+		if e.kind == .calls {
+			idx.callees[e.from] << to_id
+		}
 	}
 	if !isnil(idx.under) {
 		idx.fall_through()
@@ -247,6 +254,20 @@ pub fn (idx &Index) neighbors_into(id string, mut out []string) {
 		for nb in idx.under.adj[id] or { []string{} } {
 			if idx.from_under(nb) {
 				out << nb
+			}
+		}
+	}
+}
+
+// callees_into puts the ids `id` calls into `out`, in place of what it held: the
+// project's edges', then the base's from a declaration under a layered graph.
+fn (idx &Index) callees_into(id string, mut out []string) {
+	out.clear()
+	out << idx.callees[id] or { []string{} }
+	if idx.from_under(id) {
+		for to in idx.under.callees[id] or { []string{} } {
+			if idx.has(to) {
+				out << to
 			}
 		}
 	}
@@ -595,6 +616,92 @@ pub fn (g Graph) shortest_path(a string, b string) []string {
 	return []
 }
 
+// call_path finds the shortest chain of calls by which `a` reaches `b`, `a` first,
+// as symbol ids ([] when `a` calls nothing that leads to `b`, or either isn't found).
+// Unlike shortest_path it follows only `calls` edges, and only the way they go, so
+// it doesn't link two functions through a type they both mention.
+pub fn (g Graph) call_path(a string, b string) []string {
+	idx := g.index()
+	start := g.resolve_one(a)
+	goal := g.resolve_one(b)
+	if start == '' || goal == '' {
+		return []
+	}
+	if start == goal {
+		return [start]
+	}
+	mut prev := map[string]string{}
+	mut visited := {
+		start: true
+	}
+	mut queue := [start]
+	mut head := 0
+	mut next := []string{}
+	for head < queue.len {
+		cur := queue[head]
+		head++
+		idx.callees_into(cur, mut next)
+		for to in next {
+			if to in visited {
+				continue
+			}
+			visited[to] = true
+			prev[to] = cur
+			if to == goal {
+				return reconstruct(prev, start, goal)
+			}
+			queue << to
+		}
+	}
+	return []
+}
+
+// render_call_path renders a call_path, one step a line, each call with the lines
+// of its call sites in the caller's file:
+//
+//   get (vlib/net/http/http.v:70)
+//     -> fetch (vlib/net/http/http.v:241), called at line 71
+pub fn (g Graph) render_call_path(ids []string) string {
+	idx := g.index()
+	mut out := []string{}
+	for i, id in ids {
+		loc := if s := idx.symbol(id) { '${s.name} (${s.loc()})' } else { id }
+		if i == 0 {
+			out << loc
+			continue
+		}
+		mut lines := []int{}
+		for e in idx.edges_of(ids[i - 1]) {
+			if e.kind == .calls && e.from == ids[i - 1] && e.to == id {
+				lines = merge_lines(lines, e.lines)
+			}
+		}
+		out << '  -> ${loc}' + if lines.len > 0 { ', called${at_lines(lines)}' } else { '' }
+	}
+	return out.join('\n')
+}
+
+// path_between answers "how does `a` reach `b`": the chain of calls from `a` to `b`
+// (call_path); else from `b` to `a`, said so; else the shortest link through any
+// relation (shortest_path), said so. '' when nothing links them.
+pub fn (g Graph) path_between(a string, b string) string {
+	forward := g.call_path(a, b)
+	if forward.len > 0 {
+		return g.render_call_path(forward)
+	}
+	back := g.call_path(b, a)
+	if back.len > 0 {
+		return "(`${a}` doesn't reach `${b}` by calls, but `${b}` reaches `${a}`:)\n" +
+			g.render_call_path(back)
+	}
+	any := g.shortest_path(a, b)
+	if any.len > 0 {
+		return '(no chain of calls links them either way; the shortest link through any relation, calls, types or modules, either way:)\n' +
+			g.names(any).join(' -- ')
+	}
+	return ''
+}
+
 fn reconstruct(prev map[string]string, start string, goal string) []string {
 	mut path := [goal]
 	mut cur := goal
@@ -692,8 +799,8 @@ fn (g Graph) explain_id(id string, uncertain bool) string {
 		out << d
 	}
 
-	mut calls := []string{}
-	mut called_by := []string{}
+	mut calls := CallList{}
+	mut called_by := CallList{}
 	mut defines := []string{}
 	mut defined_in := []string{}
 	mut references := []string{}
@@ -704,7 +811,7 @@ fn (g Graph) explain_id(id string, uncertain bool) string {
 		if e.from == id {
 			match e.kind {
 				.calls {
-					calls << label(idx, e.to) + prov_suffix(e.provenance)
+					calls.add(label(idx, e.to) + prov_suffix(e.provenance), e.lines)
 					any_inferred = any_inferred || e.provenance == .inferred
 				}
 				.defines { defines << label(idx, e.to) }
@@ -722,7 +829,7 @@ fn (g Graph) explain_id(id string, uncertain bool) string {
 		if e.to == id {
 			match e.kind {
 				.calls {
-					called_by << label(idx, e.from) + prov_suffix(e.provenance)
+					called_by.add(label(idx, e.from) + prov_suffix(e.provenance), e.lines)
 					any_inferred = any_inferred || e.provenance == .inferred
 				}
 				.defines { defined_in << label(idx, e.from) }
@@ -749,11 +856,11 @@ fn (g Graph) explain_id(id string, uncertain bool) string {
 	if referenced_by.len > 0 {
 		out << 'referenced by : ${capped(referenced_by)}'
 	}
-	if calls.len > 0 {
-		out << 'calls         : ${capped(calls)}'
+	if calls.labels.len > 0 {
+		out << 'calls         : ${capped(calls.items())}'
 	}
-	if called_by.len > 0 {
-		out << 'called by     : ${capped(called_by)}'
+	if called_by.labels.len > 0 {
+		out << 'called by     : ${capped(called_by.items())}'
 	}
 	if any_inferred {
 		out << '  ^ [inferred] = picked among several same-named candidates by the inferred receiver type or by locality/visibility, not a name that was unambiguous outright — see the edge provenance note in README'
@@ -770,7 +877,7 @@ fn (g Graph) explain_id(id string, uncertain bool) string {
 			for e in g.edges {
 				if e.kind == .calls && e.to == s.name && idx.has(e.from)
 					&& e.provenance != .undeclared {
-					maybe << label(idx, e.from)
+					maybe << label(idx, e.from) + at_lines(e.lines)
 				}
 			}
 			// and the base's, from the declarations under a layered graph
@@ -778,7 +885,7 @@ fn (g Graph) explain_id(id string, uncertain bool) string {
 				for e in idx.under.edges {
 					if e.kind == .calls && e.to == s.name && idx.from_under(e.from)
 						&& e.provenance != .undeclared {
-						maybe << label(idx, e.from)
+						maybe << label(idx, e.from) + at_lines(e.lines)
 					}
 				}
 			}
@@ -799,6 +906,38 @@ fn (g Graph) explain_id(id string, uncertain bool) string {
 		out << '(use `get_body ${s.name}` to read its source)'
 	}
 	return out.join('\n')
+}
+
+// CallList is a `calls` or `called by` list, each declaration once with the lines of
+// its call sites (Edge.lines): two edges between the same declarations, which calls
+// under different comptime conditions make, are one entry.
+struct CallList {
+mut:
+	labels []string
+	lines  map[string][]int
+}
+
+fn (mut c CallList) add(label string, lines []int) {
+	if label !in c.lines {
+		c.labels << label
+		c.lines[label] = []int{}
+	}
+	c.lines[label] = merge_lines(c.lines[label], lines)
+}
+
+// items renders each entry, `read_ptr (vlib/net/tcp.c.v:183) at lines 198, 224`: the
+// lines are in the caller's file.
+fn (c CallList) items() []string {
+	return c.labels.map(it + at_lines(c.lines[it]))
+}
+
+// at_lines renders call-site lines, ' at line 198' or ' at lines 198, 224'; '' for none.
+fn at_lines(lines []int) string {
+	return match lines.len {
+		0 { '' }
+		1 { ' at line ${lines[0]}' }
+		else { ' at lines ${lines.map(it.str()).join(', ')}' }
+	}
 }
 
 // explain_list_cap bounds each relation list explain prints. A widely used

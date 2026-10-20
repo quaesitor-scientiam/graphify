@@ -463,10 +463,10 @@ same server works with both Claude Code and Codex:
 | --- | --- |
 | `overview` | body-less skeleton map of the whole codebase |
 | `query_graph(text, budget?, dfs?)` | token-bounded traversal from matching symbols |
-| `get_node(node)` | a symbol + its relationships (defines, references, embeds, calls), each with file:line |
+| `get_node(node)` | a symbol + its relationships (defines, references, embeds, calls), each with file:line; a call also with the lines it is made on |
 | `get_body(node)` | the source of ONE declaration by name (instead of reading its file); notes when that file has changed since the graph was built |
 | `get_neighbors(node)` | names of all directly linked symbols |
-| `shortest_path(a, b)` | relationship path between two symbols |
+| `shortest_path(a, b)` | how `a` reaches `b`: the shortest chain of calls, each with the line it is made on (or the one from `b` to `a`); with none either way, the shortest link through any relation |
 
 A `node` is an id (`net.unix.StreamListener.accept`), a dotted tail of one
 (`StreamListener.accept`, `unix.StreamListener.accept`), a `file:line` inside a
@@ -474,6 +474,11 @@ declaration (`vlib/net/unix/stream.c.v:290`), or a name. A name with several
 declarations is each of them: `get_node wait_for_read` shows all 8, each with its
 own callers, and `get_body` reads up to 4. A name with more than 8, such as `str`,
 is a list of them, the most called first, to name one from.
+
+A call is listed with the lines it is made on, in the caller's file:
+`called by : read_ptr (vlib/net/tcp.c.v:183) at lines 198, 224`. `graph.json` keeps
+them on each `calls` edge as `lines`; a graph extracted before has none, and lists
+its calls as before until it is extracted again.
 
 Build and register it with the client you use. The binary name gets an
 `.exe` suffix on Windows only; the rest of this doc omits it.
