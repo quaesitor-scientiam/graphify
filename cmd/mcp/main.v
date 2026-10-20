@@ -24,7 +24,11 @@ module main
 // It reloads a graph when its graph.json changes on disk (an extract publishes
 // it atomically), and a tool result starts with a note when the graph looks
 // out of date (graphify.stale_note).
+//
+// Each session's server relays its tool calls to one daemon, which reads the base
+// graph once for every session (daemon.v); without one it reads the graphs itself.
 import os
+import net.unix
 import net.urllib
 import time
 import x.json2
@@ -40,17 +44,26 @@ struct Served {
 	layered bool
 }
 
-// App is what the tools answer from, and where it comes from: the base graph read
-// from `base_path`, the project's graph from `project_path`, and the worktree of
-// the session's directory, `here`. Each tool call brings it up to date (refresh).
-@[heap]
-struct App {
+// Config is how the server was started: the base graph, the store of project
+// graphs, and the source directory that stands in for the base's root.
+struct Config {
 	graph_path   string
 	projects_dir string
 	src_dir      string
 	base_root    string
 	cli          string
+}
+
+// App is what the tools answer from for one session's directory, and where it
+// comes from: the base graph read from `base_path`, the project's graph from
+// `project_path`, and the worktree of the session's directory, `here`. Each tool
+// call brings it up to date (refresh). Base graphs come from `bases`, which the
+// daemon shares between the sessions it serves (daemon.v).
+@[heap]
+struct App {
+	Config
 mut:
+	bases         &BaseCache = unsafe { nil }
 	here          string
 	project_path  string
 	wt            Worktree
@@ -61,19 +74,64 @@ mut:
 	project_stamp string
 	note          string
 	note_at       i64
-	// the session's directory, from the client's roots (tap_stdin): the latest only
-	dirs chan string = chan string{cap: 1}
-	// whether a 2026-07-28 client was asked for its roots, which it is once
-	roots_asked bool
+	used_at       i64
+}
+
+// BaseCache holds the base graphs read, each indexed once, by the graph.json it was
+// read from: the V tree's, and a worktree's of it. A copy of a graph shares its
+// index, so each session's App and each layered graph on it use the one index.
+@[heap]
+struct BaseCache {
+mut:
+	graphs map[string]CachedBase
+}
+
+struct CachedBase {
+	g     graphify.Graph
+	stamp string
+}
+
+// get is the graph at `path` (with its root replaced by `src_dir` when set),
+// read again only when its graph.json has changed since.
+fn (mut b BaseCache) get(path string, src_dir string) !graphify.Graph {
+	key := '${path}\n${src_dir}'
+	stamp := file_stamp(path)
+	if c := b.graphs[key] {
+		if c.stamp == stamp {
+			return c.g
+		}
+		b.graphs.delete(key)
+	}
+	mut g := load(path, src_dir)!
+	g.cache_index()
+	b.graphs[key] = CachedBase{
+		g:     g
+		stamp: stamp
+	}
+	return g
+}
+
+// keep drops each graph no path in `used` names.
+fn (mut b BaseCache) keep(used map[string]bool) {
+	for key in b.graphs.keys() {
+		if key.all_before('\n') !in used {
+			b.graphs.delete(key)
+		}
+	}
 }
 
 fn main() {
 	mut positional := []string{}
 	mut projects_dir := ''
+	mut daemon := false
 	for i := 1; i < os.args.len; i++ {
 		if os.args[i] == '--projects' && i + 1 < os.args.len {
 			projects_dir = os.args[i + 1]
 			i++
+			continue
+		}
+		if os.args[i] == '--daemon' {
+			daemon = true
 			continue
 		}
 		positional << os.args[i]
@@ -86,47 +144,88 @@ fn main() {
 	// optional 2nd arg / GRAPHIFY_SOURCE_DIR: override the extraction root so a
 	// graph shared from another machine resolves get_body against local source.
 	src_dir := if positional.len > 1 { positional[1] } else { os.getenv('GRAPHIFY_SOURCE_DIR') }
-	// the project whose root holds the directory this server was started in
-	base_root := if m := graphify.load_manifest(os.join_path(os.dir(graph_path), 'manifest.json')) {
-		m.root
-	} else {
-		''
+	cfg := Config{
+		graph_path:   graph_path
+		projects_dir: projects_dir
+		src_dir:      src_dir
+		base_root:    if m := graphify.load_manifest(os.join_path(os.dir(graph_path),
+			'manifest.json'))
+		{
+			m.root
+		} else {
+			''
+		}
+		// a shared graph was built by another machine's graphify: compare commits only
+		cli:          if src_dir != '' { '' } else { graphify.cli_beside() }
+	}
+	if daemon {
+		run_daemon(cfg)
+		return
 	}
 	// the session's directory: where the server was started until the client says
 	// otherwise (session_dir)
-	here := os.getwd()
-	mut project_path := graphify.project_for(projects_dir, here, base_root) or { '' }
+	mut sess := &Session{
+		cfg:  cfg
+		here: os.getwd()
+	}
+	// one daemon answers for every session (daemon.v); without one, this server
+	// reads the graphs itself
+	if daemon_enabled() {
+		sess.remote = connect_daemon(cfg)
+	}
+	if isnil(sess.remote) {
+		sess.app = new_app(cfg, sess.here, &BaseCache{}) or {
+			eprintln('graphify-mcp: ${err}')
+			exit(1)
+		}
+	}
+
+	mut server := mcp.new_server(name: 'graphify', version: '0.0.1')
+	for t in tool_list() {
+		name := t.name
+		server.add_tool(t, fn [mut sess, name] (ctx mcp.Context, arguments string) !mcp.ToolResult {
+			return sess.call(ctx, name, arguments)
+		}) or { panic(err) }
+	}
+	// reading the graph leaves as much garbage again: let it go before the first
+	// tool call adds its own, which would grow the heap past it
+	gc_collect()
+	tap_stdin(sess.dirs) or { eprintln("graphify-mcp: cannot watch for the client's roots: ${err}") }
+	server.serve_stdio() or {
+		eprintln('graphify-mcp: ${err}')
+		exit(1)
+	}
+}
+
+// new_app reads what the tools answer from for the session's directory `dir`.
+fn new_app(cfg Config, dir string, bases &BaseCache) !&App {
+	mut project_path := graphify.project_for(cfg.projects_dir, dir, cfg.base_root) or { '' }
 	// a worktree's extract starts before the base graph is read, which takes longer
 	// than a project's extract, so that the worktree's graph is the first one served
 	mut wt := Worktree{}
-	if src_dir == '' {
-		wt = start_worktree(projects_dir, here, project_path, graph_path, base_root)
+	if cfg.src_dir == '' {
+		wt = start_worktree(cfg.projects_dir, dir, project_path, cfg.graph_path, cfg.base_root)
 	}
-	mut base := load(if wt.ready && wt.graph == graph_path { wt.path } else { graph_path },
-		src_dir) or {
-		eprintln('graphify-mcp: cannot load ${graph_path}: ${err}')
-		exit(1)
+	mut b := unsafe { bases }
+	mut base_path := if wt.ready && wt.graph == cfg.graph_path { wt.path } else { cfg.graph_path }
+	mut base := b.get(base_path, if base_path == cfg.graph_path { cfg.src_dir } else { '' }) or {
+		return error('cannot load ${base_path}: ${err}')
 	}
-	if wt.poll() && wt.graph == graph_path {
-		base = load(wt.path, '') or { base }
+	if wt.poll() && wt.graph == cfg.graph_path {
+		if g := b.get(wt.path, '') {
+			base = g
+			base_path = wt.path
+		}
 	}
-	if wt.ready && wt.graph != graph_path {
+	if wt.ready && wt.graph != cfg.graph_path {
 		project_path = wt.path
 	}
-	// the graph.json the base is read from: the worktree's, once it is there, for a
-	// worktree of the V tree; mtime has one-second resolution, so the size is
-	// compared as well
-	base_path := if wt.ready && wt.graph == graph_path { wt.path } else { graph_path }
+	// mtime has one-second resolution, so the size is compared as well
 	served := serve(base, project_path)
-	// a shared graph was built by another machine's graphify: compare commits only
-	cli := if src_dir != '' { '' } else { graphify.cli_beside() }
-	mut app := &App{
-		graph_path:    graph_path
-		projects_dir:  projects_dir
-		src_dir:       src_dir
-		base_root:     base_root
-		cli:           cli
-		here:          here
+	return &App{
+		Config:        cfg
+		bases:         bases
+		here:          dir
 		project_path:  project_path
 		wt:            wt
 		base:          base
@@ -134,53 +233,95 @@ fn main() {
 		served:        served
 		stamp:         file_stamp(base_path)
 		project_stamp: if project_path != '' { file_stamp(project_path) } else { '' }
-		note:          notes(base_path, project_path, served, cli)
+		note:          notes(base_path, project_path, served, cfg.cli)
 		note_at:       time.now().unix()
-	}
-
-	mut server := mcp.new_server(name: 'graphify', version: '0.0.1')
-	for t in tool_list() {
-		name := t.name
-		server.add_tool(t, fn [mut app, name] (ctx mcp.Context, arguments string) !mcp.ToolResult {
-			return app.call(ctx, name, arguments)
-		}) or { panic(err) }
-	}
-	// reading the graph leaves as much garbage again: let it go before the first
-	// tool call adds its own, which would grow the heap past it
-	gc_collect()
-	tap_stdin(app.dirs) or { eprintln("graphify-mcp: cannot watch for the client's roots: ${err}") }
-	server.serve_stdio() or {
-		eprintln('graphify-mcp: ${err}')
-		exit(1)
+		used_at:       time.now().unix()
 	}
 }
 
-// call runs the tool `name` on the graph served, brought up to date first.
-fn (mut app App) call(ctx mcp.Context, name string, arguments string) !mcp.ToolResult {
+// Session is one client's: the session's directory, from the client's roots, and
+// either the daemon that answers for it (`remote`) or the App this server answers
+// from itself.
+@[heap]
+struct Session {
+	cfg Config
+mut:
+	here   string
+	remote &unix.StreamConn = unsafe { nil }
+	// what the daemon sent after the last answer it read
+	pending []u8
+	app     &App = unsafe { nil }
+	// the session's directory, from the client's roots (tap_stdin): the latest only
+	dirs chan string = chan string{cap: 1}
+	// whether a 2026-07-28 client was asked for its roots, which it is once
+	roots_asked bool
+}
+
+// call runs the tool `name` for the session's directory.
+fn (mut s Session) call(ctx mcp.Context, name string, arguments string) !mcp.ToolResult {
 	// A 2026-07-28 client has no session to be asked for its roots in: the first
 	// tool call asks, and the client calls again with them (MRTR).
 	if res := ctx.take_roots_result('roots') {
 		if res.roots.len > 0 {
 			if dir := dir_of_uri(res.roots[0].uri) {
-				app.move_to(dir)
+				s.move_to(dir)
 			}
 		}
-	} else if ctx.protocol_version == mcp.protocol_version_2026_07_28 && !app.roots_asked
+	} else if ctx.protocol_version == mcp.protocol_version_2026_07_28 && !s.roots_asked
 		&& caps_have_roots(ctx.client_capabilities) {
-		app.roots_asked = true
+		s.roots_asked = true
 		return ctx.require_roots('roots')
 	}
 	mut dir := ''
-	if app.dirs.try_pop(mut dir) == .success {
-		app.move_to(dir)
+	if s.dirs.try_pop(mut dir) == .success {
+		s.move_to(dir)
 	}
-	app.refresh()
-	args := (json2.decode[json2.Any](arguments) or { json2.null }).as_map()
-	text, is_error := call_tool(name, args, app.served, join_notes(app.wt.note(), app.note))
+	text, is_error := s.answer(name, arguments)
 	return mcp.ToolResult{
 		content:  '[${mcp.text_content(text)}]'
 		is_error: is_error
 	}
+}
+
+// move_to takes `dir` for the session's directory.
+fn (mut s Session) move_to(dir string) {
+	s.here = dir
+	if !isnil(s.app) {
+		s.app.move_to(dir)
+	}
+}
+
+// answer is the daemon's answer, or this server's own when there is no daemon to
+// ask: one that went away is started again once, and then this server reads the
+// graphs itself.
+fn (mut s Session) answer(name string, arguments string) (string, bool) {
+	if !isnil(s.remote) {
+		if text, is_error := s.ask(name, arguments) {
+			return text, is_error
+		}
+		s.remote = connect_daemon(s.cfg)
+		if !isnil(s.remote) {
+			if text, is_error := s.ask(name, arguments) {
+				return text, is_error
+			}
+		}
+		eprintln('graphify-mcp: no daemon to answer; reading the graphs here')
+		s.remote = unsafe { nil }
+	}
+	if isnil(s.app) {
+		s.app = new_app(s.cfg, s.here, &BaseCache{}) or {
+			return 'graphify-mcp: ${err}', true
+		}
+	}
+	return s.app.answer(name, arguments)
+}
+
+// answer brings the App up to date and runs the tool `name` on it.
+fn (mut app App) answer(name string, arguments string) (string, bool) {
+	app.used_at = time.now().unix()
+	app.refresh()
+	args := (json2.decode[json2.Any](arguments) or { json2.null }).as_map()
+	return call_tool(name, args, app.served, join_notes(app.wt.note(), app.note))
 }
 
 // move_to picks the project and the worktree again for `dir`, the session's
@@ -235,7 +376,7 @@ fn (mut app App) refresh() {
 	now_project := if app.project_path != '' { file_stamp(app.project_path) } else { '' }
 	if now_stamp != app.stamp || now_project != app.project_stamp {
 		if now_stamp != app.stamp {
-			if fresh := load(app.base_path, if app.base_path == app.graph_path {
+			if fresh := app.bases.get(app.base_path, if app.base_path == app.graph_path {
 				app.src_dir
 			} else {
 				''
