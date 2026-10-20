@@ -375,34 +375,120 @@ fn (idx Index) resolve(target string) string {
 	return if ids.len == 1 { ids[0] } else { '' }
 }
 
-// find returns ids of symbols whose name or signature contains any whitespace
-// token of `text` (case-insensitive). This is the deterministic stand-in for
-// Graphify's NL query seeding.
-// In a layered graph the project's matches are the hits, and the base's only when
-// the project has none.
+// find returns the ids of the symbols `text` describes, best first: those that match
+// every word of it, case-insensitively, in their name, signature, file or doc comment;
+// when none matches them all, those that match the most. A word in a symbol's name
+// counts more than one in its signature, and one there more than one in its file or
+// doc, and a name the word is outright most; a tie goes to the project's over the
+// base's under a layered graph, then to the shorter name. Words that say nothing about
+// code (`the`, `how`, `does`) are left out, unless the text is nothing else. A test's
+// declaration scores half. At most max_seeds ids.
 pub fn (g Graph) find(text string) []string {
-	terms := text.to_lower().fields()
-	mut hits := []string{}
-	mut base_hits := []string{}
+	terms := search_terms(text)
+	if terms.len == 0 {
+		return []
+	}
+	mut found := []Found{}
 	mut seen := map[string]bool{}
+	mut most := 1
 	// next by hand: a `for in` walks a copy, whose from_base this one wouldn't say
 	mut all := g.all_symbols()
 	for {
 		s := all.next() or { break }
-		hay := '${s.name} ${s.signature}'.to_lower()
+		if s.id in seen || s.kind == .import_ {
+			continue
+		}
+		name := s.name.to_lower()
+		sig := s.signature.to_lower()
+		mut matched := 0
+		mut score := 0
 		for t in terms {
-			if hay.contains(t) && s.id !in seen {
-				seen[s.id] = true
-				if all.from_base() {
-					base_hits << s.id
-				} else {
-					hits << s.id
-				}
-				break
+			w := if name == t {
+				8
+			} else if name.contains(t) {
+				4
+			} else if sig.contains(t) {
+				2
+			} else if s.file.to_lower().contains(t) || s.doc.to_lower().contains(t) {
+				1
+			} else {
+				0
+			}
+			if w > 0 {
+				matched++
+				score += w
 			}
 		}
+		if matched < most {
+			continue
+		}
+		if matched > most {
+			// fewer words than this one are no match any more
+			most = matched
+			found = found.filter(it.matched >= most)
+		}
+		seen[s.id] = true
+		found << Found{
+			id:      s.id
+			matched: matched
+			// a test's declaration is seldom what a search is after
+			score:   if is_test_file(s.file) { score / 2 } else { score }
+			base:    all.from_base()
+			name:    s.name.len
+		}
 	}
-	return if hits.len > 0 { hits } else { base_hits }
+	found.sort_with_compare(fn (a &Found, b &Found) int {
+		if a.score != b.score {
+			return if a.score > b.score { -1 } else { 1 }
+		}
+		if a.base != b.base {
+			return if a.base { 1 } else { -1 }
+		}
+		if a.name != b.name {
+			return if a.name < b.name { -1 } else { 1 }
+		}
+		return 0
+	})
+	mut out := []string{}
+	for f in found {
+		if out.len == max_seeds {
+			break
+		}
+		out << f.id
+	}
+	return out
+}
+
+// the most symbols a search seeds a query from: they come first in what it shows, and
+// a budget rarely fits more
+const max_seeds = 50
+
+// Found is a symbol a search matches (find): how many of its words, how well, whether
+// it is the base's, and its name's length.
+struct Found {
+	id      string
+	matched int
+	score   int
+	base    bool
+	name    int
+}
+
+// words a search leaves out: ones a question asks in, that name no code
+const stop_words = ['a', 'an', 'and', 'are', 'at', 'by', 'code', 'does', 'for', 'from', 'how',
+	'in', 'is', 'it', 'of', 'on', 'or', 'that', 'the', 'this', 'to', 'what', 'when', 'where', 'which',
+	'who', 'why', 'with']
+
+// search_terms are the lowercased words of a search, without its stop_words, unless
+// those are all it has.
+fn search_terms(text string) []string {
+	words := text.to_lower().fields()
+	mut terms := []string{}
+	for w in words {
+		if w !in stop_words && w !in terms {
+			terms << w
+		}
+	}
+	return if terms.len > 0 { terms } else { words }
 }
 
 // resolve_one returns the best id for a node reference: the first of

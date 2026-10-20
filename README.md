@@ -462,7 +462,7 @@ same server works with both Claude Code and Codex:
 | Tool | Purpose |
 | --- | --- |
 | `overview` | body-less skeleton map of the whole codebase |
-| `query_graph(text, budget?, dfs?)` | token-bounded traversal from matching symbols |
+| `query_graph(text, budget?, dfs?)` | token-bounded traversal from the symbols that match every word of `text` (in name, signature, file or doc), best first |
 | `get_node(node)` | a symbol + its relationships (defines, references, embeds, calls), each with file:line; a call also with the lines it is made on |
 | `get_body(node)` | the source of ONE declaration by name (instead of reading its file); notes when that file has changed since the graph was built |
 | `get_neighbors(node)` | names of all directly linked symbols |
@@ -474,6 +474,12 @@ declaration (`vlib/net/unix/stream.c.v:290`), or a name. A name with several
 declarations is each of them: `get_node wait_for_read` shows all 8, each with its
 own callers, and `get_body` reads up to 4. A name with more than 8, such as `str`,
 is a list of them, the most called first, to name one from.
+
+`query_graph` seeds from the symbols that match every word of its text, in their name,
+signature, file or doc comment, leaving out question words (`how`, `the`, `does`);
+with none that match them all, from those that match the most. They come best
+first: a word that is the whole name, then one in it, in the signature, then in the
+file or doc; a test's declaration counts half. At most 50 seeds.
 
 A call is listed with the lines it is made on, in the caller's file:
 `called by : read_ptr (vlib/net/tcp.c.v:183) at lines 198, 224`. `graph.json` keeps
@@ -567,8 +573,8 @@ A session whose directory is inside a project in the store, or inside a worktree
 of one, then gets that project's graph with vlang's `vlib` under it: one
 `shortest_path`, `get_neighbors` or `get_node` goes from the project's code into
 gg, sokol or builtin, because the project's calls into vlib already name vlang's
-ids. `query_graph` seeds from the project's own matches first, the overview is
-the project's, and a vlib declaration is marked `[library]`. Anywhere else the
+ids. `query_graph` seeds from vlib's matches as from the project's, the project's
+first where they match as well; the overview is the project's, and a vlib declaration is marked `[library]`. Anywhere else the
 server serves the vlang graph alone, as before. The note at the top of a result
 also says when the project read vlib from another checkout or commit than the
 vlang graph is of. See FUTURE_WORK.md §11.
