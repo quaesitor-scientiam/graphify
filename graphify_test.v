@@ -9452,3 +9452,84 @@ fn test_a_worktree_store_is_seeded_refreshed_and_pruned() {
 	prune_worktree_stores(stores)
 	assert os.is_dir(store) && os.is_dir(partial) && !os.exists(gone)
 }
+
+fn test_a_name_with_several_declarations_is_each_of_them() {
+	// get_node took the first declaration of a name and dropped the rest, callers and
+	// all: `wait_for_read` showed net's free function and none of the methods
+	files := {
+		'net/conn.v':  'module net
+
+pub struct TcpConn {}
+
+pub fn wait_for_read(h int) {}
+
+pub fn (c TcpConn) wait_for_read() {
+	wait_for_read(1)
+}
+
+pub fn (c TcpConn) read_ptr() {
+	c.wait_for_read()
+}
+'
+		'unix/conn.v': 'module unix
+
+pub struct StreamListener {}
+
+pub fn (l StreamListener) wait_for_read() {}
+
+pub fn (l StreamListener) accept() {
+	l.wait_for_read()
+}
+
+fn serve() {
+	l := StreamListener{}
+	l.accept()
+}
+'
+	}
+	g := graph_of(files)
+	all := g.explain('wait_for_read')
+	assert all.starts_with('`wait_for_read` names 3 declarations'), all
+	for loc in ['net/conn.v:5', 'net/conn.v:7', 'unix/conn.v:5'] {
+		assert all.contains('(${loc})'), all
+	}
+	// each with its own callers
+	assert all.contains('called by     : read_ptr (net/conn.v:11)'), all
+	assert all.contains('called by     : accept (unix/conn.v:7)'), all
+	// a method by its type, or a dotted tail of its id
+	tcp := g.explain('TcpConn.wait_for_read')
+	assert tcp.starts_with('method wait_for_read  (net/conn.v:7)'), tcp
+	assert g.explain('unix.StreamListener.accept').contains('called by     : serve (unix/conn.v:11)')
+	assert g.resolve_all('StreamListener.wait_for_read') == ['unix.StreamListener.wait_for_read']
+	// a file:line inside a declaration is that declaration
+	assert g.resolve_all('unix/conn.v:8') == ['unix.StreamListener.accept']
+	assert g.resolve_all('conn.v:12') == ['net.TcpConn.read_ptr']
+	assert g.resolve_all('unix/conn.v:999') == ['unix.serve']
+	assert g.resolve_all('nowhere.v:3') == []
+	// a body of each, named alike, read from the files
+	root := write_tree('several_declarations', files)
+	defer {
+		os.rmdir_all(root) or {}
+	}
+	bodies := build_graph(Options{ root: root }).get_body('wait_for_read')
+	for loc in ['// net/conn.v:5-', '// net/conn.v:7-', '// unix/conn.v:5-'] {
+		assert bodies.contains(loc), bodies
+	}
+	// a name of one declaration is it, as before
+	assert g.explain('serve').starts_with('fn serve  (unix/conn.v:11)')
+}
+
+fn test_a_name_with_many_declarations_is_a_list_to_pick_from() {
+	mut files := map[string]string{}
+	for i in 0 .. max_shown + 2 {
+		files['m${i}/a.v'] = 'module m${i}\n\npub struct T${i} {}\n\npub fn (t T${i}) str() string {\n\treturn ""\n}\n'
+	}
+	files['use/u.v'] = 'module use\n\nimport m3\n\nfn show() string {\n\tt := m3.T3{}\n\treturn t.str()\n}\n'
+	g := graph_of(files)
+	list := g.explain('str')
+	lines := list.split_into_lines()
+	assert lines[0].starts_with('`str` names ${max_shown + 2} declarations, the most called first'), list
+	// the one called first
+	assert lines[1].contains('m3.T3.str') && lines[1].ends_with('1 caller(s)'), list
+	assert g.get_body('str').starts_with('`str` names')
+}
