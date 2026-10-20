@@ -384,30 +384,75 @@ pub fn (g Graph) find(text string) []string {
 	return if hits.len > 0 { hits } else { base_hits }
 }
 
-// resolve_one returns the single best id for a node reference (exact id, exact
-// name, or unique signature substring), or '' if none/ambiguous.
+// resolve_one returns the best id for a node reference: the first of
+// resolve_all's, or '' when nothing matches.
 pub fn (g Graph) resolve_one(query string) string {
+	ids := g.resolve_all(query)
+	return if ids.len > 0 { ids[0] } else { '' }
+}
+
+// resolve_all lists the declarations a node reference names, by the first rule that
+// matches: an id; a `file:line` inside a declaration (the declaration starting
+// nearest before it); a dotted tail of ids, `TcpConn.wait_for_read` or
+// `unix.StreamListener.accept`, each declaration whose id ends with it; a name,
+// each declaration of it; else the first declaration whose name contains it.
+pub fn (g Graph) resolve_all(query string) []string {
 	// An empty reference names nothing: without this guard '' is a substring of
 	// every name and the fuzzy pass below would return an arbitrary symbol.
-	if query.trim_space() == '' {
-		return ''
+	q := query.trim_space()
+	if q == '' {
+		return []
 	}
 	idx := g.index()
-	if idx.has(query) {
-		return query
+	if idx.has(q) {
+		return [q]
 	}
-	ids := idx.named(query)
-	if ids.len >= 1 {
-		return ids[0]
+	if id := g.at_location(q) {
+		return [id]
 	}
-	mut matches := []string{}
-	ql := query.to_lower()
-	for s in g.all_symbols() {
-		if s.name.to_lower().contains(ql) {
-			matches << s.id
+	if q.contains('.') && !q.ends_with('.') {
+		mut tails := []string{}
+		for id in idx.named(q.all_after_last('.')) {
+			if id.ends_with('.' + q) {
+				tails << id
+			}
+		}
+		if tails.len > 0 {
+			return tails
 		}
 	}
-	return if matches.len > 0 { matches[0] } else { '' }
+	named := idx.named(q)
+	if named.len > 0 {
+		return named
+	}
+	ql := q.to_lower()
+	for s in g.all_symbols() {
+		if s.name.to_lower().contains(ql) {
+			return [s.id]
+		}
+	}
+	return []
+}
+
+// at_location is the declaration a `file:line` reference is in: of those in a file
+// whose path ends with `file`, the one that starts nearest before or at `line`;
+// none when the reference is no `file:line`, or no declaration is there.
+fn (g Graph) at_location(query string) ?string {
+	file := query.all_before_last(':')
+	n := query.all_after_last(':').int()
+	if file == query || n <= 0 || !(file.ends_with('.v') || file.ends_with('.vsh')) {
+		return none
+	}
+	mut best := Symbol{}
+	for s in g.all_symbols() {
+		if s.line > n || s.line <= best.line || s.kind in [SymbolKind.mod_, .import_] {
+			continue
+		}
+		if s.file == file || s.file.ends_with('/' + file) {
+			best = s
+		}
+	}
+	return if best.id == '' { none } else { best.id }
 }
 
 // required_tool_args lists, per MCP tool, the arguments it cannot run without.
@@ -562,16 +607,74 @@ fn reconstruct(prev map[string]string, start string, goal string) []string {
 
 // explain summarizes one node: its signature/location, what it defines or is
 // defined by, and what it calls / is called by.
+// A name with several declarations is each of them: up to max_shown in full, one
+// after another, or more as a list to name one from.
 pub fn (g Graph) explain(node string) string {
 	idx := g.index()
-	mut id := g.resolve_one(node)
-	if id == '' && node in idx.lib_by_id {
+	mut ids := g.resolve_all(node)
+	if ids.len == 0 && node in idx.lib_by_id {
 		// a library declaration, named by its id (`vlib.os.join_path`)
-		id = node
+		ids = [node]
 	}
-	if id == '' {
+	if ids.len == 0 {
 		return 'no symbol matches: ${node}'
 	}
+	if ids.len == 1 {
+		return g.explain_id(ids[0], true)
+	}
+	if ids.len > max_shown {
+		return g.list_declarations(node, ids)
+	}
+	mut out := ['`${node}` names ${ids.len} declarations; each follows.']
+	for id in ids {
+		out << ''
+		out << g.explain_id(id, false)
+	}
+	return out.join('\n')
+}
+
+// how many declarations of one name explain shows in full, and get_body reads
+const max_shown = 8
+const max_bodies = 4
+
+// list_declarations lists the declarations `ids` that a name `node` has, with how
+// many calls each has, for a name with more than max_shown of them.
+fn (g Graph) list_declarations(node string, ids []string) string {
+	idx := g.index()
+	mut out := ['`${node}` names ${ids.len} declarations, the most called first; get_node one by its id, or as Type.method or file:line:']
+	mut rows := []DeclRow{cap: ids.len}
+	for id in ids {
+		s := idx.symbol(id) or { continue }
+		rows << DeclRow{
+			s:       s
+			callers: idx.edges_of(id).filter(it.kind == .calls && it.to == id).len
+		}
+	}
+	rows.sort_with_compare(fn (a &DeclRow, b &DeclRow) int {
+		return b.callers - a.callers
+	})
+	shown := if rows.len > 40 { rows[..40] } else { rows }
+	for r in shown {
+		mark := if idx.is_base(r.s.id) { ' [library]' } else { '' }
+		out << '  ${r.s.kind.str()} ${r.s.id}  (${r.s.loc()})${mark}, ${r.callers} caller(s)'
+	}
+	if rows.len > shown.len {
+		out << '  … (${rows.len - shown.len} more)'
+	}
+	return out.join('\n')
+}
+
+struct DeclRow {
+	s       Symbol
+	callers int
+}
+
+// explain_id summarizes the declaration `id`; with `uncertain`, the call sites of its
+// name that couldn't be put on one of its declarations as well, which a list of all
+// of them leaves out.
+fn (g Graph) explain_id(id string, uncertain bool) string {
+	idx := g.index()
+	node := id
 	s := idx.symbol(id) or { idx.lib_by_id[id] or { return 'no symbol matches: ${node}' } }
 
 	mark := if idx.is_base(id) || id in idx.lib_by_id { ' [library]' } else { '' }
@@ -660,7 +763,7 @@ pub fn (g Graph) explain(node string) string {
 	// looks complete when it is not. Surface those call sites separately and
 	// say plainly why they are uncertain — a short hedged list beats claiming
 	// a symbol has no callers when it has dozens.
-	if s.kind in [SymbolKind.function, .method] {
+	if uncertain && s.kind in [SymbolKind.function, .method] {
 		same_name := idx.named(s.name)
 		if same_name.len > 1 {
 			mut maybe := []string{}
@@ -770,16 +873,31 @@ fn (g Graph) source_root(s Symbol) string {
 // get_body returns the source of a single declaration (by name or id), read
 // from disk by its captured line range — so a caller can fetch one function
 // instead of reading a whole file.
+//
+// A name with several declarations is each of their bodies, up to max_bodies, or a
+// list of them to name one from.
 pub fn (g Graph) get_body(node string) string {
 	idx := g.index()
-	id := g.resolve_one(node)
-	if id == '' {
+	ids := g.resolve_all(node)
+	if ids.len == 0 {
 		if ls := idx.lib_by_id[node] {
 			return g.library_body(ls)
 		}
 		return 'no symbol matches: ${node}'
 	}
-	s := idx.symbol(id) or { return 'no symbol matches: ${node}' }
+	if ids.len > max_bodies {
+		return g.list_declarations(node, ids)
+	}
+	if ids.len > 1 {
+		return ids.map(g.body_of(it)).join('\n\n')
+	}
+	return g.body_of(ids[0])
+}
+
+// body_of is the source of the declaration `id`.
+fn (g Graph) body_of(id string) string {
+	idx := g.index()
+	s := idx.symbol(id) or { return 'no symbol matches: ${id}' }
 	// a layered module from VMODULES is read where the library was (layer_graph)
 	path := if s.id in idx.mods && s.file.starts_with(lib_vmodules_prefix) {
 		g.library.path_of(s.file) or { return 'cannot read ${s.file}: no library root' }

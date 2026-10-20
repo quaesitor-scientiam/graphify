@@ -468,6 +468,13 @@ same server works with both Claude Code and Codex:
 | `get_neighbors(node)` | names of all directly linked symbols |
 | `shortest_path(a, b)` | relationship path between two symbols |
 
+A `node` is an id (`net.unix.StreamListener.accept`), a dotted tail of one
+(`StreamListener.accept`, `unix.StreamListener.accept`), a `file:line` inside a
+declaration (`vlib/net/unix/stream.c.v:290`), or a name. A name with several
+declarations is each of them: `get_node wait_for_read` shows all 8, each with its
+own callers, and `get_body` reads up to 4. A name with more than 8, such as `str`,
+is a list of them, the most called first, to name one from.
+
 Build and register it with the client you use. The binary name gets an
 `.exe` suffix on Windows only; the rest of this doc omits it.
 
