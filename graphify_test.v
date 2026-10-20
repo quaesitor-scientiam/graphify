@@ -9753,10 +9753,70 @@ fn again() {
 	assert g.call_paths('get', 'dial_tcp', 1) == [paths[0]]
 	assert g.call_path('get', 'dial_tcp') == paths[0]
 	text := g.path_between('get', 'dial_tcp')
-	assert text == ['2 chains of calls from get to dial_tcp, shortest first:', '',
+	assert text == ['2 chains of calls from get to dial_tcp, at most 3 calls longer than the shortest:',
+		'',
 		'1. get (http/http.v:5)', '  -> fresh (http/http.v:13), called at line 7',
 		'  -> dial_tcp (net/tcp.v:3), called at line 14', '', '2. get (http/http.v:5)',
 		'  -> pooled (http/http.v:17), called at line 9',
 		'  -> dial (http/http.v:21), called at line 18',
 		'  -> dial_tcp (net/tcp.v:3), called at line 23'].join('\n'), text
+}
+
+fn test_a_signature_writes_each_parameter_as_its_declaration_does() {
+	// V3 gives a `mut` parameter its type with a `&`, so `(mut c TcpConn)` read as
+	// `(c &TcpConn)`, and `mut buf []u8` as `buf &[]u8`
+	g := graph_of({
+		'm/m.v': 'module m
+
+pub struct T {}
+
+pub fn (mut c T) a(mut buf []u8, n int) {}
+
+pub fn (c &T) b(mut x T) {}
+
+pub fn (mut c &T) d(mut p &T, q &T) {}
+
+pub fn (c T) e(shared s T) {}
+
+pub fn f(mut m map[string]int) {}
+
+pub interface I {
+mut:
+	g(mut b []u8) int
+}
+'
+	})
+	mut sig := map[string]string{}
+	for s in g.symbols {
+		sig[s.id] = s.signature
+	}
+	assert sig['m.T.a'] == 'pub fn (mut c T) a(mut buf []u8, n int)', sig.str()
+	assert sig['m.T.b'] == 'pub fn (c &T) b(mut x T)'
+	assert sig['m.T.d'] == 'pub fn (mut c &T) d(mut p &T, q &T)'
+	assert sig['m.T.e'] == 'pub fn (c T) e(shared s T)'
+	assert sig['m.f'] == 'pub fn f(mut m map[string]int)'
+	assert sig['m.I.g'] == 'fn (I) g(mut b []u8) int'
+	// what reads a function's parameter types back off its signature still gets them
+	assert param_types(sig['m.f']) == ['map[string]int']
+}
+
+fn test_a_path_says_how_many_routes_there_are_past_those_it_shows() {
+	// shortest_path showed 5 routes and said nothing of the other 2 that
+	// http.get has to net.dial_tcp
+	mut src := 'module m\n\npub fn goal() {}\n\npub fn start() {\n'
+	for i in 0 .. 7 {
+		src += '\tvia_${i}()\n'
+	}
+	src += '}\n'
+	for i in 0 .. 7 {
+		src += '\nfn via_${i}() {\n\tgoal()\n}\n'
+	}
+	g := graph_of({
+		'm/m.v': src
+	})
+	paths, total, exact := g.count_call_paths('start', 'goal', 5)
+	assert paths.len == 5 && total == 7 && exact, '${paths.len} ${total} ${exact}'
+	text := g.path_between('start', 'goal')
+	assert text.all_before('\n') == '7 chains of calls from start to goal, at most 3 calls longer than the shortest; the 5 shortest:', text
+	assert text.contains('5. start') && !text.contains('6. start')
 }

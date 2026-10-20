@@ -1025,13 +1025,13 @@ fn (mut f V3File) extract_fn(id flat.NodeId, mut syms []Symbol, mut edges []Edge
 		'fn '
 	}
 	if is_method {
-		sig += '(${recv_name} ${recv_typ}) '
+		sig += '(${f.receiver_text(recv_name, recv_typ, f.node(params[0]).is_mut, line)}) '
 	}
 	start := if is_method { 1 } else { 0 }
 	mut parts := []string{}
 	for i := start; i < params.len; i++ {
 		pn := f.node(params[i])
-		parts << '${pn.value} ${f.type_text(pn.typ_text())}'
+		parts << f.param_text(pn, f.type_text(pn.typ_text()))
 	}
 	sig += '${name}(${parts.join(', ')})'
 	if n.typ_text() != '' && n.typ_text() != 'void' {
@@ -1092,6 +1092,42 @@ fn (mut f V3File) extract_fn(id flat.NodeId, mut syms []Symbol, mut edges []Edge
 		}
 	}
 	f.walk_list(body, ctx, mut edges, mut seen)
+}
+
+// param_text renders a parameter as its declaration writes it, `mut buf []u8` and
+// `shared s T`: V3 gives a `mut` parameter its type with a `&` for the reference it
+// passes, `&[]u8`, and the source after its name says whether the `&` is written
+// (`mut p &T`) or V's (`mut p T`); `shared` comes as part of its type.
+fn (f &V3File) param_text(pn &flat.Node, typ string) string {
+	if typ.starts_with('shared ') {
+		return 'shared ${pn.value} ${typ[7..]}'
+	}
+	if !pn.is_mut {
+		return '${pn.value} ${typ}'
+	}
+	after := f.src[int(pn.pos.end)..].trim_left(' \t')
+	written := if typ.starts_with('&') && !after.starts_with('&') { typ[1..] } else { typ }
+	return 'mut ${pn.value} ${written}'
+}
+
+// receiver_text renders a method's receiver as its declaration writes it, `mut c T`,
+// `c &T` or `mut c &T`, from the declaration's line: V3 gives a `mut` receiver the
+// type `&T` and doesn't place the receiver's own span on it.
+fn (f &V3File) receiver_text(name string, typ string, is_mut bool, line int) string {
+	if !is_mut {
+		return '${name} ${typ}'
+	}
+	mut written := typ
+	if typ.starts_with('&') && line > 0 && line <= f.lines.len {
+		decl := f.lines[line - 1]
+		open := decl.index('fn (') or { decl.index('fn(') or { -1 } }
+		recv := if open >= 0 { decl[open..].all_after('(').all_before(')') } else { '' }
+		// `mut c &T` keeps its `&`; `mut c T` is V's
+		if !recv.all_after(name).trim_space().starts_with('&') {
+			written = typ[1..]
+		}
+	}
+	return 'mut ${name} ${written}'
 }
 
 fn (mut f V3File) extract_struct(id flat.NodeId, mut syms []Symbol, mut edges []Edge) {
@@ -1231,7 +1267,7 @@ fn (mut f V3File) extract_interface(id flat.NodeId, mut syms []Symbol, mut edges
 			for pk in f.kids(k) {
 				pn := f.node(pk)
 				if pn.kind == .param {
-					parts << '${pn.value} ${f.type_text(pn.typ_text())}'
+					parts << f.param_text(pn, f.type_text(pn.typ_text()))
 					f.add_type_ref(mid, pn.typ_text(), mut edges, mut mseen)
 				}
 			}
