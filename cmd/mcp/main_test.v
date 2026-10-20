@@ -1,6 +1,8 @@
 module main
 
 import os
+import x.json2
+import graphify
 
 fn test_the_server_asks_for_roots_after_the_handshake_and_when_they_change() {
 	assert roots_asked('{"jsonrpc":"2.0","method":"notifications/initialized"}')
@@ -115,4 +117,68 @@ fn file_uri(dir string) string {
 // slashed is `path` with forward slashes, which dir_of_uri gives on Windows.
 fn slashed(path string) string {
 	return path.replace('\\', '/')
+}
+
+fn test_a_daemon_socket_too_long_for_a_unix_socket_goes_under_tmp() {
+	old := os.getenv('GRAPHIFY_DAEMON_DIR')
+	defer {
+		os.setenv('GRAPHIFY_DAEMON_DIR', old, true)
+	}
+	os.setenv('GRAPHIFY_DAEMON_DIR', '/tmp/short', true)
+	assert daemon_dir() == '/tmp/short'
+	os.setenv('GRAPHIFY_DAEMON_DIR', '/tmp/' + 'x'.repeat(90), true)
+	assert daemon_dir() == os.join_path('/tmp', 'graphify-${os.getuid()}')
+}
+
+fn test_the_daemon_is_named_after_what_it_serves() {
+	a := Config{
+		graph_path: '/g/vlang/graph.json'
+	}
+	b := Config{
+		graph_path:   '/g/vlang/graph.json'
+		projects_dir: '/g'
+	}
+	assert daemon_name(a) == daemon_name(a)
+	assert daemon_name(a) != daemon_name(b)
+	assert daemon_name(a).starts_with('mcp-') && daemon_name(a).len == 20
+}
+
+// The daemon answers the sessions of two directories from one base graph, read once.
+fn test_the_daemon_shares_one_base_graph_between_sessions() {
+	dir := os.join_path(os.temp_dir(), 'graphify daemon ${os.getpid()}')
+	defer {
+		os.rmdir_all(dir) or {}
+	}
+	src := os.join_path(dir, 'src')
+	os.mkdir_all(os.join_path(src, 'lib')) or { panic(err) }
+	os.write_file(os.join_path(src, 'lib', 'lib.v'), 'module lib\n\npub fn shared_helper() int {\n\treturn 1\n}\n') or {
+		panic(err)
+	}
+	out := os.join_path(dir, 'out')
+	g := graphify.build_graph(graphify.Options{ root: src })
+	graphify.write_bundle(g, out, graphify.ExtractReport{}) or { panic(err) }
+	one := os.join_path(dir, 'one')
+	two := os.join_path(dir, 'two')
+	os.mkdir_all(one) or { panic(err) }
+	os.mkdir_all(two) or { panic(err) }
+	mut d := &Daemon{
+		cfg: Config{
+			graph_path: os.join_path(out, 'graph.json')
+		}
+	}
+	for session in [one, two] {
+		request := json2.encode({
+			'dir':       json2.Any(session)
+			'name':      json2.Any('get_node')
+			'arguments': json2.Any('{"node":"shared_helper"}')
+		})
+		text, is_error := d.answer(request)
+		assert !is_error
+		assert text.contains('fn shared_helper  (lib/lib.v:3)'), text
+	}
+	assert d.apps.len == 2
+	assert d.bases.graphs.len == 1
+	// a request it can't read is an error, not a crash
+	_, bad := d.answer('not json')
+	assert bad
 }

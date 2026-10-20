@@ -1332,7 +1332,8 @@ Still open:
   its calls reach.~~ Done, see below.
 - ~~A worktree inside a project gets the graph of the project's checkout, as a
   worktree of vlang gets vlang's.~~ Done, see below.
-- Each session's server holds its own copy of the vlang graph, as one did before.
+- ~~Each session's server holds its own copy of the vlang graph, as one did before.~~
+  Done, see below.
 
 **The index is built once (October 2026).** Each tool call built the whole index
 again, and some twice: on the V tree that was about 0.4 s a call, and the garbage
@@ -1431,3 +1432,37 @@ before the first call (`gc_collect`) keeps it at 1.45–1.49 GB.
 
 Still open: two sessions in one worktree extract into one store, each its own extract;
 and a worktree of a project the store has no graph of gets none, as before.
+
+**One daemon for every session (October 2026).** Each session's server read vlang's
+graph and built its index, about 1.1 GB a session, so a few sessions took several GB
+for the same graph. Each server now relays its tool calls to one daemon
+(cmd/mcp/daemon.v), over a Unix socket in the user's cache directory, one line of
+JSON each way: the session's directory, the tool and its arguments, then the text
+and whether it is an error. The first server to find none starts `graphify-mcp
+--daemon`, which leaves the client's process session (`setsid`), so that it outlives
+the server, and closes the descriptors it got from it, a copy of the client's stdin
+among them. It keeps an App for each session's directory, made on the first call
+from there, and the base graphs they share (`BaseCache`): a graph is indexed once,
+and a copy of it, each App's and the one each layered graph reads, shares that index
+(`cache_index` now builds only once). One call runs at a time. The server keeps the
+roots and the protocol; the daemon does what an App does, worktree extracts included.
+
+The socket is named after the server's binary (its size and time) and what it
+serves, so a rebuilt server starts a daemon of its own, and the old one exits once
+no server is connected; any daemon exits after `daemon_idle()` with none. A server
+whose daemon has gone starts another, and reads the graphs itself if it can't.
+
+Measured on the V tree with the five projects and graphify: a relaying server is
+12 MB; the daemon is 1.0 GB with the base read and indexed, and 0.3 GB more for each
+session's layered graph, 3.0 GB with six; six servers each reading their own took
+about 7 GB. A call to a daemon already running took 0.04 s.
+
+Three things V's library did that had to be worked around: a `unix.StreamListener`
+blocks in `accept` whatever its accept timeout (the daemon waits with
+`wait_for_accept` first), a `unix.StreamConn` reads with a 30 s timeout by default
+(a quiet session would have lost its connection), and a File from `os.open` or
+`os.open_append` has `fd` 0 (the daemon's log is opened with `os.open_file`).
+
+Still open: each layered graph copies vlang's 69,000 vlib symbols and builds an index
+over them, the 0.3 GB a session; an index over the project that falls through to the
+base's would make a session's layer a few MB.

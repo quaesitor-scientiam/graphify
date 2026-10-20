@@ -572,6 +572,19 @@ changes, committed or not, the next tool call starts another extract, and the
 graph is replaced when it is done. A store whose worktree is gone is removed when
 a server starts.
 
+One daemon answers for every session. Each session's server is a small relay
+(about 12 MB) that passes its tool calls over a Unix socket in
+`~/.cache/graphify` (or `GRAPHIFY_DAEMON_DIR`) to `graphify-mcp --daemon`, which
+the first server starts. The daemon reads vlang's graph and its index once, and
+keeps a layered graph for each session's directory, so a session costs its layer
+(about 0.3 GB) rather than a whole server's 1.1 GB: six sessions over the five
+projects and graphify took 3.0 GB in the daemon, against about 7 GB as six
+servers. A daemon exits 15 minutes (`GRAPHIFY_DAEMON_IDLE` seconds) after its
+last session goes, or once none is connected when `bin/graphify-mcp` has been
+rebuilt; a rebuilt server starts a daemon of its own. Its log is beside its
+socket. `GRAPHIFY_MCP_DAEMON=0` has each server read the graphs itself, as it
+always does on Windows, and as one does when the daemon can't be reached.
+
 **Stale-graph notes.** Both the CLI (on stderr) and the MCP server (at the top
 of a tool result) say when the graph may be out of date, from the
 `manifest.json` beside it: when the source checkout has moved past the commit
