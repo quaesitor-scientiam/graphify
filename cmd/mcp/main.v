@@ -510,12 +510,13 @@ fn call_tool(name string, args map[string]json2.Any, served Served, note string)
 			}
 		}
 		'shortest_path' {
-			ids := g.shortest_path((args['a'] or { json2.null }).str(),
-				(args['b'] or { json2.null }).str())
-			if ids.len == 0 {
+			path := g.path_between((args['a'] or { json2.null }).str(), (args['b'] or {
+				json2.null
+			}).str())
+			if path == '' {
 				'(no path)'
 			} else {
-				g.names(ids).join(' -> ')
+				path
 			}
 		}
 		else {
@@ -554,7 +555,7 @@ fn tool_list() []mcp.Tool {
 			'List the names of all symbols directly linked to a symbol (calls, callers, defines, imports).', schema({
 			'node': prop('string', 'symbol name or id')
 		}, ['node'])),
-		tool('shortest_path', 'Find the shortest relationship path between two symbols.', schema({
+		tool('shortest_path', 'How a reaches b: the shortest chain of calls from a to b, each call with its line (or from b to a, when only that way has one); with no chain of calls, the shortest link through any relation.', schema({
 			'a': prop('string', 'start symbol name or id')
 			'b': prop('string', 'goal symbol name or id')
 		}, ['a', 'b'])),

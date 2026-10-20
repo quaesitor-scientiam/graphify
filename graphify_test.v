@@ -9020,6 +9020,9 @@ fn test_a_project_layered_on_the_v_tree_carries_on_into_vlib() {
 	// one path from the project, through the vlib function it calls, to what that calls
 	assert g.shortest_path('proj.redraw', 'vlib.gg.flush') == ['proj.redraw', 'vlib.gg.draw',
 		'vlib.gg.flush']
+	// and the chain of calls, which goes on through vlib's own
+	assert g.call_path('proj.redraw', 'vlib.gg.flush') == ['proj.redraw', 'vlib.gg.draw',
+		'vlib.gg.flush']
 	// vlib's tests and the rest of the tree stay out
 	for id in ['vlib.gg.test_draw', 'vlib.gg.test_native', 'cmd.main'] {
 		assert !g.index().has(id), id
@@ -9038,6 +9041,8 @@ fn test_a_project_layered_on_the_v_tree_carries_on_into_vlib() {
 	// a module from VMODULES joins the traversal as vlib does, read from where it is
 	// installed, and its unresolved call isn't linked to the project's `helper`
 	assert g.shortest_path('proj.helper', 'vlib.gg.flush') == ['proj.helper', 'vmodules.ext.f',
+		'vlib.gg.flush']
+	assert g.call_path('proj.helper', 'vlib.gg.flush') == ['proj.helper', 'vmodules.ext.f',
 		'vlib.gg.flush']
 	assert g.get_body('vmodules.ext.f').contains('gg.flush()')
 	assert !idx.edges.any(it.from == 'vmodules.ext.f' && it.to == 'proj.helper')
@@ -9070,6 +9075,9 @@ fn test_a_project_declaration_shadows_the_one_of_vlib_with_its_id() {
 	assert ex.starts_with('fn flush  (proj.v:9)\n'), ex
 	assert ex.contains('called by     : f (vmodules/ext/ext.v:3) [library], draw (vlib/gg/gg.v:3) [library]'), ex
 	assert g.shortest_path('proj.redraw', 'vlib.gg.flush') == ['proj.redraw', 'vlib.gg.draw',
+		'vlib.gg.flush']
+	// and the chain of calls, which goes on through vlib's own
+	assert g.call_path('proj.redraw', 'vlib.gg.flush') == ['proj.redraw', 'vlib.gg.draw',
 		'vlib.gg.flush']
 	// what vlib's own `flush` calls isn't the project's
 	assert g.neighbor_names('vlib.gg.flush') == ['f', 'draw']
@@ -9532,4 +9540,122 @@ fn test_a_name_with_many_declarations_is_a_list_to_pick_from() {
 	// the one called first
 	assert lines[1].contains('m3.T3.str') && lines[1].ends_with('1 caller(s)'), list
 	assert g.get_body('str').starts_with('`str` names')
+}
+
+fn test_a_call_edge_has_the_line_of_each_call() {
+	// get_node gave a caller's declaration line, not where it calls, so a reader
+	// grepped for the call sites anyway
+	g := graph_of({
+		'net/conn.v': 'module net
+
+pub struct TcpConn {}
+
+pub fn (c TcpConn) wait_for_read() {}
+
+pub fn (c TcpConn) read_ptr() {
+	c.wait_for_read()
+	if true {
+		c.wait_for_read()
+	}
+}
+
+fn helper() {}
+
+pub fn dial() {
+	helper()
+	x := 1
+	helper()
+}
+'
+	})
+	mut by := map[string][]int{}
+	for e in g.edges {
+		if e.kind == .calls {
+			by['${e.from} ${e.to}'] = e.lines
+		}
+	}
+	assert by['net.TcpConn.read_ptr net.TcpConn.wait_for_read'] == [8, 10], by.str()
+	assert by['net.dial net.helper'] == [17, 19], by.str()
+	callee := g.explain('TcpConn.wait_for_read')
+	assert callee.contains('read_ptr (net/conn.v:7) at lines 8, 10'), callee
+	caller := g.explain('dial')
+	assert caller.contains('helper (net/conn.v:14) at lines 17, 19'), caller
+}
+
+fn test_call_lines_survive_graph_json_and_the_worker_protocol() {
+	g := graph_of({
+		'a/a.v': 'module a
+
+fn f() {}
+
+fn g() {
+	f()
+	f()
+}
+'
+	})
+	dir := os.join_path(os.temp_dir(), 'graphify_test_lines_${os.getpid()}')
+	os.mkdir_all(dir) or { panic(err) }
+	defer {
+		os.rmdir_all(dir) or {}
+	}
+	path := os.join_path(dir, 'graph.json')
+	save_graph(g, path) or { panic(err) }
+	back := load_graph(path) or { panic(err) }
+	calls := back.edges.filter(it.kind == .calls)
+	assert calls.len == 1 && calls[0].lines == [6, 7], calls.str()
+	// a graph.json from before has no lines, and still loads
+	old := os.read_file(path) or { panic(err) }.replace(',"lines":[6,7]', '')
+	os.write_file(path, old) or { panic(err) }
+	before := load_graph(path) or { panic(err) }
+	assert before.edges.filter(it.kind == .calls)[0].lines == []
+	syms, edges := extract_v_text(os.read_file(os.join_path(@VMODROOT, 'graph_ops.v')) or { panic(err) },
+		'graph_ops.v')
+	fr := decode_file_result(encode_file_result(FileResult{ symbols: syms, edges: edges }))
+	assert fr.edges.map(it.lines) == edges.map(it.lines)
+	assert edges.any(it.lines.len > 0)
+}
+
+fn test_a_path_between_two_functions_is_their_chain_of_calls() {
+	// shortest_path linked http.get to net.dial_tcp through the `string` type both
+	// mention, not through the calls that lead from one to the other
+	g := graph_of({
+		'net/tcp.v':   'module net
+
+pub fn dial_tcp(addr string) int {
+	return addr.len
+}
+'
+		'http/http.v': 'module http
+
+import net
+
+pub fn get(url string) int {
+	return fetch(url)
+}
+
+fn fetch(url string) int {
+	return do(url)
+}
+
+fn do(url string) int {
+	return net.dial_tcp(url)
+}
+'
+	})
+	ids := g.call_path('get', 'dial_tcp')
+	assert ids == ['http.get', 'http.fetch', 'http.do', 'net.dial_tcp'], ids.str()
+	text := g.path_between('get', 'dial_tcp')
+	// one line a step; joined, since a checkout with CRLF line ends would put them in a
+	// multi-line literal
+	assert text == ['get (http/http.v:5)', '  -> fetch (http/http.v:9), called at line 6',
+		'  -> do (http/http.v:13), called at line 10',
+		'  -> dial_tcp (net/tcp.v:3), called at line 14'].join('\n'), text
+	// the other way round it is still the same chain, said so
+	assert g.call_path('dial_tcp', 'get') == []
+	back := g.path_between('dial_tcp', 'get')
+	assert back.starts_with("(`dial_tcp` doesn't reach `get` by calls, but `get` reaches `dial_tcp`:)"), back
+	// two functions that only share a type have no chain of calls
+	apart := g.path_between('dial_tcp', 'http')
+	assert apart.starts_with('(no chain of calls links them'), apart
 }

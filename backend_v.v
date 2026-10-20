@@ -3041,10 +3041,9 @@ fn (mut f V3File) record_call(callee_id flat.NodeId, args []flat.NodeId, ctx V3C
 	// callee's type parameters come from every call site; a repeat call merges into the
 	// edge its first call made
 	site := if is_method { '' } else { f.type_arg_site(callee_id) + f.arg_site(args, ctx) }
+	line := f.line_of(f.node(callee_id).pos.offset)
 	if key in seen {
-		if !is_method {
-			add_arg_site(mut edges, ctx.from, name, site)
-		}
+		add_call_site(mut edges, ctx.from, name, rt, recipe, guards, site, line)
 		return
 	}
 	seen[key] = true
@@ -3059,6 +3058,7 @@ fn (mut f V3File) record_call(callee_id flat.NodeId, args []flat.NodeId, ctx V3C
 		provenance:  if value_call { EdgeProvenance.undeclared } else { .extracted }
 		arg_sites:   if is_method { '' } else { site + arg_site_end }
 		guards:      guards
+		lines:       [line]
 	}
 }
 
@@ -3096,16 +3096,39 @@ fn (f &V3File) type_arg_site(callee_id flat.NodeId) string {
 	return 'ta:' + names.join('\x0b') + arg_site_end
 }
 
-// add_arg_site records one more call site of the non-method call of `to` from `from`,
-// on the edge that first recorded that call in this body.
-fn add_arg_site(mut edges []Edge, from string, to string, site string) {
+// add_call_site records one more call site of a call that an edge from `from` in this
+// body already records: its line, and for a non-method call its argument recipes.
+fn add_call_site(mut edges []Edge, from string, to string, recv_type string, recipe string, guards string, site string, line int) {
 	for i := edges.len - 1; i >= 0 && edges[i].from == from; i-- {
-		if edges[i].to == to && edges[i].kind == .calls && !edges[i].is_method {
+		e := edges[i]
+		if e.to == to && e.kind == .calls && e.recv_type == recv_type
+			&& e.recv_recipe == recipe && e.guards == guards {
 			edges[i] = Edge{
-				...edges[i]
-				arg_sites: edges[i].arg_sites + site + arg_site_end
+				...e
+				arg_sites: if e.is_method { '' } else { e.arg_sites + site + arg_site_end }
+				lines:     add_line(e.lines, line)
 			}
 			return
 		}
 	}
+}
+
+// add_line is `lines`, in order and without repeats, with `line` in it.
+fn add_line(lines []int, line int) []int {
+	if line <= 0 || line in lines {
+		return lines
+	}
+	mut out := lines.clone()
+	out << line
+	out.sort()
+	return out
+}
+
+// merge_lines is the lines of `a` and `b`, in order and without repeats.
+fn merge_lines(a []int, b []int) []int {
+	mut out := a.clone()
+	for l in b {
+		out = add_line(out, l)
+	}
+	return out
 }

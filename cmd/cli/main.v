@@ -196,12 +196,12 @@ fn cmd_path(args []string) {
 	a := positional(args, 0) or { fail('path: needs two symbols') }
 	b := positional(args, 1) or { fail('path: needs two symbols') }
 	g := load(args)
-	ids := g.shortest_path(a, b)
-	if ids.len == 0 {
+	text := g.path_between(a, b)
+	if text == '' {
 		println('no path between "${a}" and "${b}"')
 		return
 	}
-	println(g.names(ids).join(' -> '))
+	println(text)
 }
 
 fn cmd_overview(args []string) {

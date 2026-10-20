@@ -62,6 +62,7 @@ pub fn merge_graphs(graphs []Graph, labels []string) Graph {
 				to:         ns + e.to
 				kind:       e.kind
 				provenance: e.provenance
+				lines:      e.lines
 			}
 		}
 	}

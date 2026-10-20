@@ -111,6 +111,10 @@ pub:
 	// parameter must meet them for the call to reach its method (see generics.v).
 	// Extraction-only and not persisted.
 	guards string @[json: '-']
+	// lines are the lines of a `calls` edge's call sites, in the caller's file, in
+	// order: an edge stands for every call of its callee in one declaration. Written
+	// to graph.json; empty on other edges, and on a graph extracted before them.
+	lines []int
 	// file is the path of the file that emitted this edge — populated for
 	// `calls`/`embeds`/`references` edges, whose `from` is the id of a
 	// declaration that may need disambiguating (see disambiguate_ids in
