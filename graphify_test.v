@@ -9646,10 +9646,11 @@ fn do(url string) int {
 	ids := g.call_path('get', 'dial_tcp')
 	assert ids == ['http.get', 'http.fetch', 'http.do', 'net.dial_tcp'], ids.str()
 	text := g.path_between('get', 'dial_tcp')
-	assert text == 'get (http/http.v:5)
-  -> fetch (http/http.v:9), called at line 6
-  -> do (http/http.v:13), called at line 10
-  -> dial_tcp (net/tcp.v:3), called at line 14', text
+	// one line a step; joined, since a checkout with CRLF line ends would put them in a
+	// multi-line literal
+	assert text == ['get (http/http.v:5)', '  -> fetch (http/http.v:9), called at line 6',
+		'  -> do (http/http.v:13), called at line 10',
+		'  -> dial_tcp (net/tcp.v:3), called at line 14'].join('\n'), text
 	// the other way round it is still the same chain, said so
 	assert g.call_path('dial_tcp', 'get') == []
 	back := g.path_between('dial_tcp', 'get')
