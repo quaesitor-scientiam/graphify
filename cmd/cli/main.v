@@ -383,6 +383,8 @@ fn load(args []string) graphify.Graph {
 	if note != '' {
 		eprintln('note: ${note}')
 	}
+	// built once: a command looks things up in it many times, and none changes the graph
+	g.cache_index()
 	return g
 }
 

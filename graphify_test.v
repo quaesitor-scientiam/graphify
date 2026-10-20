@@ -9707,3 +9707,56 @@ fn test_a_search_ties_go_to_the_project_over_vlib() {
 	found := g.find('helper')
 	assert found.len == 2 && found[0] == 'proj.helper', found.str()
 }
+
+fn test_a_path_lists_every_route_by_calls_shortest_first() {
+	// shortest_path gave one chain, http.get's through a fresh connection, not the
+	// pooled transport's it takes by default
+	g := graph_of({
+		'net/tcp.v':   'module net
+
+pub fn dial_tcp() {}
+'
+		'http/http.v': 'module http
+
+import net
+
+pub fn get() {
+	if true {
+		fresh()
+	} else {
+		pooled()
+	}
+}
+
+fn fresh() {
+	net.dial_tcp()
+}
+
+fn pooled() {
+	dial()
+}
+
+fn dial() {
+	again()
+	net.dial_tcp()
+}
+
+fn again() {
+	get()
+}
+'
+	})
+	paths := g.call_paths('get', 'dial_tcp', 5)
+	// the loop back through get is no route
+	assert paths == [['http.get', 'http.fresh', 'net.dial_tcp'],
+		['http.get', 'http.pooled', 'http.dial', 'net.dial_tcp']], paths.str()
+	assert g.call_paths('get', 'dial_tcp', 1) == [paths[0]]
+	assert g.call_path('get', 'dial_tcp') == paths[0]
+	text := g.path_between('get', 'dial_tcp')
+	assert text == ['2 chains of calls from get to dial_tcp, shortest first:', '',
+		'1. get (http/http.v:5)', '  -> fresh (http/http.v:13), called at line 7',
+		'  -> dial_tcp (net/tcp.v:3), called at line 14', '', '2. get (http/http.v:5)',
+		'  -> pooled (http/http.v:17), called at line 9',
+		'  -> dial (http/http.v:21), called at line 18',
+		'  -> dial_tcp (net/tcp.v:3), called at line 23'].join('\n'), text
+}
