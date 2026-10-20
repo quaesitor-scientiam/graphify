@@ -9030,8 +9030,8 @@ fn test_a_project_layered_on_the_v_tree_carries_on_into_vlib() {
 	// a raw name of the project's is still its own declaration, though vlib has one too
 	idx := g.index()
 	assert idx.edges.any(it.from == 'proj.redraw' && it.to == 'proj.helper')
-	// a search seeds from the project's matches, and from vlib's only when it has none
-	assert g.find('draw') == ['proj.redraw']
+	// a search seeds from vlib's matches as from the project's, a name it is first
+	assert g.find('draw') == ['vlib.gg.draw', 'proj.redraw']
 	assert g.find('flush') == ['vlib.gg.flush']
 	// a vlib body is read from the V tree, and explain marks vlib and shows the project's callers
 	assert g.get_body('vlib.gg.flush').contains('fn flush() {}')
@@ -9658,4 +9658,52 @@ fn do(url string) int {
 	// two functions that only share a type have no chain of calls
 	apart := g.path_between('dial_tcp', 'http')
 	assert apart.starts_with('(no chain of calls links them'), apart
+}
+
+fn test_a_search_matches_every_word_of_it() {
+	// query_graph matched any one word, so `accept connection unix socket` seeded from
+	// every symbol with `connection` in it, and the one it was about came nowhere
+	g := graph_of({
+		'net/unix/stream.v':    'module unix
+
+pub struct StreamConn {}
+
+pub struct StreamListener {}
+
+// accept waits for a connection on the socket
+pub fn (l StreamListener) accept() StreamConn {
+	return StreamConn{}
+}
+
+pub fn connection_count() int {
+	return 0
+}
+'
+		'net/unix/stream_test.v': 'module unix
+
+fn test_accept() {}
+'
+		'net/tcp.v':            'module net
+
+pub fn accept_tcp() {}
+'
+	})
+	// every word: in the name, signature, file or doc comment
+	assert g.find('accept connection unix socket') == ['net.unix.StreamListener.accept'], g.find('accept connection unix socket').str()
+	// question words name no code
+	assert g.find('how does the listener accept a connection') == ['net.unix.StreamListener.accept']
+	// a name the word is outright first, then one with it in, the shorter first; a
+	// test's declaration after code that matches as well
+	assert g.find('accept') == ['net.unix.StreamListener.accept', 'net.accept_tcp', 'net.unix.test_accept'], g.find('accept').str()
+	// when nothing has every word, those with the most
+	assert g.find('accept zebra') == g.find('accept')
+	assert g.find('zebra') == []
+}
+
+fn test_a_search_ties_go_to_the_project_over_vlib() {
+	project, base := layer_fixture()
+	g := layer_graph(project, base)
+	// `helper` is the project's and vlib's both
+	found := g.find('helper')
+	assert found.len == 2 && found[0] == 'proj.helper', found.str()
 }
