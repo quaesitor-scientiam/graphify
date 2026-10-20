@@ -998,6 +998,31 @@ struct DeclRow {
 	callers int
 }
 
+// build_mark is ` [$if use_openssl ?]` for a declaration only some builds have
+// (Symbol.build), and nothing for one every build has.
+fn (s Symbol) build_mark() string {
+	return if s.build == '' { '' } else { ' [\$if ${s.build}]' }
+}
+
+// other_builds lists the declarations of `s`'s id in other files that another
+// build compiles in its place: `ssl.SSLConn` is `mbedtls.SSLConn` in
+// ssl_notd_use_openssl.v and `openssl.SSLConn` in ssl_d_use_openssl.v, one id that
+// the index shows from one file.
+fn (g Graph) other_builds(s Symbol) []string {
+	mut out := []string{}
+	for o in g.all_symbols() {
+		if o.id == s.id && o.file != s.file && (o.build != '' || s.build != '') {
+			out << '${o.signature} (${o.loc()})${o.build_mark()}'
+		}
+	}
+	for o in g.library.symbols {
+		if o.id == s.id && o.file != s.file && (o.build != '' || s.build != '') {
+			out << '${o.signature} (${o.loc()})${o.build_mark()}'
+		}
+	}
+	return out
+}
+
 // explain_id summarizes the declaration `id`; with `uncertain`, the call sites of its
 // name that couldn't be put on one of its declarations as well, which a list of all
 // of them leaves out.
@@ -1007,7 +1032,11 @@ fn (g Graph) explain_id(id string, uncertain bool) string {
 	s := idx.symbol(id) or { idx.lib_by_id[id] or { return 'no symbol matches: ${node}' } }
 
 	mark := if idx.is_base(id) || id in idx.lib_by_id { ' [library]' } else { '' }
-	mut out := ['${s.kind.str()} ${s.name}  (${s.loc()})${mark}', s.render()]
+	mut out := ['${s.kind.str()} ${s.name}  (${s.loc()})${mark}${s.build_mark()}', s.render()]
+	others := g.other_builds(s)
+	if others.len > 0 {
+		out << 'other builds  : ' + others.join(', ')
+	}
 	// The doc comment is often the whole answer to "what does this do", which
 	// otherwise costs a file read. Capped so one rambling comment cannot blow
 	// the budget this tool exists to protect.

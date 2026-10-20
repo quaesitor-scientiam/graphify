@@ -1608,3 +1608,40 @@ vlang tree, and the benchmark's Q3):
    ten OpenSSL routes appear.
 2. Step 2: conditions on calls inside a body's `$if`.
 3. Step 4: the marks in answers, and dropping contradictory routes.
+
+### PR 1: build conditions on declarations, and calls through every variant (October 2026)
+
+- **Build conditions.** Each declaration has a `build`: the condition, as a `$if`
+  writes it, under which V compiles it. It comes from its file's name
+  (`file_build`) and the file-scope `$if` branches around it (`top_level_builds`),
+  joined by `&&`. graph.json carries it only when it isn't empty. `get_node`
+  shows it, `[$if !use_openssl ?]`, and lists the declarations of the same id in
+  other builds' files on an `other builds` line.
+- **Calls through every variant.**
+  - An alias with a different type in each build's file is resolved to each type.
+    `resolve_edges` keeps every type an alias names (`alias_targets`). For each
+    further type it makes a copy of `Infer` whose aliases name that type instead
+    (`build_worlds`).
+  - A method call whose name is a method of one of those types is inferred again
+    in each copy. Where the answer differs from the default, the call links to
+    both.
+  - A call that never goes through the alias resolves the same in every copy, so
+    it gains nothing: `mbedtls`'s own `connect` calls stay its own.
+  - `_d_`/`_notd_` files count as platform files, so a call that reaches one copy
+    of a renamed function reaches every copy.
+
+On vlang `417c85b1ec`, against master:
+
+- **Symbols:** 164,321 before and after, the same field for field, apart from
+  `build`. 14,376 of them have one. The most common are `js` (1,868), `windows`
+  (1,696), `gg_multiwindow ?` (1,489) and `linux` (1,370).
+- **Edges:** 609,038 before, 609,109 after (72 added, 1 removed).
+  - 65 of the added calls go into `net.openssl`, from `net.ssl`, `net.http`,
+    `db.redis`, `net.websocket`, `net.imap` and `net.smtp`.
+  - The rest are the `_notd_gcboehm` copy of `C.GC_gcollect`, and both copies of
+    a wasm test's `abc`. Those two copies replace the raw, unresolved call that
+    was the one edge removed.
+- **Q3:** `shortest_path http.get net.dial_tcp` counts 10 chains, against 7
+  before. The 3 new ones go through `openssl.SSLConn.dial`.
+- **Cost:** extraction time and peak memory are unchanged, within noise
+  (6.6–7.6 s, 2.35 GB).
