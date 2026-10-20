@@ -751,8 +751,12 @@ fn (mut f V3File) extract(root flat.NodeId) ([]Symbol, []Edge) {
 	if declared == 'main' {
 		f.extract_script_main(top, mut syms, mut edges)
 	}
+	in_file := file_build(f.rel)
+	mut branch_of := map[flat.NodeId]string{}
+	f.top_level_builds(top, '', mut branch_of)
 	for id in f.top_level_decls(top) {
 		n := f.node(id)
+		before := syms.len
 		match n.kind {
 			.fn_decl, .c_fn_decl { f.extract_fn(id, mut syms, mut edges) }
 			.struct_decl { f.extract_struct(id, mut syms, mut edges) }
@@ -762,6 +766,12 @@ fn (mut f V3File) extract(root flat.NodeId) ([]Symbol, []Edge) {
 			.global_decl { f.extract_globals(id, mut syms, mut edges) }
 			.type_decl { f.extract_type(id, mut syms, mut edges) }
 			else {}
+		}
+		build := join_build(in_file, branch_of[id] or { '' })
+		if build != '' {
+			for i in before .. syms.len {
+				syms[i].build = build
+			}
 		}
 	}
 	return syms, edges
@@ -960,6 +970,163 @@ fn (f &V3File) top_level_decls(ids []flat.NodeId) []flat.NodeId {
 		out << id
 	}
 	return out
+}
+
+// top_level_builds maps each declaration that top_level_decls flattens out of a
+// file-scope `$if` to the condition of the branch it is in, `use_openssl ?` or
+// `!windows`, nested ones joined by `&&` (see Symbol.build).
+fn (f &V3File) top_level_builds(ids []flat.NodeId, cond string, mut out map[flat.NodeId]string) {
+	for id in ids {
+		n := f.node(id)
+		match n.kind {
+			.comptime_if {
+				for i, k in f.kids(id) {
+					// the block of `$if c`, then its `$else` (an `$else $if` is a
+					// `$if` nested in the `$else`), as in method_branches
+					c := f.build_cond(n)
+					here := if i == 0 { c } else { negate_build(c) }
+					f.top_level_builds([k], join_build(cond, here), mut out)
+				}
+			}
+			.block {
+				f.top_level_builds(f.kids(id), cond, mut out)
+			}
+			else {
+				if cond != '' {
+					out[id] = cond
+				}
+			}
+		}
+	}
+}
+
+// build_cond is the condition of the `$if` node `n` as its source writes it:
+// `@OS == 'linux'`, `use_openssl ?`. The parser's own text for it has `@OS`
+// replaced by the host's OS, `'macos'=='linux'`, which would make the graph differ
+// by the OS that extracts it.
+fn (f &V3File) build_cond(n flat.Node) string {
+	at := int(n.pos.offset)
+	if at >= 0 && at < f.src.len && f.src[at..].starts_with('\$if') {
+		if end := f.src[at..].index('{') {
+			return spaced_build(f.src[at + 3..at + end])
+		}
+	}
+	// an arm of a file-scope `$match @OS` is a `$if` the parser makes, with no
+	// source of its own and the host's OS for its subject
+	c := spaced_build(n.value)
+	host := "'${os.user_os()}' == "
+	return if c.starts_with(host) { '@OS == ' + c[host.len..] } else { c }
+}
+
+// spaced_build is a `$if` condition, as the parser keeps it, `a?|| b?`, or as a
+// file writes it, `a ?|| b ?`, spaced one way: `a ? || b ?`, `@OS == 'linux'`.
+fn spaced_build(cond string) string {
+	c := cond.replace(' ', '').replace('\t', '').replace('\n', '').replace('\r', '')
+	return c.replace('?', ' ?').replace('&&', ' && ').replace('||', ' || ').replace('!=',
+		'\x01').replace('==', ' == ').replace('\x01', ' != ')
+}
+
+// join_build is the condition that both `a` and `b` hold, either of which may be
+// empty for every build.
+fn join_build(a string, b string) string {
+	if a == '' {
+		return b
+	}
+	if b == '' {
+		return a
+	}
+	return '${a} && ${b}'
+}
+
+// negate_build is the condition under which `cond` doesn't hold: `!x ?` for
+// `x ?`, `windows` for `!windows`, `!(a || b)` for `a || b` and
+// `!(@OS == 'linux')` for `@OS == 'linux'`.
+fn negate_build(cond string) string {
+	c := cond.trim_space()
+	name := c.trim_left('!').trim_string_right(' ?')
+	if name.len > 0 && name.bytes().all(it.is_letter() || it.is_digit() || it == `_`) {
+		return if c.starts_with('!') { c[1..] } else { '!' + c }
+	}
+	return '!(${c})'
+}
+
+// os_file_builds are the OS a file-name suffix is for, as V decides which files
+// to compile (pref.file_has_incompatible_os_only_suffix), as a `$if` condition.
+// `_default` is left out: V compiles it on an OS without a file of its own, which
+// no one condition says.
+const os_file_builds = {
+	'nix':                     '!windows'
+	'windows':                 'windows'
+	'linux':                   'linux'
+	'macos':                   'macos'
+	'darwin':                  'macos'
+	'bsd':                     'bsd'
+	'android_outside_termux':  'android && !termux'
+	'termux':                  'termux'
+	'android':                 'android'
+	'ios':                     'ios'
+	'freebsd':                 'freebsd'
+	'openbsd':                 'openbsd'
+	'netbsd':                  'netbsd'
+	'dragonfly':               'dragonfly'
+	'solaris':                 'solaris'
+	'qnx':                     'qnx'
+	'haiku':                   'haiku'
+	'serenity':                'serenity'
+	'vinix':                   'vinix'
+	'wasm32_emscripten':       'wasm32_emscripten'
+}
+
+// arch_file_builds are the architectures a file-name suffix is for, as in
+// pref.file_has_incompatible_target_suffix.
+const arch_file_builds = ['amd64', 'x64', 'x86_64', 'arm64', 'aarch64', 'x86', 'i386', 'i486',
+	'i586', 'i686', 'x32', 'x86_32', 'ia32', 'arm32', 'rv32', 'riscv32', 'rv64', 'riscv64', 'ppc',
+	'ppc64', 'ppc64le', 's390x', 'loongarch64', 'sparc64', 'wasm32']
+
+// file_build is the condition under which V compiles a file, from its name: a
+// `_d_flag` or `_notd_flag` suffix (`flag ?`, `!flag ?`), an OS or architecture
+// suffix (`_nix` is `!windows`), and the `.js.v` of the JavaScript backend (`js`).
+// Empty for a file every build compiles.
+fn file_build(rel string) string {
+	name := rel.all_after_last('/')
+	mut stem := name.all_before('.')
+	mut conds := []string{}
+	if name.ends_with('.js.v') {
+		conds << 'js'
+	}
+	// a test is named as the file it tests, then `_test`
+	stem = stem.trim_string_right('_test')
+	for marker in ['_notd_', '_d_'] {
+		if at := stem.last_index(marker) {
+			flag := stem[at + marker.len..]
+			if flag != '' {
+				conds << if marker == '_d_' { '${flag} ?' } else { '!${flag} ?' }
+				stem = stem[..at]
+			}
+			break
+		}
+	}
+	mut os_cond := ''
+	mut best := 0
+	for suffix, cond in os_file_builds {
+		// the longest suffix: `_android_outside_termux` before `_termux`
+		if suffix.len > best && stem.ends_with('_' + suffix) {
+			os_cond, best = cond, suffix.len
+		}
+	}
+	if os_cond != '' {
+		conds << os_cond
+		stem = stem[..stem.len - best - 1]
+	}
+	for arch in arch_file_builds {
+		if stem.ends_with('_' + arch) {
+			conds << arch
+			break
+		}
+	}
+	// the conditions read from the end of the name; written from its start
+	conds.reverse_in_place()
+	return conds.join(' && ')
 }
 
 fn (mut f V3File) add_symbol(mut syms []Symbol, mut edges []Edge, s Symbol) {

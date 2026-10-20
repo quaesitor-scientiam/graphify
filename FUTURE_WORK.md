@@ -1489,3 +1489,159 @@ The daemon with the base loaded and four sessions (gui, vebidor, graphify, vxui)
 is 1.18 GB, against 2.26 GB before. The first layer takes 0.11 GB: the shared
 `Layer` and what reading gui's graph leaves. Each further layer takes a few MB:
 the next three took 16 MB together, against 0.32–0.37 GB each before.
+
+## 12. Code that only some builds compile (design, October 2026)
+
+The benchmark (bench/compare, Q3) asked for every route from `http.get` to
+`net.dial_tcp`. Ten of them exist only under `-d use_openssl`, and
+`shortest_path` showed none. Only a grep run found all ten.
+
+### What the graph has today
+
+The graph already has every build's code. `extract_v3` keeps both sides of each
+`$if` (§8), and every file is read, `ssl_d_use_openssl.v` as well as
+`ssl_notd_use_openssl.v`. What it lacks is two things:
+
+- **Which build a declaration or call belongs to.** Nothing records it. A symbol's
+  id is the same in both files (`vlib.net.ssl.SSLConn`), and the index shows one
+  copy (`shown_before`). Between two files of the same rank, the later one wins,
+  so here that is `ssl_notd_use_openssl.v`.
+- **Resolution through every variant.** `ssl.SSLConn` is an alias, to
+  `mbedtls.SSLConn` in one file and to `openssl.SSLConn` in the other. A call
+  such as `conn.connect()` in `socks5_ssl_dial` is resolved through the alias the
+  index shows, so it links to mbedtls's `connect` only. openssl's `connect` and
+  `dial` are in the graph, with their calls of `net.dial_tcp`, but nothing calls
+  them. `platform_variants` already links a plain call to each platform copy of a
+  function. However, it doesn't count a `_d_`/`_notd_` file as a platform file,
+  and it leaves out methods and aliases.
+
+On vlang `417c85b1ec`:
+
+- 1,785 ids are declared in more than one file:
+  - 965 by OS-suffixed files;
+  - 498 by `_d_`/`_notd_` files;
+  - the remaining 322 by test files and `cmd/tools` programs, which isn't a build
+    question.
+- 13 aliases point at different types in different files: the three `net.ssl`
+  ones, `clipboard.Clipboard`, `picoev.LoopType`, `termios.TcFlag` and `Speed`,
+  `builtin.FnGC_WarnCB`, and five in tests and `x.multiwindow`.
+- File names use 19 `-d` flags. `$if x ?` uses over 100, led by
+  `gg_multiwindow` (239), `ownership` (149), `arm64` (68) and `gcboehm` (52).
+
+### Option A: a graph per build
+
+Extract once for each set of flags, for example the default build and
+`-d use_openssl`, and let a session (or a tool argument) choose which graph to
+use.
+
+- For: each graph is exact for its build, and nothing in the resolver changes.
+- Against:
+  - Extraction would have to pick a side of each `$if`, which `extract_v3` stopped
+    doing in §8.
+  - Each build costs a full extract of vlang's 8,917 files, a full graph on
+    disk, and about 1.2 GB in the daemon while it is loaded.
+  - With over 100 flags, which builds to extract is a guess. Covering just the
+    file-name flags would take 19 or more extracts.
+  - A question that spans builds needs one call per graph and a merge by the
+    agent. Q3 needs that: list every route, OpenSSL's included.
+  - The graph would depend on build settings again, where CI now checks that
+    every host gives the same graph.
+
+### Option B: one graph, with each build's code marked
+
+Keep the one graph and add what it lacks:
+
+1. **A build condition on each declaration** (`Symbol.build`). It is taken from
+   the file name (`_d_use_openssl` gives `use_openssl`, `_notd_use_openssl`
+   gives `!use_openssl`, and `_linux` gives `linux`, following
+   `pref.file_has_incompatible_target_suffix`), combined with the top-level `$if`
+   branches the declaration is inside (`comptime_branch` already builds that
+   path, for `method_branches`). Empty means every build.
+2. **A build condition on each call edge** (`Edge.build`): the body `$if` branches
+   the call is in. The walk already passes through `.comptime_if`, so it only
+   needs to keep the path, the way `ctx.guards` does for type parameters. It goes
+   in a new batch_proto field and into graph.json as `"build"` only when it isn't
+   empty, the way `lines` is.
+3. **Resolution through every variant.**
+   - Count `_d_`/`_notd_` files as platform files.
+   - Resolve an alias that has several targets to each of them.
+   - Link a method call on such a receiver to each target's method, the way
+     `platform_variants` links a plain call to each copy.
+   - Each resulting edge carries its callee's condition.
+4. **Showing it.**
+   - `get_node` marks a declaration or call that only some builds have:
+     `connect (vlib/net/openssl/ssl_connection.c.v:271) [-d use_openssl]`.
+   - `shortest_path` keeps a route only if its conditions can all hold at once.
+     A route needing `use_openssl` and `!use_openssl` is not a route.
+   - Each route then says what it needs, `[-d use_openssl]`, and routes for the
+     default build come first.
+   - An optional `build` argument (`"use_openssl"`, `"windows"`) can come later,
+     if the marked answers turn out to be too much.
+
+- For:
+  - one extract, one graph, and one daemon;
+  - the graph stays the same on every host;
+  - the 1,785 multi-file ids and the 13 aliases are all covered;
+  - a question across builds is one call;
+  - most of it reuses code that exists (`comptime_branch`, `platform_variants`,
+    `ctx.guards`, `shown_before`).
+- Against:
+  - Edges are more numerous, and answers can show calls that no single build
+    makes together. The second is limited by dropping routes whose conditions
+    contradict each other.
+  - Conditions joined with `&&` or `||` are only partly read. The plan is to keep
+    them as text, and to rule out only the plain contradiction `x` against `!x`.
+  - Like the platform copies today, an answer is about the code, not about one
+    build. A reader who wants only the default build has to read the marks
+    (step 4).
+
+### Recommendation
+
+Option B. A graph per build means going back on §8's host-independent extract,
+and it multiplies the extract time, disk use and daemon memory by the number of
+builds. It also can't answer Q3 in one call. B's pieces are mostly there, and
+they can land in three PRs, each measured as before (the edge counts on the same
+vlang tree, and the benchmark's Q3):
+
+1. Steps 1 and 3: build conditions on declarations, and resolution through every
+   variant. This alone makes openssl's `connect` and `dial` reachable, and Q3's
+   ten OpenSSL routes appear.
+2. Step 2: conditions on calls inside a body's `$if`.
+3. Step 4: the marks in answers, and dropping contradictory routes.
+
+### PR 1: build conditions on declarations, and calls through every variant (October 2026)
+
+- **Build conditions.** Each declaration has a `build`: the condition, as a `$if`
+  writes it, under which V compiles it. It comes from its file's name
+  (`file_build`) and the file-scope `$if` branches around it (`top_level_builds`),
+  joined by `&&`. graph.json carries it only when it isn't empty. `get_node`
+  shows it, `[$if !use_openssl ?]`, and lists the declarations of the same id in
+  other builds' files on an `other builds` line.
+- **Calls through every variant.**
+  - An alias with a different type in each build's file is resolved to each type.
+    `resolve_edges` keeps every type an alias names (`alias_targets`). For each
+    further type it makes a copy of `Infer` whose aliases name that type instead
+    (`build_worlds`).
+  - A method call whose name is a method of one of those types is inferred again
+    in each copy. Where the answer differs from the default, the call links to
+    both.
+  - A call that never goes through the alias resolves the same in every copy, so
+    it gains nothing: `mbedtls`'s own `connect` calls stay its own.
+  - `_d_`/`_notd_` files count as platform files, so a call that reaches one copy
+    of a renamed function reaches every copy.
+
+On vlang `417c85b1ec`, against master:
+
+- **Symbols:** 164,321 before and after, the same field for field, apart from
+  `build`. 14,376 of them have one. The most common are `js` (1,868), `windows`
+  (1,696), `gg_multiwindow ?` (1,489) and `linux` (1,370).
+- **Edges:** 609,038 before, 609,109 after (72 added, 1 removed).
+  - 65 of the added calls go into `net.openssl`, from `net.ssl`, `net.http`,
+    `db.redis`, `net.websocket`, `net.imap` and `net.smtp`.
+  - The rest are the `_notd_gcboehm` copy of `C.GC_gcollect`, and both copies of
+    a wasm test's `abc`. Those two copies replace the raw, unresolved call that
+    was the one edge removed.
+- **Q3:** `shortest_path http.get net.dial_tcp` counts 10 chains, against 7
+  before. The 3 new ones go through `openssl.SSLConn.dial`.
+- **Cost:** extraction time and peak memory are unchanged, within noise
+  (6.6–7.6 s, 2.35 GB).

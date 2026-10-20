@@ -4588,8 +4588,9 @@ pub fn caller() string {
 	g := build_graph(Options{ root: root })
 	assert g.symbols.filter(it.id == 'm.read_it').len == 2
 	explained := g.explain('read_it')
-	assert explained.contains('(m/a.c.v:3)'), explained
-	assert !explained.contains('a.js.v'), explained
+	assert explained.starts_with('fn read_it  (m/a.c.v:3)'), explained
+	// the JS backend's copy is the other build's
+	assert explained.contains('other builds  : pub fn read_it() string (m/a.js.v:3) [\$if js]'), explained
 	body := g.get_body('read_it')
 	assert body.starts_with('// m/a.c.v:3-'), body
 	assert body.contains('"native"'), body
@@ -9819,4 +9820,139 @@ fn test_a_path_says_how_many_routes_there_are_past_those_it_shows() {
 	text := g.path_between('start', 'goal')
 	assert text.all_before('\n') == '7 chains of calls from start to goal, at most 3 calls longer than the shortest; the 5 shortest:', text
 	assert text.contains('5. start') && !text.contains('6. start')
+}
+
+fn test_a_file_name_says_which_builds_compile_it() {
+	assert file_build('vlib/net/ssl/ssl_d_use_openssl.v') == 'use_openssl ?'
+	assert file_build('vlib/net/ssl/ssl_notd_use_openssl.v') == '!use_openssl ?'
+	assert file_build('vlib/os/os_nix.c.v') == '!windows'
+	assert file_build('vlib/os/os_darwin.c.v') == 'macos'
+	assert file_build('vlib/os/os_android_outside_termux.c.v') == 'android && !termux'
+	assert file_build('vlib/math/bits_arm64.v') == 'arm64'
+	assert file_build('vlib/net/ssl/ssl_d_use_openssl_test.v') == 'use_openssl ?'
+	assert file_build('vlib/gg/gg_linux_d_gg_multiwindow.c.v') == 'linux && gg_multiwindow ?'
+	assert file_build('vlib/os/os.js.v') == 'js'
+	assert file_build('vlib/os/os.c.v') == ''
+	assert file_build('vlib/os/os_default.c.v') == ''
+}
+
+fn test_a_declaration_carries_the_build_its_file_and_its_dollar_if_say() {
+	src := 'module net
+
+\$if linux {
+	pub fn on_linux() {}
+} \$else \$if windows {
+	pub fn on_windows() {}
+} \$else {
+	pub fn elsewhere() {}
+}
+
+\$if !no_y ? {
+	pub struct Y {
+		a int
+	}
+}
+
+\$if a ? || b ? {
+	fn ab() {}
+} \$else {
+	fn not_ab() {}
+}
+
+\$if @OS == "linux" {
+	const os_name = 1
+} \$else {
+	const os_name = 2
+}
+
+pub fn everywhere() {}
+'
+	syms, _ := extract_v_text(src, 'net/top_d_fast.v')
+	build := maps_by_id(syms)
+	assert build['net.on_linux'].build == 'fast ? && linux'
+	assert build['net.on_windows'].build == 'fast ? && !linux && windows'
+	assert build['net.elsewhere'].build == 'fast ? && !linux && !windows'
+	assert build['net.Y'].build == 'fast ? && !no_y ?'
+	// a field is in its struct's branch
+	assert build['net.Y.a'].build == 'fast ? && !no_y ?'
+	assert build['net.ab'].build == 'fast ? && a ? || b ?'
+	assert build['net.not_ab'].build == 'fast ? && !(a ? || b ?)'
+	assert build['net.everywhere'].build == 'fast ?'
+	// as the source writes it: the parser's text has the host's OS for `@OS`
+	os_names := syms.filter(it.name == 'os_name').map(it.build)
+	assert os_names == ['fast ? && @OS == "linux"', 'fast ? && !(@OS == "linux")'], os_names.str()
+	// a `$match @OS` arm has no `$if` in the source, and the parser's text for it
+	// has the host's OS
+	arms, _ := extract_v_text('module net
+
+\$match @OS {
+	"linux" {
+		const arm = 1
+	}
+	\$else {
+		const arm = 2
+	}
+}
+', 'net/arms.v')
+	arm_builds := arms.filter(it.name == 'arm').map(it.build)
+	assert arm_builds == ['@OS == "linux"', '!(@OS == "linux")'], arm_builds.str()
+	// the build goes through a worker's batch and into graph.json
+	fr := decode_file_result(encode_file_result(FileResult{ symbols: syms }))
+	assert maps_by_id(fr.symbols)['net.on_windows'].build == 'fast ? && !linux && windows'
+}
+
+// An alias declared once per build, `ssl.SSLConn` as `mbedtls.SSLConn` or
+// `openssl.SSLConn`, names both types: a call through it reaches each build's
+// method, and a call on one of the types themselves only its own.
+fn test_a_call_through_an_alias_each_build_declares_reaches_every_builds_method() {
+	g := graph_of({
+		'tls/ma/conn.v':             'module ma
+
+pub struct Conn {}
+
+pub fn (c &Conn) connect() {}
+
+pub fn (c &Conn) self_check() {
+	c.connect()
+}
+'
+		'tls/mb/conn.v':             'module mb
+
+pub struct Conn {}
+
+pub fn (c &Conn) connect() {}
+
+pub fn (c &Conn) only_b() {}
+'
+		'tls/pick/pick_d_use_b.v':    'module pick
+
+import tls.mb
+
+pub type Conn = mb.Conn
+'
+		'tls/pick/pick_notd_use_b.v': 'module pick
+
+import tls.ma
+
+pub type Conn = ma.Conn
+'
+		'app/app.v':                 'module app
+
+import tls.pick
+
+pub fn run(c &pick.Conn) {
+	c.connect()
+	c.only_b()
+}
+'
+	})
+	calls := fn [g] (from string) []string {
+		return g.edges.filter(it.kind == .calls && it.from == from).map(it.to).sorted()
+	}
+	assert calls('app.run') == ['tls.ma.Conn.connect', 'tls.mb.Conn.connect', 'tls.mb.Conn.only_b']
+	assert calls('tls.ma.Conn.self_check') == ['tls.ma.Conn.connect']
+	// get_node shows the build of the copy it shows, and the other build's copy
+	text := g.explain('tls.pick.Conn')
+	assert text.contains('type Conn  (tls/pick/pick_notd_use_b.v:5) [\$if !use_b ?]'), text
+	assert text.contains('other builds  : pub type Conn = tls.mb.Conn (tls/pick/pick_d_use_b.v:5) [\$if use_b ?]'), text
 }

@@ -184,6 +184,10 @@ fn write_symbol_json(mut sb strings.Builder, s Symbol) {
 	write_json_str(mut sb, s.parent)
 	sb.write_string(',"doc":')
 	write_json_str(mut sb, s.doc)
+	if s.build != '' {
+		sb.write_string(',"build":')
+		write_json_str(mut sb, s.build)
+	}
 	sb.write_u8(`}`)
 }
 
