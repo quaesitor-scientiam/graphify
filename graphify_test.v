@@ -9859,6 +9859,12 @@ fn test_a_declaration_carries_the_build_its_file_and_its_dollar_if_say() {
 	fn not_ab() {}
 }
 
+\$if @OS == "linux" {
+	const os_name = 1
+} \$else {
+	const os_name = 2
+}
+
 pub fn everywhere() {}
 '
 	syms, _ := extract_v_text(src, 'net/top_d_fast.v')
@@ -9872,6 +9878,24 @@ pub fn everywhere() {}
 	assert build['net.ab'].build == 'fast ? && a ? || b ?'
 	assert build['net.not_ab'].build == 'fast ? && !(a ? || b ?)'
 	assert build['net.everywhere'].build == 'fast ?'
+	// as the source writes it: the parser's text has the host's OS for `@OS`
+	os_names := syms.filter(it.name == 'os_name').map(it.build)
+	assert os_names == ['fast ? && @OS == "linux"', 'fast ? && !(@OS == "linux")'], os_names.str()
+	// a `$match @OS` arm has no `$if` in the source, and the parser's text for it
+	// has the host's OS
+	arms, _ := extract_v_text('module net
+
+\$match @OS {
+	"linux" {
+		const arm = 1
+	}
+	\$else {
+		const arm = 2
+	}
+}
+', 'net/arms.v')
+	arm_builds := arms.filter(it.name == 'arm').map(it.build)
+	assert arm_builds == ['@OS == "linux"', '!(@OS == "linux")'], arm_builds.str()
 	// the build goes through a worker's batch and into graph.json
 	fr := decode_file_result(encode_file_result(FileResult{ symbols: syms }))
 	assert maps_by_id(fr.symbols)['net.on_windows'].build == 'fast ? && !linux && windows'

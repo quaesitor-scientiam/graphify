@@ -983,7 +983,7 @@ fn (f &V3File) top_level_builds(ids []flat.NodeId, cond string, mut out map[flat
 				for i, k in f.kids(id) {
 					// the block of `$if c`, then its `$else` (an `$else $if` is a
 					// `$if` nested in the `$else`), as in method_branches
-					c := spaced_build(n.value)
+					c := f.build_cond(n)
 					here := if i == 0 { c } else { negate_build(c) }
 					f.top_level_builds([k], join_build(cond, here), mut out)
 				}
@@ -1000,11 +1000,30 @@ fn (f &V3File) top_level_builds(ids []flat.NodeId, cond string, mut out map[flat
 	}
 }
 
-// spaced_build is a `$if` condition as the parser keeps it, `a?|| b?`, spaced the
-// way V code writes it, `a ? || b ?`.
+// build_cond is the condition of the `$if` node `n` as its source writes it:
+// `@OS == 'linux'`, `use_openssl ?`. The parser's own text for it has `@OS`
+// replaced by the host's OS, `'macos'=='linux'`, which would make the graph differ
+// by the OS that extracts it.
+fn (f &V3File) build_cond(n flat.Node) string {
+	at := int(n.pos.offset)
+	if at >= 0 && at < f.src.len && f.src[at..].starts_with('\$if') {
+		if end := f.src[at..].index('{') {
+			return spaced_build(f.src[at + 3..at + end])
+		}
+	}
+	// an arm of a file-scope `$match @OS` is a `$if` the parser makes, with no
+	// source of its own and the host's OS for its subject
+	c := spaced_build(n.value)
+	host := "'${os.user_os()}' == "
+	return if c.starts_with(host) { '@OS == ' + c[host.len..] } else { c }
+}
+
+// spaced_build is a `$if` condition, as the parser keeps it, `a?|| b?`, or as a
+// file writes it, `a ?|| b ?`, spaced one way: `a ? || b ?`, `@OS == 'linux'`.
 fn spaced_build(cond string) string {
-	c := cond.replace(' ', '')
-	return c.replace('?', ' ?').replace('&&', ' && ').replace('||', ' || ')
+	c := cond.replace(' ', '').replace('\t', '').replace('\n', '').replace('\r', '')
+	return c.replace('?', ' ?').replace('&&', ' && ').replace('||', ' || ').replace('!=',
+		'\x01').replace('==', ' == ').replace('\x01', ' != ')
 }
 
 // join_build is the condition that both `a` and `b` hold, either of which may be
@@ -1020,15 +1039,13 @@ fn join_build(a string, b string) string {
 }
 
 // negate_build is the condition under which `cond` doesn't hold: `!x ?` for
-// `x ?`, `windows` for `!windows`, `!(a || b)` for `a || b`.
+// `x ?`, `windows` for `!windows`, `!(a || b)` for `a || b` and
+// `!(@OS == 'linux')` for `@OS == 'linux'`.
 fn negate_build(cond string) string {
 	c := cond.trim_space()
-	simple := !c.contains('&&') && !c.contains('||')
-	if simple && c.starts_with('!') {
-		return c[1..].trim_space()
-	}
-	if simple {
-		return '!' + c
+	name := c.trim_left('!').trim_string_right(' ?')
+	if name.len > 0 && name.bytes().all(it.is_letter() || it.is_digit() || it == `_`) {
+		return if c.starts_with('!') { c[1..] } else { '!' + c }
 	}
 	return '!(${c})'
 }
