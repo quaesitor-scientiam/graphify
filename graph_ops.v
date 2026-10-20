@@ -707,39 +707,135 @@ pub fn (g Graph) shortest_path(a string, b string) []string {
 // Unlike shortest_path it follows only `calls` edges, and only the way they go, so
 // it doesn't link two functions through a type they both mention.
 pub fn (g Graph) call_path(a string, b string) []string {
+	paths := g.call_paths(a, b, 1)
+	return if paths.len > 0 { paths[0] } else { []string{} }
+}
+
+// how many steps longer than the shortest a chain call_paths lists may be
+const call_path_slack = 3
+
+// how many steps call_paths takes looking for chains before it stops with those it has
+const call_path_steps = 200_000
+
+// call_paths lists the chains of calls by which `a` reaches `b`, up to `max` of them,
+// shortest first: each a different route, none through a declaration twice, none more
+// than call_path_slack steps longer than the shortest. `http.get` reaches `net.dial_tcp`
+// through a pooled transport, a fresh connection or a proxy, and the shortest is the
+// one taken least. [] when there is none, or `a` or `b` isn't found.
+pub fn (g Graph) call_paths(a string, b string, max int) [][]string {
 	idx := g.index()
 	start := g.resolve_one(a)
 	goal := g.resolve_one(b)
-	if start == '' || goal == '' {
-		return []
+	if start == '' || goal == '' || max <= 0 {
+		return [][]string{}
 	}
 	if start == goal {
-		return [start]
+		return [[start]]
 	}
-	mut prev := map[string]string{}
-	mut visited := {
-		start: true
-	}
+	// what `a` reaches, and the calls among it
+	mut callees := map[string][]string{}
 	mut queue := [start]
+	callees[start] = []string{}
 	mut head := 0
 	mut next := []string{}
 	for head < queue.len {
 		cur := queue[head]
 		head++
+		if cur == goal {
+			continue
+		}
 		idx.callees_into(cur, mut next)
+		callees[cur] = next.clone()
 		for to in next {
-			if to in visited {
-				continue
+			if to !in callees {
+				callees[to] = []string{}
+				queue << to
 			}
-			visited[to] = true
-			prev[to] = cur
-			if to == goal {
-				return reconstruct(prev, start, goal)
-			}
-			queue << to
 		}
 	}
-	return []
+	if goal !in callees {
+		return [][]string{}
+	}
+	// how many calls from each of those `b` is, back from `b`
+	mut callers := map[string][]string{}
+	for from, tos in callees {
+		for to in tos {
+			callers[to] << from
+		}
+	}
+	mut to_goal := {
+		goal: 0
+	}
+	queue = [goal]
+	head = 0
+	for head < queue.len {
+		cur := queue[head]
+		head++
+		for from in callers[cur] or { []string{} } {
+			if from !in to_goal {
+				to_goal[from] = to_goal[cur] + 1
+				queue << from
+			}
+		}
+	}
+	shortest := to_goal[start] or { return [][]string{} }
+	mut w := PathWalk{
+		callees: callees
+		to_goal: to_goal
+		goal:    goal
+		max:     max
+		steps:   call_path_steps
+	}
+	for length in shortest .. shortest + call_path_slack + 1 {
+		w.on = {
+			start: true
+		}
+		w.walk([start], length)
+		if w.found.len >= max || w.steps <= 0 {
+			break
+		}
+	}
+	return w.found
+}
+
+// PathWalk is call_paths' search for the chains of one length: the calls among what
+// `a` reaches, how far each is from the goal, the declarations on the chain so far,
+// and the chains found.
+struct PathWalk {
+	callees map[string][]string
+	to_goal map[string]int
+	goal    string
+	max     int
+mut:
+	steps int
+	on    map[string]bool
+	found [][]string
+}
+
+// walk extends `path` to every chain of `length` calls that ends at the goal.
+fn (mut w PathWalk) walk(path []string, length int) {
+	cur := path.last()
+	if cur == w.goal {
+		if path.len - 1 == length {
+			w.found << path.clone()
+		}
+		return
+	}
+	for to in w.callees[cur] or { []string{} } {
+		if w.found.len >= w.max || w.steps <= 0 {
+			return
+		}
+		w.steps--
+		left := w.to_goal[to] or { continue }
+		if to in w.on || path.len + left > length {
+			continue
+		}
+		w.on[to] = true
+		mut longer := path.clone()
+		longer << to
+		w.walk(longer, length)
+		w.on.delete(to)
+	}
 }
 
 // render_call_path renders a call_path, one step a line, each call with the lines
@@ -767,18 +863,19 @@ pub fn (g Graph) render_call_path(ids []string) string {
 	return out.join('\n')
 }
 
-// path_between answers "how does `a` reach `b`": the chain of calls from `a` to `b`
-// (call_path); else from `b` to `a`, said so; else the shortest link through any
-// relation (shortest_path), said so. '' when nothing links them.
+// path_between answers "how does `a` reach `b`": the chains of calls from `a` to `b`
+// (call_paths), up to max_call_paths, shortest first; else those from `b` to `a`, said
+// so; else the shortest link through any relation (shortest_path), said so. '' when
+// nothing links them.
 pub fn (g Graph) path_between(a string, b string) string {
-	forward := g.call_path(a, b)
+	forward := g.call_paths(a, b, max_call_paths)
 	if forward.len > 0 {
-		return g.render_call_path(forward)
+		return g.render_call_paths(forward)
 	}
-	back := g.call_path(b, a)
+	back := g.call_paths(b, a, max_call_paths)
 	if back.len > 0 {
 		return "(`${a}` doesn't reach `${b}` by calls, but `${b}` reaches `${a}`:)\n" +
-			g.render_call_path(back)
+			g.render_call_paths(back)
 	}
 	any := g.shortest_path(a, b)
 	if any.len > 0 {
@@ -786,6 +883,31 @@ pub fn (g Graph) path_between(a string, b string) string {
 			g.names(any).join(' -- ')
 	}
 	return ''
+}
+
+// the most chains of calls path_between shows
+const max_call_paths = 5
+
+// render_call_paths renders chains of calls (render_call_path): one as it is, several
+// numbered, after a line that says how many, and that there may be more when there
+// are max_call_paths.
+pub fn (g Graph) render_call_paths(paths [][]string) string {
+	if paths.len == 1 {
+		return g.render_call_path(paths[0])
+	}
+	first := g.index().symbol(paths[0][0]) or { Symbol{ name: paths[0][0] } }
+	last := g.index().symbol(paths[0].last()) or { Symbol{ name: paths[0].last() } }
+	more := if paths.len >= max_call_paths {
+		' (the first ${paths.len}; there may be more)'
+	} else {
+		''
+	}
+	mut out := ['${paths.len} chains of calls from ${first.name} to ${last.name}, shortest first${more}:']
+	for i, p in paths {
+		out << ''
+		out << '${i + 1}. ' + g.render_call_path(p)
+	}
+	return out.join('\n')
 }
 
 fn reconstruct(prev map[string]string, start string, goal string) []string {
