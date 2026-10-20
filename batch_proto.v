@@ -9,7 +9,7 @@ module graphify
 //   sym_section : sym\x02sym\x02...   (empty if no symbols)
 //   edge_section: edge\x02edge\x02... (empty if no edges)
 //   parse_error : FileResult.parse_error (empty if the file parsed cleanly)
-//   sym  : id\x01name\x01kind_int\x01sig\x01file\x01line\x01end_line\x01is_pub\x01parent\x01doc\x01recipe\x01tparams
+//   sym  : id\x01name\x01kind_int\x01sig\x01file\x01line\x01end_line\x01is_pub\x01parent\x01doc\x01recipe\x01tparams\x01build
 //   edge : from\x01to\x01kind_int\x01is_method\x01recv_type\x01file\x01recv_recipe\x01provenance_int\x01arg_sites\x01guards\x01lines
 //   lines: a calls edge's call-site lines, joined by commas
 //
@@ -45,7 +45,7 @@ fn bp_restore(s string) string {
 pub fn encode_file_result(fr FileResult) string {
 	mut sym_parts := []string{cap: fr.symbols.len}
 	for s in fr.symbols {
-		sym_parts << '${bp_clean(s.id)}${bp_fs}${bp_clean(s.name)}${bp_fs}${int(s.kind)}${bp_fs}${bp_clean(s.signature)}${bp_fs}${bp_clean(s.file)}${bp_fs}${s.line}${bp_fs}${s.end_line}${bp_fs}${if s.is_pub { '1' } else { '0' }}${bp_fs}${bp_clean(s.parent)}${bp_fs}${bp_clean(s.doc)}${bp_fs}${bp_clean(s.recipe)}${bp_fs}${bp_clean(s.tparams)}'
+		sym_parts << '${bp_clean(s.id)}${bp_fs}${bp_clean(s.name)}${bp_fs}${int(s.kind)}${bp_fs}${bp_clean(s.signature)}${bp_fs}${bp_clean(s.file)}${bp_fs}${s.line}${bp_fs}${s.end_line}${bp_fs}${if s.is_pub { '1' } else { '0' }}${bp_fs}${bp_clean(s.parent)}${bp_fs}${bp_clean(s.doc)}${bp_fs}${bp_clean(s.recipe)}${bp_fs}${bp_clean(s.tparams)}${bp_fs}${bp_clean(s.build)}'
 	}
 	mut edge_parts := []string{cap: fr.edges.len}
 	for e in fr.edges {
@@ -82,6 +82,7 @@ pub fn decode_file_result(line string) FileResult {
 				doc:       bp_restore(f[9])
 				recipe:    if f.len > 10 { f[10] } else { '' }
 				tparams:   if f.len > 11 { f[11] } else { '' }
+				build:     if f.len > 12 { f[12] } else { '' }
 			}
 		}
 	}

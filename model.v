@@ -61,6 +61,11 @@ pub mut:
 	is_pub    bool
 	parent    string // id of containing symbol, '' for top-level
 	doc       string // leading doc comment, if any
+	// build is the condition, as a `$if` would write it, under which V compiles the
+	// declaration: from its file's name (`ssl_d_use_openssl.v` is `use_openssl ?`,
+	// `os_nix.c.v` is `!windows`) and the file-scope `$if` branches it is in, joined
+	// by `&&`. Empty when every build has it. See file_build and top_level_builds.
+	build string
 	// recipe is a const's or global's type recipe (see recipe in
 	// backend_v.v), for inferring the type of a call's receiver that names
 	// it; for a free function, its comma-separated type parameters, which a

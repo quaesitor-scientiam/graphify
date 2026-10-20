@@ -1154,6 +1154,9 @@ fn resolve_edges(mut g Graph) {
 	mut fn_names := map[string]string{}
 	mut field_type := map[string]string{}
 	mut alias_of := map[string]string{}
+	// alias id -> each type it names, in the order of its declarations: more than
+	// one for an alias each build declares in its own file (`ssl.SSLConn`)
+	mut alias_targets := map[string][]string{}
 	mut sum_variants := map[string][]string{}
 	mut embeds_of := map[string][]Edge{}
 	mut field_ids := map[string]string{}
@@ -1204,6 +1207,9 @@ fn resolve_edges(mut g Graph) {
 					sum_variants[s.id] = rhs.split('|').map(it.trim_space())
 				} else {
 					alias_of[s.id] = rhs
+					if rhs !in alias_targets[s.id] {
+						alias_targets[s.id] << rhs
+					}
 				}
 			}
 			.interface_ {
@@ -1245,6 +1251,7 @@ fn resolve_edges(mut g Graph) {
 			}
 		}
 	}
+	mut builds := build_worlds(inf, alias_targets, g.symbols)
 	mut resolved := []Edge{cap: g.edges.len}
 	// variants_of maps each platform copy of a function or method to all of its
 	// copies: the same id before the `@file`, in the same module.
@@ -1282,7 +1289,25 @@ fn resolve_edges(mut g Graph) {
 				}
 				continue
 			}
-			if res := inf.infer_call(e) {
+			// what the call is in a build that takes another side of an alias
+			// (build_worlds), where that differs from what it is here
+			here := inf.infer_call(e)
+			mut in_builds := []CallResolution{}
+			if e.is_method && e.to in builds.methods {
+				in_builds = builds.infer_call(e, here)
+			}
+			if in_builds.len > 0 && (here or { CallResolution{
+				undeclared: true
+			} }).undeclared {
+				// only another build has the method
+				for r in in_builds {
+					if !unaddressable[r.id] {
+						add_resolved_call(mut resolved, mut seen_call, e, r)
+					}
+				}
+				continue
+			}
+			if res := here {
 				if res.undeclared {
 					key := '${e.from}\x00${e.to}'
 					if at := seen_call[key] {
@@ -1297,6 +1322,11 @@ fn resolve_edges(mut g Graph) {
 					continue
 				}
 				if !unaddressable[res.id] {
+					for r in in_builds {
+						if !unaddressable[r.id] {
+							add_resolved_call(mut resolved, mut seen_call, e, r)
+						}
+					}
 					// a call that reaches one platform's copy of a function reaches every copy
 					for id in variants_of[res.id] or { [res.id] } {
 						key := '${e.from}\x00${id}'
@@ -1453,6 +1483,113 @@ fn resolve_edges(mut g Graph) {
 	g.edges = expand_type_param_calls(resolved, g.edges, generic_fields, mut inf, generic_funcs)
 }
 
+// BuildWorlds is how resolve_edges sees the builds that take another side of an
+// alias declared once per build: `ssl.SSLConn` is `mbedtls.SSLConn` in
+// ssl_notd_use_openssl.v and `openssl.SSLConn` in ssl_d_use_openssl.v, one id that
+// Infer reads as one of them. Each world is an Infer whose aliases name another of
+// their types, so a call through one, `conn.connect()` on an `&ssl.SSLConn`,
+// reaches every build's method, while a call that never goes through the alias
+// resolves as it does without it.
+struct BuildWorlds {
+	// methods are the names of the methods of the types such aliases name: only a
+	// call of one of them can come out differently in another world
+	methods map[string]bool
+mut:
+	worlds []Infer
+}
+
+// build_worlds makes a world for each further type the aliases name, the most any
+// alias has, less the one `inf` takes (the type of its last declaration).
+fn build_worlds(inf Infer, alias_targets map[string][]string, symbols []Symbol) BuildWorlds {
+	mut most := 1
+	mut owners := map[string]bool{}
+	for _, targets in alias_targets {
+		if targets.len < 2 {
+			continue
+		}
+		if targets.len > most {
+			most = targets.len
+		}
+		for t in targets {
+			// a named type: `i32` against `usize` would send every `str()` here
+			short := strip_generic_args(bare_type(t)).all_after_last('.')
+			if short.len > 0 && short[0].is_capital() {
+				owners[short] = true
+			}
+		}
+	}
+	if most == 1 {
+		return BuildWorlds{}
+	}
+	mut methods := map[string]bool{}
+	for s in symbols {
+		if s.kind == .method && s.id.all_before('@').all_before_last('.').all_after_last('.') in owners {
+			methods[s.name] = true
+		}
+	}
+	mut worlds := []Infer{}
+	for k in 1 .. most {
+		mut alias_of := inf.alias_of.clone()
+		for id, targets in alias_targets {
+			if targets.len > 1 {
+				alias_of[id] = targets[(targets.len - 1 + k) % targets.len]
+			}
+		}
+		worlds << Infer{
+			...inf
+			alias_of: alias_of
+			memo:     map[string]InferredType{}
+		}
+	}
+	return BuildWorlds{
+		methods: methods
+		worlds:  worlds
+	}
+}
+
+// infer_call is what the call `e` resolves to in the other worlds, where that is
+// a declaration and not `here`, what it resolves to without them.
+fn (mut b BuildWorlds) infer_call(e Edge, here ?CallResolution) []CallResolution {
+	here_id := if r := here {
+		if r.undeclared { '' } else { r.id }
+	} else {
+		''
+	}
+	mut out := []CallResolution{}
+	for mut w in b.worlds {
+		r := w.infer_call(e) or { continue }
+		if r.undeclared || r.id == '' || r.id == here_id || out.any(it.id == r.id) {
+			continue
+		}
+		out << CallResolution{
+			...r
+			inferred: true
+		}
+	}
+	return out
+}
+
+// add_resolved_call links the call `e` to `r`, or adds its lines to the edge that
+// already does.
+fn add_resolved_call(mut resolved []Edge, mut seen_call map[string]int, e Edge, r CallResolution) {
+	key := '${e.from}\x00${r.id}'
+	if at := seen_call[key] {
+		add_lines(mut resolved, at, e.lines)
+		return
+	}
+	seen_call[key] = resolved.len
+	resolved << Edge{
+		from:       e.from
+		to:         r.id
+		kind:       .calls
+		is_method:  e.is_method
+		provenance: if r.inferred { .inferred } else { .extracted }
+		file:       e.file
+		arg_sites:  e.arg_sites
+		lines:      e.lines
+	}
+}
+
 // implicit_receiver_call is the id of the method, of the struct the calling method
 // belongs to, that a bare call of `name` in that method names. none when the caller
 // is not a method, or the struct has no method of that name.
@@ -1533,15 +1670,18 @@ fn platform_variants(e Edge, by_name map[string][]CallCand, site_of map[string]D
 	return local
 }
 
-// is_platform_file reports whether a file holds one platform's version of a
-// declaration: an OS suffix on the file name, such as `_nix` or `_windows`, or
-// the `.js.v` JavaScript backend.
+// is_platform_file reports whether a file holds one build's version of a
+// declaration: an OS suffix on the file name, such as `_nix` or `_windows`, a
+// `_d_flag` or `_notd_flag` one, or the `.js.v` JavaScript backend.
 fn is_platform_file(file string) bool {
 	name := file.all_after_last('/')
 	if name.ends_with('.js.v') {
 		return true
 	}
 	stem := name.all_before('.')
+	if stem.contains('_d_') || stem.contains('_notd_') {
+		return true
+	}
 	for suffix in ['_nix', '_windows', '_linux', '_darwin', '_macos', '_android', '_freebsd', '_openbsd', '_netbsd', '_solaris', '_ios', '_wasm', '_haiku', '_serenity'] {
 		if stem.ends_with(suffix) {
 			return true

@@ -463,7 +463,7 @@ same server works with both Claude Code and Codex:
 | --- | --- |
 | `overview` | body-less skeleton map of the whole codebase |
 | `query_graph(text, budget?, dfs?)` | token-bounded traversal from the symbols that match every word of `text` (in name, signature, file or doc), best first |
-| `get_node(node)` | a symbol + its relationships (defines, references, embeds, calls), each with file:line; a call also with the lines it is made on |
+| `get_node(node)` | a symbol + its relationships (defines, references, embeds, calls), each with file:line; a call also with the lines it is made on; for a declaration only some builds compile, their condition (`[$if use_openssl ?]`) and the other builds' declarations of it |
 | `get_body(node)` | the source of ONE declaration by name (instead of reading its file); notes when that file has changed since the graph was built |
 | `get_neighbors(node)` | names of all directly linked symbols |
 | `shortest_path(a, b)` | how `a` reaches `b`: how many chains of calls lead from `a` to `b` (at most 3 calls longer than the shortest), and the 5 shortest, each call with the line it is made on (or those from `b` to `a`); with none either way, the shortest link through any relation |
@@ -866,7 +866,13 @@ OS) and `.mcp.json.example` (as `.mcp.json`, no edits needed) into it.
 resolves on another (Windows / WSL-Linux / macOS). The graph itself doesn't
 depend on the OS that extracts it: every branch of a platform `$if` is kept,
 and CI checks that Linux, macOS and Windows extract identical graphs of the
-same V commit. All structural queries
+same V commit. A declaration only some builds compile records which, as a `$if`
+would write it (`"build": "use_openssl ?"` in graph.json), from its file's name
+(`_d_use_openssl`, `_notd_use_openssl`, `_nix`, `_linux`, `_arm64`) and the
+file-scope `$if` it is in. A call through an alias that each build declares in
+its own file, such as `ssl.SSLConn` (`mbedtls.SSLConn` by default,
+`openssl.SSLConn` with `-d use_openssl`), links to each build's method. See
+[FUTURE_WORK.md §12](FUTURE_WORK.md#12-code-that-only-some-builds-compile-design-october-2026). All structural queries
 (`query_graph`, `get_node`, `shortest_path`, `overview`, `skeleton`) need *only*
 the graph file — no source. `get_body` reads the actual source, so on a different
 machine point it at the local checkout:
