@@ -205,6 +205,45 @@ fn find_v() string {
 	return os.find_abs_path_of_executable('v') or { @VEXE }
 }
 
+// set_vroot gives the extracts the V tree to read vlib and VMODULES against, as
+// VROOT. An extract otherwise looks for the `v` on PATH, which a scheduled run's
+// PATH may lack (launchd's lacks /usr/local/bin) or may hold outside a V tree, and
+// without one it extracts no library at all, saying nothing. A VROOT already set
+// is kept; otherwise it is the tree of the `v` on PATH, else of the `v` that runs
+// this script (VEXE, which `v run` sets), else of the one that compiled it. A tree
+// in V's cache is passed over: a script V3 can't compile is compiled by its
+// v1-fallback (~/.cache/v/v1-fallback/0.5.2), whose vlib is V 0.5.2's.
+fn set_vroot(log_path string) {
+	if os.getenv('VROOT') == '' {
+		for v in [os.find_abs_path_of_executable('v') or { '' }, os.getenv('VEXE'), @VEXE] {
+			if v == '' {
+				continue
+			}
+			tree := os.dir(os.real_path(v))
+			if tree.replace('\\', '/').contains('/v1-fallback/') {
+				continue
+			}
+			if os.is_dir(os.join_path(tree, 'vlib', 'builtin')) {
+				os.setenv('VROOT', tree, true)
+				break
+			}
+		}
+	}
+	vroot := os.getenv('VROOT')
+	if vroot == '' {
+		log_line(log_path, 'no V tree found: extracting without vlib and VMODULES')
+		return
+	}
+	mut vmodules := os.getenv('VMODULES')
+	if vmodules == '' {
+		vmodules = os.join_path(os.home_dir(), '.vmodules')
+	}
+	if !os.is_dir(vmodules) {
+		vmodules = '(none)'
+	}
+	log_line(log_path, 'libraries: vlib from ${vroot}, VMODULES ${vmodules}')
+}
+
 // v_dirs_compiled_in lists the `vlib/v` directories (`v/flat`, `v/parser`, ...)
 // that graphify's programs compile in, as the V compiler reports them. The
 // rest of vlib (os, strings, ...) is compiled in too, but only these hold the
@@ -446,6 +485,8 @@ fn main() {
 		}
 	}
 
+	set_vroot(log_path)
+
 	// a pull or a rebuild shows as a graph out of date
 	exe_hash := sha256.hexhash(os.read_file(graphify_exe) or { '' })
 	vlang_head := head_of(vlang)
@@ -519,6 +560,10 @@ fn graph_out_of_date(dir string, head string, exe_hash string, vlib_head string)
 	}
 	if exe_hash != '' && m.binary_hash != exe_hash {
 		return 'graphify was rebuilt'
+	}
+	// extracted when no V tree was found (set_vroot), and one is now
+	if m.library.len == 0 && os.getenv('VROOT') != '' {
+		return 'it was extracted without its libraries'
 	}
 	if vlib_head != '' {
 		for l in m.library {
