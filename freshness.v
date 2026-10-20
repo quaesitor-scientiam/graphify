@@ -78,9 +78,9 @@ fn commits_between(root string, old string, head string) string {
 	return if n == 1 { ' (1 commit ahead)' } else { ' (${n} commits ahead)' }
 }
 
-// cli_beside is the graphify CLI next to the running executable, which is
-// what extracts the graphs that executable reads.
-pub fn cli_beside() string {
+// cli_beside is the graphify CLI next to the executable `exe`, which is what extracts
+// the graphs that executable reads.
+pub fn cli_beside(exe string) string {
 	name := $if windows { 'graphify.exe' } $else { 'graphify' }
-	return os.join_path(os.dir(os.executable()), name)
+	return os.join_path(os.dir(exe), name)
 }

@@ -146,6 +146,26 @@ jobs:
       - name: Build CLI
         run: v -o bin/graphify cmd/cli
 
+      # The MCP daemon end to end (daemon.v): two servers share one daemon, each exits
+      # with its client, and the daemon goes away once its binary is rebuilt. On
+      # Windows it runs from a copy of the binary, started detached.
+      - name: Build MCP server
+        run: v -o bin/graphify-mcp cmd/mcp
+
+      - name: Daemon end to end (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          .\bin\graphify.exe extract . --out "$env:RUNNER_TEMP\self-out"
+          python .github/scripts/daemon_smoke.py bin\graphify-mcp.exe "$env:RUNNER_TEMP\self-out\graph.json" file_stamp
+
+      - name: Daemon end to end
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          ./bin/graphify extract . --out "$RUNNER_TEMP/self-out"
+          python3 .github/scripts/daemon_smoke.py bin/graphify-mcp "$RUNNER_TEMP/self-out/graph.json" file_stamp
+
       # From a clean checkout of the same commit: building V leaves generated
       # files beside its sources, and they may differ between platforms.
       - name: Extract the pinned vlang tree (Windows)

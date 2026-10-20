@@ -156,7 +156,7 @@ fn main() {
 			''
 		}
 		// a shared graph was built by another machine's graphify: compare commits only
-		cli:          if src_dir != '' { '' } else { graphify.cli_beside() }
+		cli:          if src_dir != '' { '' } else { graphify.cli_beside(server_exe()) }
 	}
 	if daemon {
 		run_daemon(cfg)
@@ -631,7 +631,7 @@ fn start_worktree(projects_dir string, dir string, project_path string, graph_pa
 	found := graphify.worktree_graph(projects_dir, dir, project_path, graph_path, base_root) or {
 		return Worktree{}
 	}
-	cli := graphify.cli_beside()
+	cli := graphify.cli_beside(server_exe())
 	if !os.exists(cli) {
 		eprintln('graphify-mcp: ${found.root} is a worktree, but there is no ${cli} to extract it with')
 		return Worktree{}
