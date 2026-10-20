@@ -484,6 +484,9 @@ Build and register it with the client you use. The binary name gets an
 `.exe` suffix on Windows only; the rest of this doc omits it.
 
 Build with current V (the V3 compiler); run the tests with `v test .`.
+Before a push, `v run bin/test-crlf.vsh` runs them again on a checkout of HEAD with
+CRLF line ends, as Windows CI checks it out, so that a test that would fail only
+there (one comparing a multi-line string literal, say) fails here first.
 Extracting the V compiler repo peaks at about 1.3 GB. On
 macOS 27, V itself has to be built with `-cc cc` until vlang/v#29744 is
 fixed (a V binary linked by its bundled TCC can start with garbage in its
