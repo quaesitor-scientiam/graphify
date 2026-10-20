@@ -295,7 +295,7 @@ fn serve(base graphify.Graph, project_path string) Served {
 	}
 	mut g := graphify.layer_graph(project, base)
 	g.cache_index()
-	eprintln('graphify-mcp: layered ${project_path} on the base graph: ${g.base.ids.len} vlib symbols under it')
+	eprintln('graphify-mcp: layered ${project_path} on the base graph: ${g.index().base_count} vlib symbols under it')
 	return Served{
 		g:       g
 		project: project
@@ -355,7 +355,7 @@ fn call_tool(name string, args map[string]json2.Any, served Served, note string)
 		'overview' {
 			if served.layered {
 				// the project's own report: vlib's counts and hubs would drown it
-				'${served.project.report()}\n(layered on the vlib of ${g.base.root}: ${g.base.ids.len} more symbols, which the other tools reach)'
+				'${served.project.report()}\n(layered on the vlib of ${g.base.root}: ${g.index().base_count} more symbols, which the other tools reach)'
 			} else {
 				g.report()
 			}

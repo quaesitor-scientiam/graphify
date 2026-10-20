@@ -9044,7 +9044,7 @@ fn test_a_project_layered_on_the_v_tree_carries_on_into_vlib() {
 	assert g.explain('vmodules.ext.f').contains('[library]')
 	assert g.library.symbols.len == 0
 	// the project's graph itself is untouched
-	assert project.base.ids.len == 0
+	assert isnil(project.base.under)
 }
 
 fn test_a_project_graph_is_found_by_the_root_that_holds_the_directory() {

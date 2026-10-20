@@ -6,6 +6,12 @@ import v.pref
 // Index is a precomputed lookup over a Graph: symbols by id and name, plus an
 // undirected adjacency of *internal* edges (edges whose target resolves to a
 // known symbol). It powers query/path/explain without rescanning the slice.
+//
+// A layered graph's index (layer_graph) holds the project's symbols and edges only,
+// and falls through to `under`, the base's, for the vlib declarations layered under
+// the project: lookups go through symbol, has, named and neighbors_into, which see
+// both, while the fields alone are the project's part. A whole-graph walk of the
+// fields (communities, the emitters) sees that part only.
 pub struct Index {
 pub mut:
 	by_id   map[string]Symbol
@@ -17,8 +23,20 @@ pub mut:
 	// traversal, ranking or name resolution, which stay the project's
 	lib_by_id map[string]Symbol
 	lib_edges []Edge
-	// base is Graph.base.ids: the ids a layered graph took from the graph under it
-	base map[string]bool
+	// a layered graph's: the base's index, which its own falls through to; the
+	// modules from VMODULES (Base.mods), in by_id but named apart, since a name's
+	// ids list the project's, then vlib's, then theirs; the vlib side of the
+	// adjacency of each declaration that a base edge links to one of by_id's, which
+	// the base's adjacency can't give, since it doesn't say which way an edge goes;
+	// and how many symbols are the base's, vlib's and the modules'
+	under       &Index = unsafe { nil }
+	mods        map[string]bool
+	mod_by_name map[string][]string
+	fix         map[string][]string
+	base_count  int
+	// what a graph layered on this one takes from it, worked out by the first
+	// (layer_graph)
+	layer &Layer = unsafe { nil }
 }
 
 // index builds the lookup structures for a graph, or returns the ones cache_index
@@ -35,6 +53,10 @@ pub fn (g Graph) index() Index {
 // that cost about 0.4 s a call. Only for a graph that isn't changed afterwards, since
 // the kept index wouldn't follow a change.
 pub fn (mut g Graph) cache_index() {
+	// once: a copy of a graph shares the index it had when it was copied
+	if !isnil(g.index_cache) {
+		return
+	}
 	idx := g.build_index()
 	g.index_cache = &Index{
 		...idx
@@ -43,9 +65,12 @@ pub fn (mut g Graph) cache_index() {
 
 fn (g Graph) build_index() Index {
 	mut idx := Index{
-		base: g.base.ids
+		mods: g.base.mods
 	}
-	for s in g.symbols {
+	if !isnil(g.base.under) {
+		idx.under = g.base.under.index_cache
+	}
+	for i, s in g.symbols {
 		// Declarations that share an id are one logical declaration, such as a
 		// function declared once per platform (`os.read_file` in os.c.v and
 		// os_js.js.v, see disambiguate_ids); keep the one shown_before prefers,
@@ -53,7 +78,11 @@ fn (g Graph) build_index() Index {
 		// resolve doesn't take the copies for rival declarations.
 		if s.id !in idx.by_id {
 			idx.by_id[s.id] = s
-			idx.by_name[s.name] << s.id
+			if !isnil(idx.under) && i >= g.base.own {
+				idx.mod_by_name[s.name] << s.id
+			} else {
+				idx.by_name[s.name] << s.id
+			}
 		} else if shown_before(s, idx.by_id[s.id]) {
 			idx.by_id[s.id] = s
 		}
@@ -64,7 +93,7 @@ fn (g Graph) build_index() Index {
 		}
 	}
 	for e in g.edges {
-		if e.to in idx.lib_by_id && e.from in idx.by_id {
+		if e.to in idx.lib_by_id && idx.has(e.from) {
 			idx.lib_edges << e
 			continue
 		}
@@ -77,7 +106,7 @@ fn (g Graph) build_index() Index {
 			continue
 		}
 		to_id := idx.resolve(e.to)
-		if to_id == '' || e.from !in idx.by_id {
+		if to_id == '' || !idx.has(e.from) {
 			continue // skip edges to externals/unknowns
 		}
 		idx.edges << Edge{
@@ -89,7 +118,169 @@ fn (g Graph) build_index() Index {
 		idx.adj[e.from] << to_id
 		idx.adj[to_id] << e.from
 	}
+	if !isnil(idx.under) {
+		idx.fall_through()
+	}
 	return idx
+}
+
+// fall_through works out what a layered graph's index takes from the base's beyond
+// a lookup: the base's edges into the project's library, the vlib side of the
+// adjacency around a declaration of by_id's that a base edge links to (`fix`), and
+// how many symbols the base has under the project.
+fn (mut idx Index) fall_through() {
+	mut touched := map[string]bool{}
+	for e in idx.under.edges {
+		if !idx.from_under(e.from) {
+			continue
+		}
+		if e.to in idx.lib_by_id {
+			idx.lib_edges << e
+		} else if e.to in idx.by_id {
+			touched[e.from] = true
+			touched[e.to] = true
+		}
+	}
+	if touched.len > 0 {
+		for e in idx.under.edges {
+			if (e.from in touched || e.to in touched) && idx.keeps(e) {
+				if e.from in touched {
+					idx.fix[e.from] << e.to
+				}
+				if e.to in touched {
+					idx.fix[e.to] << e.from
+				}
+			}
+		}
+	}
+	mut shadowed := 0
+	for id, _ in idx.by_id {
+		if id !in idx.mods && idx.under.layer_has(id) {
+			shadowed++
+		}
+	}
+	idx.base_count = idx.under.layer.ids.len - shadowed + idx.mods.len
+}
+
+// layer_has reports whether a graph layered on the one this indexes has `id`, but
+// for the project shadowing it: whether a copy of it is declared in a layered_file.
+fn (idx &Index) layer_has(id string) bool {
+	return id in idx.layer.ids
+}
+
+// from_under reports whether `id` is one of the base's declarations a layered
+// graph's index falls through to.
+fn (idx &Index) from_under(id string) bool {
+	return !isnil(idx.under) && id !in idx.by_id && idx.under.layer_has(id)
+}
+
+// keeps reports whether a layered graph has the base's resolved edge `e`: one from a
+// declaration under it to another, or to one of its own; one into the library is a
+// lib_edges'.
+fn (idx &Index) keeps(e Edge) bool {
+	return idx.from_under(e.from) && e.to !in idx.lib_by_id
+		&& (e.to in idx.by_id || idx.from_under(e.to))
+}
+
+// symbol is the declaration `id` names, the base's under a layered graph included.
+pub fn (idx &Index) symbol(id string) ?Symbol {
+	if s := idx.by_id[id] {
+		return s
+	}
+	if !idx.from_under(id) {
+		return none
+	}
+	if s := idx.under.layer.shown[id] {
+		return s
+	}
+	return idx.under.by_id[id] or { none }
+}
+
+// has reports whether `id` names a declaration, the base's under a layered graph
+// included.
+pub fn (idx &Index) has(id string) bool {
+	return id in idx.by_id || idx.from_under(id)
+}
+
+// is_base reports whether `id` is one of the declarations a layered graph has from
+// under the project: the base's, or a module's from VMODULES.
+pub fn (idx &Index) is_base(id string) bool {
+	return id in idx.mods || idx.from_under(id)
+}
+
+// named lists the ids of the declarations named `name`: the project's, then those
+// the base has under it, then the modules'.
+pub fn (idx &Index) named(name string) []string {
+	mut out := idx.by_name[name] or { []string{} }
+	if isnil(idx.under) {
+		return out
+	}
+	if late := idx.under.layer.named[name] {
+		for id in late {
+			if id !in idx.by_id {
+				out << id
+			}
+		}
+	} else {
+		for id in idx.under.by_name[name] or { []string{} } {
+			if idx.from_under(id) {
+				out << id
+			}
+		}
+	}
+	out << idx.mod_by_name[name] or { []string{} }
+	return out
+}
+
+// neighbors_into puts the ids linked to `id` into `out`, in place of what it held:
+// the project's edges', then the base's under a layered graph. A walk reuses one
+// `out` for every step.
+pub fn (idx &Index) neighbors_into(id string, mut out []string) {
+	out.clear()
+	out << idx.adj[id] or { []string{} }
+	if isnil(idx.under) {
+		return
+	}
+	if fixed := idx.fix[id] {
+		out << fixed
+	} else if idx.from_under(id) {
+		for nb in idx.under.adj[id] or { []string{} } {
+			if idx.from_under(nb) {
+				out << nb
+			}
+		}
+	}
+}
+
+// neighbors lists the ids linked to `id` (neighbors_into).
+pub fn (idx &Index) neighbors(id string) []string {
+	mut out := []string{}
+	idx.neighbors_into(id, mut out)
+	return out
+}
+
+// edges_of lists the resolved edges from or to `id`, the base's under a layered
+// graph included, and then the edges into the library.
+fn (idx &Index) edges_of(id string) []Edge {
+	mut out := []Edge{}
+	for e in idx.edges {
+		if e.from == id || e.to == id {
+			out << e
+		}
+	}
+	if !isnil(idx.under) && idx.has(id) {
+		for e in idx.under.edges {
+			if (e.from == id || e.to == id) && idx.keeps(e) {
+				out << e
+			}
+		}
+	}
+	for e in idx.lib_edges {
+		if e.from == id || e.to == id {
+			out << e
+		}
+	}
+	return out
 }
 
 // shown_before reports whether declaration `a`, met after `b` in g.symbols,
@@ -153,17 +344,14 @@ fn backend_rank(file string) int {
 // resolve maps a raw edge target (an id or a bare name) to a symbol id, or ''
 // when it can't be resolved to a single known symbol (e.g. an external call).
 fn (idx Index) resolve(target string) string {
-	if target in idx.by_id {
+	if idx.has(target) {
 		return target
 	}
+	// a layered graph's raw name is the project's, which by_name alone lists: its
+	// edges were made among its own declarations, and the base's come resolved
+	// (layer_graph)
 	ids := idx.by_name[target] or { return '' }
-	if idx.base.len == 0 {
-		return if ids.len == 1 { ids[0] } else { '' }
-	}
-	// a layered graph's raw name is the project's: its edges were made among its own
-	// declarations, and the base's come resolved (layer_graph)
-	own := ids.filter(it !in idx.base)
-	return if own.len == 1 { own[0] } else { '' }
+	return if ids.len == 1 { ids[0] } else { '' }
 }
 
 // find returns ids of symbols whose name or signature contains any whitespace
@@ -176,12 +364,15 @@ pub fn (g Graph) find(text string) []string {
 	mut hits := []string{}
 	mut base_hits := []string{}
 	mut seen := map[string]bool{}
-	for s in g.symbols {
+	// next by hand: a `for in` walks a copy, whose from_base this one wouldn't say
+	mut all := g.all_symbols()
+	for {
+		s := all.next() or { break }
 		hay := '${s.name} ${s.signature}'.to_lower()
 		for t in terms {
 			if hay.contains(t) && s.id !in seen {
 				seen[s.id] = true
-				if s.id in g.base.ids {
+				if all.from_base() {
 					base_hits << s.id
 				} else {
 					hits << s.id
@@ -202,17 +393,16 @@ pub fn (g Graph) resolve_one(query string) string {
 		return ''
 	}
 	idx := g.index()
-	if query in idx.by_id {
+	if idx.has(query) {
 		return query
 	}
-	if ids := idx.by_name[query] {
-		if ids.len >= 1 {
-			return ids[0]
-		}
+	ids := idx.named(query)
+	if ids.len >= 1 {
+		return ids[0]
 	}
 	mut matches := []string{}
 	ql := query.to_lower()
-	for s in g.symbols {
+	for s in g.all_symbols() {
 		if s.name.to_lower().contains(ql) {
 			matches << s.id
 		}
@@ -277,6 +467,7 @@ pub fn (g Graph) query(text string, budget int, dfs bool) string {
 	// have produced anyway for any query whose reachable set already fit --
 	// it only stops walking a component far larger than any budget could use.
 	mut head := 0
+	mut nbs := []string{}
 	for head < queue.len && order.len < budget {
 		id := if dfs {
 			queue.pop()
@@ -287,7 +478,8 @@ pub fn (g Graph) query(text string, budget int, dfs bool) string {
 			head++
 		}
 		order << id
-		for nb in idx.adj[id] or { []string{} } {
+		idx.neighbors_into(id, mut nbs)
+		for nb in nbs {
 			if nb !in visited {
 				visited[nb] = true
 				queue << nb
@@ -298,7 +490,7 @@ pub fn (g Graph) query(text string, budget int, dfs bool) string {
 	mut lines := []string{}
 	mut tokens := 0
 	for id in order {
-		s := idx.by_id[id] or { continue }
+		s := idx.symbol(id) or { continue }
 		mut line := s.render()
 		if s.doc != '' {
 			// One line, not explain's full excerpt: query already returns many
@@ -338,10 +530,12 @@ pub fn (g Graph) shortest_path(a string, b string) []string {
 	// unreachable, or simply far away in a large component, hits the same
 	// O(n^2) blowup this had.
 	mut head := 0
+	mut nbs := []string{}
 	for head < queue.len {
 		cur := queue[head]
 		head++
-		for nb in idx.adj[cur] or { []string{} } {
+		idx.neighbors_into(cur, mut nbs)
+		for nb in nbs {
 			if nb in visited {
 				continue
 			}
@@ -378,9 +572,9 @@ pub fn (g Graph) explain(node string) string {
 	if id == '' {
 		return 'no symbol matches: ${node}'
 	}
-	s := idx.by_id[id] or { idx.lib_by_id[id] or { return 'no symbol matches: ${node}' } }
+	s := idx.symbol(id) or { idx.lib_by_id[id] or { return 'no symbol matches: ${node}' } }
 
-	mark := if id in idx.base || id in idx.lib_by_id { ' [library]' } else { '' }
+	mark := if idx.is_base(id) || id in idx.lib_by_id { ' [library]' } else { '' }
 	mut out := ['${s.kind.str()} ${s.name}  (${s.loc()})${mark}', s.render()]
 	// The doc comment is often the whole answer to "what does this do", which
 	// otherwise costs a file read. Capped so one rambling comment cannot blow
@@ -403,8 +597,7 @@ pub fn (g Graph) explain(node string) string {
 	mut referenced_by := []string{}
 	mut embeds := []string{}
 	mut any_inferred := false
-	related := if idx.lib_edges.len == 0 { idx.edges } else { arrays_concat(idx.edges, idx.lib_edges) }
-	for e in related {
+	for e in idx.edges_of(id) {
 		if e.from == id {
 			match e.kind {
 				.calls {
@@ -468,13 +661,22 @@ pub fn (g Graph) explain(node string) string {
 	// say plainly why they are uncertain — a short hedged list beats claiming
 	// a symbol has no callers when it has dozens.
 	if s.kind in [SymbolKind.function, .method] {
-		same_name := idx.by_name[s.name] or { []string{} }
+		same_name := idx.named(s.name)
 		if same_name.len > 1 {
 			mut maybe := []string{}
 			for e in g.edges {
-				if e.kind == .calls && e.to == s.name && e.from in idx.by_id
+				if e.kind == .calls && e.to == s.name && idx.has(e.from)
 					&& e.provenance != .undeclared {
 					maybe << label(idx, e.from)
+				}
+			}
+			// and the base's, from the declarations under a layered graph
+			if !isnil(idx.under) {
+				for e in idx.under.edges {
+					if e.kind == .calls && e.to == s.name && idx.from_under(e.from)
+						&& e.provenance != .undeclared {
+						maybe << label(idx, e.from)
+					}
 				}
 			}
 			maybe = uniq(maybe)
@@ -513,28 +715,21 @@ fn capped(items []string) string {
 }
 
 fn name_of(idx Index, id string) string {
-	s := idx.by_id[id] or { return id }
+	s := idx.symbol(id) or { return id }
 	return s.name
 }
 
 // label renders `name (file:line)` for a related symbol, falling back to its raw id.
 // A library declaration is marked, `contains (vlib/builtin/string.v:1773) [library]`.
 fn label(idx Index, id string) string {
-	if s := idx.by_id[id] {
-		mark := if id in idx.base { ' [library]' } else { '' }
+	if s := idx.symbol(id) {
+		mark := if idx.is_base(id) { ' [library]' } else { '' }
 		return '${s.name} (${s.loc()})${mark}'
 	}
 	if s := idx.lib_by_id[id] {
 		return '${s.name} (${s.loc()}) [library]'
 	}
 	return id
-}
-
-fn arrays_concat(a []Edge, b []Edge) []Edge {
-	mut out := []Edge{cap: a.len + b.len}
-	out << a
-	out << b
-	return out
 }
 
 // prov_suffix marks a resolved `calls` edge that resolve_callee had to
@@ -561,7 +756,7 @@ fn uniq(a []string) []string {
 // merge_graphs), or the graph's single root otherwise, unchanged from
 // before merged graphs were supported.
 fn (g Graph) source_root(s Symbol) string {
-	if s.id in g.base.ids {
+	if g.from_base(s.id) {
 		return g.base.root
 	}
 	for label, root in g.roots {
@@ -584,9 +779,9 @@ pub fn (g Graph) get_body(node string) string {
 		}
 		return 'no symbol matches: ${node}'
 	}
-	s := idx.by_id[id] or { return 'no symbol matches: ${node}' }
+	s := idx.symbol(id) or { return 'no symbol matches: ${node}' }
 	// a layered module from VMODULES is read where the library was (layer_graph)
-	path := if s.id in g.base.ids && s.file.starts_with(lib_vmodules_prefix) {
+	path := if s.id in idx.mods && s.file.starts_with(lib_vmodules_prefix) {
 		g.library.path_of(s.file) or { return 'cannot read ${s.file}: no library root' }
 	} else {
 		os.join_path(g.source_root(s), s.file)
@@ -599,14 +794,20 @@ pub fn (g Graph) get_body(node string) string {
 	// the file's text as the extract read it: a change since then means the
 	// captured line range may no longer be this declaration's
 	mut drift := ''
-	hashes := if s.id in g.base.ids { g.base.file_hashes } else { g.file_hashes }
-	if recorded := hashes[s.file] {
+	recorded := if idx.from_under(s.id) {
+		g.base.under.file_hashes[s.file] or { '' }
+	} else if s.id in idx.mods {
+		''
+	} else {
+		g.file_hashes[s.file] or { '' }
+	}
+	if recorded != '' {
 		if recorded != text_hash(src) {
 			drift = '// ${s.file} has changed since the graph was built, so this body may not match it\n'
 		}
 	}
 	start := if s.line > 0 { s.line - 1 } else { 0 }
-	end := decl_end(lines, s, g.symbols)
+	end := decl_end(lines, s, g.symbols_of(s.file))
 	if start >= lines.len {
 		return '(no source)'
 	}
@@ -733,11 +934,95 @@ pub fn (g Graph) neighbor_names(node string) []string {
 	}
 	mut seen := map[string]bool{}
 	mut out := []string{}
-	for nb in idx.adj[id] or { []string{} } {
+	for nb in idx.neighbors(id) {
 		name := name_of(idx, nb)
 		if name !in seen {
 			seen[name] = true
 			out << name
+		}
+	}
+	return out
+}
+
+// Symbols walks a graph's symbols, a layered graph's in the order they would have
+// if it held the base's: the project's, then each of the base's under it, then the
+// modules' from VMODULES.
+pub struct Symbols {
+	own   []Symbol
+	under []Symbol
+	at    []int // where under's layered symbols are (Layer.at)
+	mods  []Symbol
+	idx   Index
+mut:
+	part int
+	i    int
+}
+
+// all_symbols walks the graph's symbols (Symbols).
+pub fn (g Graph) all_symbols() Symbols {
+	if isnil(g.base.under) {
+		return Symbols{
+			own: g.symbols
+		}
+	}
+	idx := g.index()
+	return Symbols{
+		own:   g.symbols[..g.base.own]
+		under: g.base.under.symbols
+		at:    idx.under.layer.at
+		mods:  g.symbols[g.base.own..]
+		idx:   idx
+	}
+}
+
+pub fn (mut it Symbols) next() ?Symbol {
+	for it.part < 3 {
+		if it.part == 0 && it.i < it.own.len {
+			it.i++
+			return it.own[it.i - 1]
+		}
+		if it.part == 1 {
+			for it.i < it.at.len {
+				s := it.under[it.at[it.i]]
+				it.i++
+				// as layer_graph's: in a vlib file, with an id the project doesn't have
+				if s.id !in it.idx.by_id {
+					return s
+				}
+			}
+		}
+		if it.part == 2 && it.i < it.mods.len {
+			it.i++
+			return it.mods[it.i - 1]
+		}
+		it.part++
+		it.i = 0
+	}
+	return none
+}
+
+// from_base reports whether the symbol next returned last is one a layered graph
+// has from under the project.
+fn (it &Symbols) from_base() bool {
+	return it.part > 0
+}
+
+// from_base reports whether `id` is one of the declarations a layered graph has
+// from under the project (Index.is_base).
+fn (g Graph) from_base(id string) bool {
+	return !isnil(g.base.under) && g.index().is_base(id)
+}
+
+// symbols_of lists the declarations of `file`, or all of a graph not layered, whose
+// own are all there is to look through.
+fn (g Graph) symbols_of(file string) []Symbol {
+	if isnil(g.base.under) {
+		return g.symbols
+	}
+	mut out := []Symbol{}
+	for s in g.all_symbols() {
+		if s.file == file {
+			out << s
 		}
 	}
 	return out
