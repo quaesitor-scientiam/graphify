@@ -127,7 +127,41 @@ fn test_a_daemon_socket_too_long_for_a_unix_socket_goes_under_tmp() {
 	os.setenv('GRAPHIFY_DAEMON_DIR', '/tmp/short', true)
 	assert daemon_dir() == '/tmp/short'
 	os.setenv('GRAPHIFY_DAEMON_DIR', '/tmp/' + 'x'.repeat(90), true)
-	assert daemon_dir() == os.join_path('/tmp', 'graphify-${os.getuid()}')
+	// Windows has no /tmp: its temporary directory
+	short := if os.user_os() == 'windows' {
+		os.join_path(os.temp_dir(), 'graphify')
+	} else {
+		os.join_path('/tmp', 'graphify-${os.getuid()}')
+	}
+	assert daemon_dir() == short
+}
+
+fn test_a_daemon_running_from_a_copy_answers_for_the_binary_it_was_copied_from() {
+	old := os.getenv('GRAPHIFY_MCP_EXE')
+	defer {
+		os.setenv('GRAPHIFY_MCP_EXE', old, true)
+	}
+	os.setenv('GRAPHIFY_MCP_EXE', '', true)
+	assert server_exe() == os.executable()
+	a := Config{
+		graph_path: '/g/vlang/graph.json'
+	}
+	here := daemon_name(a)
+	// a copy, named after what it was copied from, is named as the server that copied it
+	os.setenv('GRAPHIFY_MCP_EXE', os.executable(), true)
+	assert server_exe() == os.executable()
+	assert daemon_name(a) == here
+}
+
+fn test_a_windows_argument_is_quoted_so_argv_reads_it_back() {
+	assert win_quote('--daemon') == '--daemon'
+	assert win_quote('C:\\graph data\\graph.json') == '"C:\\graph data\\graph.json"'
+	assert win_quote('') == '""'
+	// a quote, and the backslashes before it, are escaped
+	assert win_quote('a"b') == '"a\\"b"'
+	assert win_quote('a\\"b') == '"a\\\\\\"b"'
+	// backslashes before the closing quote are doubled; others are as they are
+	assert win_quote('C:\\a b\\') == '"C:\\a b\\\\"'
 }
 
 fn test_the_daemon_is_named_after_what_it_serves() {

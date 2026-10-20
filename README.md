@@ -603,8 +603,12 @@ server's 1.1 GB: four sessions (gui, vebidor, graphify, vxui) took 1.18 GB in th
 daemon, against 2.26 GB when each layer copied vlib's symbols. A daemon exits 15 minutes (`GRAPHIFY_DAEMON_IDLE` seconds) after its
 last session goes, or once none is connected when `bin/graphify-mcp` has been
 rebuilt; a rebuilt server starts a daemon of its own. Its log is beside its
-socket. `GRAPHIFY_MCP_DAEMON=0` has each server read the graphs itself, as it
-always does on Windows, and as one does when the daemon can't be reached.
+socket. On Windows (10 1803 and later, which have Unix sockets) the daemon runs
+from a copy of `graphify-mcp.exe` beside its socket, since a running `.exe` can't
+be rebuilt. It is started detached, with no console and none of the server's
+handles, so it outlives the session that started it as it does elsewhere.
+`GRAPHIFY_MCP_DAEMON=0` has each server read the graphs itself, as one does when
+the daemon can't be reached.
 
 **Stale-graph notes.** Both the CLI (on stderr) and the MCP server (at the top
 of a tool result) say when the graph may be out of date, from the

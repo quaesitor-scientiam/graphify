@@ -8,8 +8,9 @@ module main
 // session's directory, which share the base graphs (BaseCache), and goes away when
 // no server has been connected to it for daemon_idle(), or once none is when
 // its binary has been rebuilt; the socket is named after the binary, so a server
-// built since starts a daemon of its own. GRAPHIFY_MCP_DAEMON=0 has each server read
-// its graphs itself, as it does where there are no Unix sockets.
+// built since starts a daemon of its own. On Windows the daemon is a copy of the
+// binary beside its socket, since a running .exe can't be rebuilt, started detached
+// (daemon_windows.c.v). GRAPHIFY_MCP_DAEMON=0 has each server read its graphs itself.
 import os
 import net.unix
 import sync
@@ -26,10 +27,16 @@ fn daemon_idle() i64 {
 
 // daemon_enabled reports whether the server relays to a daemon.
 fn daemon_enabled() bool {
-	$if windows {
-		return false
-	}
 	return os.getenv('GRAPHIFY_MCP_DAEMON') != '0'
+}
+
+// server_exe is the server's binary: this one, or for a daemon running from a copy of
+// it (on Windows), the one the copy was made of, which the server that started the
+// daemon names in GRAPHIFY_MCP_EXE. The daemon is named after it, watches it for a
+// rebuild, and finds the graphify CLI beside it.
+fn server_exe() string {
+	exe := os.getenv('GRAPHIFY_MCP_EXE')
+	return if exe != '' { exe } else { os.executable() }
 }
 
 // daemon_dir is where the daemon's socket and log are: GRAPHIFY_DAEMON_DIR, or the
@@ -38,17 +45,23 @@ fn daemon_enabled() bool {
 fn daemon_dir() string {
 	dir := os.getenv('GRAPHIFY_DAEMON_DIR')
 	wanted := if dir != '' { dir } else { os.join_path(os.cache_dir(), 'graphify') }
-	// `/mcp-` + 16 + `.sock`, within the 103 bytes of sun_path
-	if wanted.len + 26 <= 103 {
+	// `/mcp-` + 16 + `.sock`, within the sun_path of 104 bytes (108 on Linux), or of
+	// 108 on Windows, with its terminating zero
+	if wanted.len + 26 <= max_socket_path {
 		return wanted
+	}
+	$if windows {
+		return os.join_path(os.temp_dir(), 'graphify')
 	}
 	return os.join_path('/tmp', 'graphify-${os.getuid()}')
 }
 
+const max_socket_path = $if windows { 107 } $else { 103 }
+
 // daemon_name names the daemon for this server's binary and what it serves, so that
 // servers started alike share one, and a server rebuilt since starts its own.
 fn daemon_name(cfg Config) string {
-	exe := os.executable()
+	exe := server_exe()
 	key := [file_stamp(exe), os.real_path(cfg.graph_path), cfg.projects_dir, cfg.src_dir].join('\n')
 	return 'mcp-${sha256.hexhash(key)[..16]}'
 }
@@ -85,7 +98,9 @@ fn connect_daemon(cfg Config) &unix.StreamConn {
 }
 
 // start_daemon runs this server's binary as the daemon for `cfg`. Its stdio is
-// pipes, not the client's: it puts its own in place of them (run_daemon).
+// pipes, not the client's: it puts its own in place of them (run_daemon). On Windows
+// it runs a copy of the binary, made beside the socket and named after the daemon,
+// detached (start_detached).
 fn start_daemon(cfg Config) ! {
 	mut args := ['--daemon', cfg.graph_path]
 	if cfg.src_dir != '' {
@@ -93,6 +108,17 @@ fn start_daemon(cfg Config) ! {
 	}
 	if cfg.projects_dir != '' {
 		args << ['--projects', cfg.projects_dir]
+	}
+	$if windows {
+		exe := server_exe()
+		daemon_exe := os.join_path(daemon_dir(), daemon_name(cfg) + '.exe')
+		// one made for a daemon of the same build is the same binary
+		if !os.exists(daemon_exe) {
+			os.cp(exe, daemon_exe)!
+		}
+		os.setenv('GRAPHIFY_MCP_EXE', exe, true)
+		start_detached(daemon_exe, args)!
+		return
 	}
 	mut p := os.new_process(os.executable())
 	p.set_args(args)
@@ -158,72 +184,68 @@ mut:
 // server that started it, listens, reads the base graph, and answers the servers
 // that connect until none has for daemon_idle().
 fn run_daemon(cfg Config) {
-	$if windows {
-		eprintln('graphify-mcp: no daemon on Windows')
-		exit(1)
-	} $else {
-		dir := daemon_dir()
-		os.mkdir_all(dir) or { exit(1) }
-		name := daemon_name(cfg)
-		detach(os.join_path(dir, name + '.log'))
-		socket := os.join_path(dir, name + '.sock')
-		// another started at the same time
-		if mut other := unix.connect_stream(socket) {
-			other.close() or {}
-			exit(0)
-		}
-		os.rm(socket) or {}
-		remove_dead_daemons(dir)
-		mut listener := unix.listen_stream(socket) or {
-			eprintln('graphify-mcp daemon: cannot listen at ${socket}: ${err}')
-			exit(1)
-		}
-		eprintln('graphify-mcp daemon: listening at ${socket}')
-		exe := os.executable()
-		exe_stamp := file_stamp(exe)
-		mut d := &Daemon{
-			cfg:     cfg
-			used_at: time.now().unix()
-		}
-		// the base graph is read while the first server waits for its answer
-		d.mu.lock()
-		d.bases.get(cfg.graph_path, cfg.src_dir) or {
-			eprintln('graphify-mcp daemon: cannot load ${cfg.graph_path}: ${err}')
-		}
-		gc_collect()
-		d.mu.unlock()
-		// look whether it is done at least once a minute
-		listener.set_accept_timeout(time.second * if daemon_idle() < 60 {
-			daemon_idle()
-		} else {
-			60
-		})
-		for {
-			// accept blocks with no timeout of its own: wait_for_accept has one
-			listener.wait_for_accept() or {
-				if d.done(exe, exe_stamp) {
-					break
-				}
-				continue
-			}
-			mut conn := listener.accept() or { continue }
-			// a server is quiet between its client's tool calls, for as long as it is
-			conn.set_read_timeout(time.infinite)
-			d.mu.lock()
-			d.conns++
-			d.used_at = time.now().unix()
-			d.mu.unlock()
-			spawn d.serve_conn(mut conn)
-		}
-		listener.close() or {}
-		os.rm(socket) or {}
-		eprintln('graphify-mcp daemon: done')
+	dir := daemon_dir()
+	os.mkdir_all(dir) or { exit(1) }
+	name := daemon_name(cfg)
+	detach(os.join_path(dir, name + '.log'))
+	socket := os.join_path(dir, name + '.sock')
+	// another started at the same time
+	if mut other := unix.connect_stream(socket) {
+		other.close() or {}
+		exit(0)
 	}
+	os.rm(socket) or {}
+	remove_dead_daemons(dir)
+	mut listener := unix.listen_stream(socket) or {
+		eprintln('graphify-mcp daemon: cannot listen at ${socket}: ${err}')
+		exit(1)
+	}
+	eprintln('graphify-mcp daemon: listening at ${socket}')
+	exe := server_exe()
+	exe_stamp := file_stamp(exe)
+	mut d := &Daemon{
+		cfg:     cfg
+		used_at: time.now().unix()
+	}
+	// the base graph is read while the first server waits for its answer
+	d.mu.lock()
+	d.bases.get(cfg.graph_path, cfg.src_dir) or {
+		eprintln('graphify-mcp daemon: cannot load ${cfg.graph_path}: ${err}')
+	}
+	gc_collect()
+	d.mu.unlock()
+	// look whether it is done at least once a minute
+	listener.set_accept_timeout(time.second * if daemon_idle() < 60 {
+		daemon_idle()
+	} else {
+		60
+	})
+	for {
+		// accept blocks with no timeout of its own: wait_for_accept has one
+		listener.wait_for_accept() or {
+			if d.done(exe, exe_stamp) {
+				break
+			}
+			continue
+		}
+		mut conn := listener.accept() or { continue }
+		// a server is quiet between its client's tool calls, for as long as it is
+		conn.set_read_timeout(time.infinite)
+		d.mu.lock()
+		d.conns++
+		d.used_at = time.now().unix()
+		d.mu.unlock()
+		spawn d.serve_conn(mut conn)
+	}
+	listener.close() or {}
+	os.rm(socket) or {}
+	eprintln('graphify-mcp daemon: done')
 }
 
-// remove_dead_daemons removes the socket, and the log, of each daemon in `dir` that
-// no longer listens: one killed, or one of a binary since rebuilt that went down
-// before it could.
+// remove_dead_daemons removes the socket, the log, and on Windows the copy of the
+// binary, of each daemon in `dir` that no longer listens: one killed, or one of a
+// binary since rebuilt that went down before it could. A copy still running can't be
+// removed, and stays.
 fn remove_dead_daemons(dir string) {
 	for name in os.ls(dir) or { return } {
 		if !name.ends_with('.sock') {
@@ -236,6 +258,7 @@ fn remove_dead_daemons(dir string) {
 		}
 		os.rm(path) or {}
 		os.rm(path.all_before_last('.') + '.log') or {}
+		os.rm(path.all_before_last('.') + '.exe') or {}
 	}
 }
 
@@ -315,7 +338,9 @@ fn C.setsid() int
 // started it: a copy of the client's stdin kept open would keep that server from
 // seeing its client go.
 fn detach(log string) {
-	$if !windows {
+	$if windows {
+		detach_windows(log)
+	} $else {
 		C.setsid()
 		for fd in 3 .. 256 {
 			os.fd_close(fd)
@@ -327,4 +352,38 @@ fn detach(log string) {
 		os.fd_dup2(out.fd, 1)
 		os.fd_dup2(out.fd, 2)
 	}
+}
+
+// win_quote quotes one argument of a Windows command line so that the program's
+// argv has it as it is: in quotes when it has a space, a tab or a quote, with a
+// quote and the backslashes before one, or before the closing quote, escaped.
+fn win_quote(arg string) string {
+	if arg != '' && !arg.contains_any(' \t"') {
+		return arg
+	}
+	mut out := []u8{cap: arg.len + 2}
+	out << `"`
+	mut slashes := 0
+	for c in arg {
+		if c == `\\` {
+			slashes++
+			continue
+		}
+		if c == `"` {
+			for _ in 0 .. slashes * 2 + 1 {
+				out << `\\`
+			}
+		} else {
+			for _ in 0 .. slashes {
+				out << `\\`
+			}
+		}
+		slashes = 0
+		out << c
+	}
+	for _ in 0 .. slashes * 2 {
+		out << `\\`
+	}
+	out << `"`
+	return out.bytestr()
 }
