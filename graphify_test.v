@@ -10152,6 +10152,40 @@ fn test_a_name_only_an_option_makes_true_is_not_the_default_build() {
 	assert text.all_before('\n') == '2 chains of calls from start to goal (1 in the default build), at most 3 calls longer than the shortest:', text
 }
 
+// `&&` binds tighter than `||`: a build with an `||` outside any brackets is one term,
+// `a ? && b ? || c ? && d ?`, not `a ?` and `b ? || c ?` and `d ?`, and it is the
+// default build's when some alternative of it has only names that hold by default.
+fn test_a_build_that_is_a_union_of_conjunctions_is_one_term() {
+	assert build_terms('a ? && b ? || c ? && d ?') == ['a ? && b ? || c ? && d ?']
+	assert build_terms('p ? && q ? || !p ? && q ?') == ['p ? && q ? || !p ? && q ?']
+	assert build_terms('(a ? && b ? || c ?)') == ['a ? && b ? || c ?']
+	assert build_terms('a ? && b ? || c ? && d ? && windows') == ['a ? && b ? || c ? && d ? && windows']
+	// it is still split at an `&&` outside its brackets, and not at one inside
+	assert build_terms('(a ? && b ? || c ?) && d ?') == ['a ? && b ? || c ?', 'd ?']
+	assert build_terms('a ? && (b ? && c ? || d ?) && !windows') == ['a ?', 'b ? && c ? || d ?',
+		'!windows']
+	assert build_terms('a ? || b ?') == ['a ? || b ?']
+	assert build_terms('a ? && b ? && a ?') == ['a ?', 'b ?']
+	// default: every name of some alternative holds without an option
+	assert !default_term('!p ? && q ?')
+	assert !default_term('!p ? && q ? || !p ? && r ?')
+	assert !default_term('windows && prod')
+	assert !default_term('windows && x ?')
+	assert default_term('windows && x ? || linux')
+	assert default_term('windows && !prod || x ?')
+	assert default_term('!x ? && !y ?')
+	assert default_term('(x ? || windows) && !prod || y ?')
+	// so a route is not dropped for terms its builds don't need: the first call is made
+	// in `q ?` whether or not `p ?` holds, and the second where `p ?` doesn't
+	g := graph_of({
+		'm/a.v': 'module m\n\npub fn goal() {}\n\npub fn start() {\n\t\$if p ? && q ? {\n\t\tmid()\n\t}\n\t\$if !p ? && q ? {\n\t\tmid()\n\t}\n}\n\nfn mid() {\n\t\$if !p ? {\n\t\tgoal()\n\t}\n}\n'
+	})
+	r := g.count_call_paths('start', 'goal', 5)
+	assert r.total == 1 && r.in_default == 0, r.str()
+	text := g.path_between('start', 'goal')
+	assert text.contains('  needs \$if (p ? && q ? || !p ? && q ?) && !p ?'), text
+}
+
 // A route of calls through declarations or calls of builds that contradict each
 // other, `use_openssl ?` and `!use_openssl ?`, is in no build, and isn't one. The
 // others say what they need, and those the default build has come first, even when
