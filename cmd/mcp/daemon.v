@@ -222,7 +222,7 @@ fn run_daemon(cfg Config) {
 	})
 	for {
 		mut conn := listener.accept() or {
-			if d.done(exe, exe_stamp) {
+			if d.check(dir, name, exe, exe_stamp) {
 				break
 			}
 			continue
@@ -252,12 +252,22 @@ const orphan_age = 60
 // once its log is `orphan_age` old, and when it has a log at all (a copy made for a
 // daemon about to start has none). A copy still running can't be removed, and stays.
 fn remove_dead_daemons(dir string, own string) {
-	remove_gone_daemons(dir, own, orphan_age)
+	remove_gone_daemons(dir, own, orphan_age, true)
+}
+
+// remove_exited_daemons is remove_dead_daemons for a daemon that is running: it clears
+// away only the daemons that went down on their own, and leaves one with a socket
+// alone, as it can only tell whether that one is listening by connecting to it, which a
+// daemon takes for a session, and so for use, and which keeps it up. A killed daemon's
+// socket, and what goes with it, is left for the next to start.
+fn remove_exited_daemons(dir string, own string) {
+	remove_gone_daemons(dir, own, orphan_age, false)
 }
 
 // remove_gone_daemons is remove_dead_daemons with the age of log, in seconds, that a
-// daemon with no socket needs to count as gone.
-fn remove_gone_daemons(dir string, own string, min_age i64) {
+// daemon with no socket needs to count as gone, and with whether to connect to a
+// socket to see if anything listens at it.
+fn remove_gone_daemons(dir string, own string, min_age i64, probe bool) {
 	mut names := map[string]bool{}
 	for file in os.ls(dir) or { return } {
 		if is_daemon_file(file) {
@@ -273,6 +283,9 @@ fn remove_gone_daemons(dir string, own string, min_age i64) {
 		socket := base + '.sock'
 		log := base + '.log'
 		if os.exists(socket) {
+			if !probe {
+				continue
+			}
 			if mut conn := unix.connect_stream(socket) {
 				conn.close() or {}
 				continue
@@ -300,6 +313,17 @@ fn is_daemon_file(file string) bool {
 		}
 	}
 	return file[21..] in ['sock', 'log', 'exe']
+}
+
+// check is what the daemon does when no server has connected for a while (at most a
+// minute): it reports whether the daemon is done, and when it is not, clears away the
+// files of a daemon that has exited since it started (remove_exited_daemons).
+fn (mut d Daemon) check(dir string, name string, exe string, exe_stamp string) bool {
+	if d.done(exe, exe_stamp) {
+		return true
+	}
+	remove_exited_daemons(dir, name)
+	return false
 }
 
 // done drops each App no session has asked for in daemon_idle(), and reports whether
