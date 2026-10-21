@@ -10144,3 +10144,126 @@ fn plain_check() {
 	assert default_term('!a ?') && default_term('windows') && default_term('a ? || linux')
 	assert !default_term('a ?') && !default_term('a ? || b ?') && !default_term('js')
 }
+
+// A route that needs a build and its opposite is in no build, whichever declarations
+// and calls the two come from: a call and its callee in the one step, the nested
+// conditions of one call, or the first function and a later call. One that doesn't
+// is a route.
+fn test_a_route_is_in_no_build_when_any_two_of_its_terms_are_opposite() {
+	// a call made under `use_openssl ?` to a function only `!use_openssl ?` has
+	same_step := graph_of({
+		'net/a.v':                      'module net
+
+pub fn goal() {}
+
+pub fn start() {
+	\$if use_openssl ? {
+		only_plain()
+	}
+}
+'
+		'net/plain_notd_use_openssl.v': 'module net
+
+fn only_plain() {
+	goal()
+}
+'
+	})
+	r := same_step.count_call_paths('start', 'goal', 5)
+	assert r.total == 0 && r.paths.len == 0, r.str()
+	// one call under `x ?` and, inside it, `!x ?`
+	nested := graph_of({
+		'm/a.v': 'module m
+
+pub fn goal() {}
+
+pub fn start() {
+	\$if x ? {
+		\$if !x ? {
+			goal()
+		}
+	}
+}
+'
+	})
+	n := nested.count_call_paths('start', 'goal', 5)
+	assert n.total == 0 && n.paths.len == 0, n.str()
+	// a first function only `!use_openssl ?` has, and a later call under `use_openssl ?`
+	first := graph_of({
+		'net/a.v':                      'module net
+
+pub fn goal() {}
+'
+		'net/plain_notd_use_openssl.v': 'module net
+
+fn start() {
+	\$if use_openssl ? {
+		goal()
+	}
+}
+'
+	})
+	f := first.count_call_paths('start', 'goal', 5)
+	assert f.total == 0 && f.paths.len == 0, f.str()
+	// the same call to a function only `use_openssl ?` has is a route, in that build
+	agree := graph_of({
+		'net/a.v':                 'module net
+
+pub fn goal() {}
+
+pub fn start() {
+	\$if use_openssl ? {
+		only_ssl()
+	}
+}
+'
+		'net/ssl_d_use_openssl.v': 'module net
+
+fn only_ssl() {
+	goal()
+}
+'
+	})
+	a := agree.count_call_paths('start', 'goal', 5)
+	assert a.total == 1 && a.in_default == 0 && a.paths.len == 1, a.str()
+	assert a.other_builds == {
+		'use_openssl ?': 1
+	}, a.other_builds.str()
+}
+
+// Routes that need the same builds count as one entry in the builds of the routes the
+// default build hasn't, whichever order they meet the builds in.
+fn test_routes_that_need_the_same_builds_are_counted_together() {
+	g := graph_of({
+		'm/a.v': 'module m
+
+pub fn goal() {}
+
+pub fn start() {
+	\$if x ? {
+		r1()
+	}
+	\$if y ? {
+		r2()
+	}
+}
+
+fn r1() {
+	\$if y ? {
+		goal()
+	}
+}
+
+fn r2() {
+	\$if x ? {
+		goal()
+	}
+}
+'
+	})
+	r := g.count_call_paths('start', 'goal', 5)
+	assert r.total == 2 && r.in_default == 0, r.str()
+	assert r.other_builds.len == 1 && r.other_builds['x ? && y ?'] == 2, r.other_builds.str()
+	one := g.render_call_paths(g.count_call_paths('start', 'goal', 1))
+	assert one.ends_with('(1 more that only other builds have; the builds of all 2 such: \$if x ? && y ? (2))'), one
+}

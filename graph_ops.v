@@ -943,7 +943,10 @@ fn (mut w PathWalk) walk(path []string, length int) {
 					w.found << path.clone()
 				}
 			} else {
-				w.other_builds[terms_build(w.terms.keys())]++
+				// sorted: routes that need the same builds meet them in another order
+				mut need := w.terms.keys()
+				need.sort()
+				w.other_builds[terms_build(need)]++
 				if w.found_other.len < w.max {
 					w.found_other << path.clone()
 				}
@@ -961,7 +964,7 @@ fn (mut w PathWalk) walk(path []string, length int) {
 			continue
 		}
 		terms := w.step_terms[cur + '\0' + to] or { []string{} }
-		if terms.any(opposite_term(it) in w.terms) {
+		if w.contradicts(terms) {
 			continue
 		}
 		w.on[to] = true
@@ -977,6 +980,19 @@ fn (mut w PathWalk) walk(path []string, length int) {
 			}
 		}
 	}
+}
+
+// contradicts reports whether a route that takes a step with `terms`, the builds of
+// its call and its callee, is in no build: some term has its opposite among them, or
+// among the terms of the chain so far.
+fn (w &PathWalk) contradicts(terms []string) bool {
+	for t in terms {
+		opposite := opposite_term(t)
+		if opposite in terms || opposite in w.terms {
+			return true
+		}
+	}
+	return false
 }
 
 fn (mut w PathWalk) add_terms(terms []string) {
