@@ -1650,3 +1650,35 @@ On vlang `417c85b1ec`, against master:
   before. The 3 new ones go through `openssl.SSLConn.dial`.
 - **Cost:** extraction time and peak memory are unchanged, within noise
   (6.6–7.6 s, 2.35 GB).
+
+### PR 2: build conditions on calls (October 2026)
+
+- **Conditions on calls.** A call in a function body records the conditions of the
+  `$if` branches around it, outermost first, joined by `&&`: `Edge.build`, written
+  to graph.json only when it isn't empty.
+  - The walk passes the conditions down in `V3CallCtx.builds`, the way
+    `ctx.guards` carries the conditions on a type parameter.
+  - The block of a `$if` takes its condition, and an `$else` its negation. An
+    `$else $if` is a `$if` nested in the `$else`.
+  - Each condition is read from the source, as a declaration's is (`build_cond`).
+- **Conditions that pick no build.** A `$if` that tests a type (`T is X`, `x in
+  [A, B]`) or a member of a value (`field.is_array` in a `$for`) picks no build:
+  every build compiles one branch or another of it (`is_build_cond`).
+- **One callee called more than once.** One edge stands for every call of its
+  callee in a declaration, so its condition is that of any call site: `a || b`
+  across two `$if`s, and empty, every build, once one call is outside any `$if`
+  (`either_build`).
+- **Brackets.** A condition with an `||` of its own is put in brackets beside an
+  `&&` (`grouped_build`). PR 1 wrote `a && b || c` for `a && (b || c)`.
+- **Display.** `get_node` marks a call that only some builds make, in both
+  directions: `a (m/m.v:7) at line 27 [$if linux]`.
+
+On vlang, against master:
+
+- **Edges:** 618,154 before and after, the same apart from `build`. 12,378 of the
+  313,536 call edges have one. The most common are `linux && sokol_wayland ?`
+  (1,504), `windows` (1,446) and `darwin` (1,056).
+- **Host-independence:** no condition names the host.
+- **Declarations:** 150 conditions change, each now bracketed as it means:
+  `darwin && (gg_multiwindow ? || x_multiwindow_render ?)`.
+- **Cost:** extraction time is unchanged.

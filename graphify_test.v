@@ -9888,7 +9888,7 @@ pub fn everywhere() {}
 	assert build['net.Y'].build == 'fast ? && !no_y ?'
 	// a field is in its struct's branch
 	assert build['net.Y.a'].build == 'fast ? && !no_y ?'
-	assert build['net.ab'].build == 'fast ? && a ? || b ?'
+	assert build['net.ab'].build == 'fast ? && (a ? || b ?)'
 	assert build['net.not_ab'].build == 'fast ? && !(a ? || b ?)'
 	assert build['net.everywhere'].build == 'fast ?'
 	// as the source writes it: the parser's text has the host's OS for `@OS`
@@ -9968,4 +9968,103 @@ pub fn run(c &pick.Conn) {
 	text := g.explain('tls.pick.Conn')
 	assert text.contains('type Conn  (tls/pick/pick_notd_use_b.v:5) [\$if !use_b ?]'), text
 	assert text.contains('other builds  : pub type Conn = tls.mb.Conn (tls/pick/pick_d_use_b.v:5) [\$if use_b ?]'), text
+}
+
+// A call inside a body's `$if` is made only by the builds that take its branch
+// (Edge.build). One callee called under two branches is called by either build, and
+// called outside any, by every build. A `$if` on a type or a member picks no build.
+fn test_a_call_carries_the_build_of_the_dollar_if_branches_it_is_in() {
+	g := graph_of({
+		'm/m.v': 'module m
+
+struct S {
+	xs []int
+}
+
+fn a() {}
+
+fn b() {}
+
+fn c() {}
+
+fn d() {}
+
+fn e() {}
+
+fn h() {}
+
+fn k() {}
+
+fn g() {}
+
+fn t() {}
+
+pub fn f() {
+	\$if linux {
+		a()
+	} \$else {
+		b()
+	}
+	\$if use_x ? {
+		c()
+	}
+	c()
+	\$if windows {
+		\$if amd64 {
+			d()
+		}
+		h()
+	}
+	\$if a ? || b ? {
+		e()
+	}
+	\$if linux {
+		h()
+		\$if x ? || y ? {
+			k()
+		}
+	}
+	\$for field in S.fields {
+		\$if field.is_array {
+			g()
+		}
+	}
+}
+
+pub fn gen[T](x T) {
+	\$if T is int {
+		t()
+	}
+}
+'
+	})
+	builds := fn [g] (to string) string {
+		for e in g.edges {
+			if e.kind == .calls && e.to == to {
+				return e.build
+			}
+		}
+		return 'no call'
+	}
+	assert builds('m.a') == 'linux'
+	assert builds('m.b') == '!linux'
+	// called outside the `$if` as well
+	assert builds('m.c') == ''
+	assert builds('m.d') == 'windows && amd64'
+	assert builds('m.e') == 'a ? || b ?'
+	assert builds('m.h') == 'windows || linux'
+	assert builds('m.k') == 'linux && (x ? || y ?)'
+	// a member of the `$for` variable, and a type parameter: every build
+	assert builds('m.g') == ''
+	assert builds('m.t') == ''
+	// through a worker's batch
+	syms, edges := extract_v_text('module m\n\nfn a() {}\n\nfn f() {\n\t\$if linux {\n\t\ta()\n\t}\n}\n',
+		'm/m.v')
+	fr := decode_file_result(encode_file_result(FileResult{ symbols: syms, edges: edges }))
+	assert fr.edges.filter(it.kind == .calls && it.to == 'a').map(it.build) == ['linux']
+	// get_node says which builds make a call, both ways
+	text := g.explain('m.f')
+	assert text.contains('a (m/m.v:7) at line 27 [\$if linux], b (m/m.v:9) at line 29 [\$if !linux], c (m/m.v:11) at lines 32, 34, d'), text
+	assert text.contains('h (m/m.v:17) at lines 39, 45 [\$if windows || linux]'), text
+	assert g.explain('m.k').contains('f (m/m.v:25) at line 47 [\$if linux && (x ? || y ?)]')
 }

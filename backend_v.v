@@ -1035,7 +1035,67 @@ fn join_build(a string, b string) string {
 	if b == '' {
 		return a
 	}
-	return '${a} && ${b}'
+	return '${grouped_build(a)} && ${grouped_build(b)}'
+}
+
+// either_build is the condition that `a` or `b` holds, for two call sites of one
+// edge: empty, every build, when either is.
+fn either_build(a string, b string) string {
+	if a == '' || b == '' {
+		return ''
+	}
+	if a == b {
+		return a
+	}
+	return '${grouped_build(a)} || ${grouped_build(b)}'
+}
+
+// grouped_build is `cond` in brackets when it has a `||` outside any brackets of its
+// own, so that it keeps its meaning beside an `&&`.
+fn grouped_build(cond string) string {
+	mut depth := 0
+	for i := 0; i < cond.len; i++ {
+		match cond[i] {
+			`(` {
+				depth++
+			}
+			`)` {
+				depth--
+			}
+			`|` {
+				if depth == 0 && i + 1 < cond.len && cond[i + 1] == `|` {
+					return '(${cond})'
+				}
+			}
+			else {}
+		}
+	}
+	return cond
+}
+
+// is_build_cond reports whether a `$if` condition, as the parser keeps it, picks
+// builds: a flag, an OS, `@OS == 'linux'`, joined by `&&`, `||` and `!`. One that
+// tests a type, `T is X` or `x in [A, B]`, or a member of a value, `field.is_option`
+// in a `$for`, picks no build: every build compiles one branch or another of it.
+fn is_build_cond(cond string) bool {
+	mut c := cond
+	// a string literal is no name: `@OS == 'macos'`
+	for q in ['\'', '"'] {
+		for {
+			start := c.index(q) or { break }
+			end := c.index_after(q, start + 1) or { break }
+			c = c[..start] + c[end + 1..]
+		}
+	}
+	if c.contains('.') {
+		return false
+	}
+	for word in c.replace('(', ' ').replace(')', ' ').replace('!', ' ').fields() {
+		if word in ['is', 'in'] {
+			return false
+		}
+	}
+	return true
 }
 
 // negate_build is the condition under which `cond` doesn't hold: `!x ?` for
@@ -1647,6 +1707,9 @@ struct V3CallCtx {
 	// guards are the comptime conditions on a type parameter that the block being walked
 	// is compiled under, each `+cond` or `-cond` (see guarded)
 	guards []string
+	// builds are the conditions of the `$if` branches around the block being walked,
+	// outermost first, under which V compiles its calls (see built, Edge.build)
+	builds []string
 mut:
 	locals map[string]string
 	vars   map[string]string
@@ -1735,6 +1798,17 @@ fn is_tparam_recipe(recipe string, tparams []string) bool {
 // guarded is `ctx` with the comptime condition `cond` known to hold (`+`) or to fail
 // (`-`) in the block it walks: a `$if` block holds its condition, and the `$else`
 // blocks after it fail it.
+// built is `ctx` in the branch of a `$if` whose condition is `cond`, `linux` or
+// `!use_openssl ?` (see Edge.build).
+fn (ctx V3CallCtx) built(cond string) V3CallCtx {
+	mut builds := ctx.builds.clone()
+	builds << cond
+	return V3CallCtx{
+		...ctx
+		builds: builds
+	}
+}
+
 fn (ctx V3CallCtx) guarded(sign string, cond string) V3CallCtx {
 	mut guards := ctx.guards.clone()
 	guards << sign + cond
@@ -2046,6 +2120,17 @@ fn (mut f V3File) walk(id flat.NodeId, ctx V3CallCtx, mut edges []Edge, mut seen
 					f.walk_list(kids[1..], ctx, mut edges, mut seen)
 					return ctx
 				}
+			}
+			// `$if linux { ... }`, `$if use_openssl ? { ... }`: a branch's calls are made
+			// only in the builds that take it, the block's when the condition holds and
+			// an `$else`'s when it doesn't (an `$else $if` is a `$if` nested in it)
+			if kids.len > 0 && is_build_cond(n.value) {
+				c := f.build_cond(n)
+				for i, k in kids {
+					f.walk(k, ctx.built(if i == 0 { c } else { negate_build(c) }), mut edges, mut
+						seen)
+				}
+				return ctx
 			}
 		}
 		.comptime_for {
@@ -3240,13 +3325,18 @@ fn (mut f V3File) record_call(callee_id flat.NodeId, args []flat.NodeId, ctx V3C
 	// under different ones are different edges
 	guards := if is_method { ctx.guards.join(recipe_sep) } else { '' }
 	key := '${name}\x00${rt}\x00${recipe}\x00${value_call}\x00${guards}'
+	// the builds that compile this call site (Edge.build)
+	mut build := ''
+	for c in ctx.builds {
+		build = join_build(build, c)
+	}
 	// a non-method call keeps its argument recipes, one site at a time, since a generic
 	// callee's type parameters come from every call site; a repeat call merges into the
 	// edge its first call made
 	site := if is_method { '' } else { f.type_arg_site(callee_id) + f.arg_site(args, ctx) }
 	line := f.line_of(f.node(callee_id).pos.offset)
 	if key in seen {
-		add_call_site(mut edges, ctx.from, name, rt, recipe, guards, site, line)
+		add_call_site(mut edges, ctx.from, name, rt, recipe, guards, site, line, build)
 		return
 	}
 	seen[key] = true
@@ -3262,6 +3352,7 @@ fn (mut f V3File) record_call(callee_id flat.NodeId, args []flat.NodeId, ctx V3C
 		arg_sites:   if is_method { '' } else { site + arg_site_end }
 		guards:      guards
 		lines:       [line]
+		build:       build
 	}
 }
 
@@ -3300,8 +3391,9 @@ fn (f &V3File) type_arg_site(callee_id flat.NodeId) string {
 }
 
 // add_call_site records one more call site of a call that an edge from `from` in this
-// body already records: its line, and for a non-method call its argument recipes.
-fn add_call_site(mut edges []Edge, from string, to string, recv_type string, recipe string, guards string, site string, line int) {
+// body already records: its line, the build that compiles it, and for a non-method call
+// its argument recipes.
+fn add_call_site(mut edges []Edge, from string, to string, recv_type string, recipe string, guards string, site string, line int, build string) {
 	for i := edges.len - 1; i >= 0 && edges[i].from == from; i-- {
 		e := edges[i]
 		if e.to == to && e.kind == .calls && e.recv_type == recv_type
@@ -3310,6 +3402,7 @@ fn add_call_site(mut edges []Edge, from string, to string, recv_type string, rec
 				...e
 				arg_sites: if e.is_method { '' } else { e.arg_sites + site + arg_site_end }
 				lines:     add_line(e.lines, line)
+				build:     either_build(e.build, build)
 			}
 			return
 		}
