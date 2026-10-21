@@ -698,6 +698,14 @@ each with its reason in the log (`extracting graph (its commit moved)...`).
 Uncommitted edits, and a module there that isn't a git clone, aren't seen;
 `-Force` re-extracts every graph.
 
+The extracts read `vlib` and `~/.vmodules` from the V tree in `VROOT`, which the
+script sets when it is empty. It takes the tree of the `v` on `PATH`, else of the
+`v` running the script, since a scheduled task's `PATH` may have no `v`. Without
+a V tree an extract has no libraries: calls into `vlib` and `~/.vmodules` stay
+unresolved. The log names the tree on each run (`libraries: vlib from …,
+VMODULES …`). A graph extracted without its libraries is out of date once a tree
+is found (`extracting graph (it was extracted without its libraries)...`).
+
 graphify's own checkout is fast-forwarded first, so a change merged to
 master reaches every machine on its next scheduled run. A checkout with
 uncommitted changes, or not on a branch, is left as it is, and a failed pull
