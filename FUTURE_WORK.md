@@ -1682,3 +1682,45 @@ On vlang, against master:
 - **Declarations:** 150 conditions change, each now bracketed as it means:
   `darwin && (gg_multiwindow ? || x_multiwindow_render ?)`.
 - **Cost:** extraction time is unchanged.
+
+### PR 3: builds in routes (October 2026)
+
+- **Routes in one build.** `shortest_path` keeps a chain of calls only if its
+  builds can all hold at once. A route's builds are those of its declarations and
+  of its calls, split into the terms joined by `&&` (`build_terms`). A route with a
+  term and its opposite, `use_openssl ?` and `!use_openssl ?`, is in no build and is
+  dropped as the walk meets it (`opposite_term`). As planned, only that plain
+  contradiction is ruled out. `windows` against `linux` isn't.
+- **Builds for calls through an alias.** A call that comes out differently in
+  another alias world (PR 1) now needs the build of the alias declaration that
+  names its callee's type. `net_ssl_do`'s `dial` is `openssl.SSLConn.dial` under
+  `use_openssl ?` and `mbedtls.SSLConn.dial` under `!use_openssl ?`. Without this,
+  the OpenSSL routes carried no build, because the condition sits on
+  `ssl.SSLConn`, not on the call. A call that resolves by its unique name before
+  the worlds are asked gets none.
+- **Marks.** Each step of a route says the build its call and its callee need, ` [$if
+  use_openssl ?]`. A route that needs one ends with `needs $if …`.
+- **Default build first.** A route is the default build's unless one of its terms
+  needs an option on the command line: a `-d` flag, `x ?`, or the `js` or `native`
+  backend (`default_term`). A term naming an OS holds on that OS's default build.
+  The default build's routes are listed first, then the others, each shortest first.
+  The count says how many are the default build's. When routes of other builds
+  don't fit among the 5 shown, a last line gives their builds, with how many routes
+  each.
+- The index keeps each declaration's build and each call's (`Index.builds`,
+  `Index.call_builds`), so the walk doesn't scan the edges. For an id that several
+  files declare, the build is that of any of them.
+
+On vlang `22b23697e8`, against master:
+
+- **Edges:** the same, apart from `build` on 130 call edges: 63 gain
+  `use_openssl ?` and 63 `!use_openssl ?`, and 4 add one of them to
+  `macos || linux`. They are in `net`, `net.http`, `db.redis`, `net.websocket`,
+  `net.imap`, `net.smtp` and `veb`'s tests.
+- **Q3:** `shortest_path http.get net.dial_tcp` counts 10 chains, as before, and
+  says 7 are the default build's. The 5 shown are all default-build routes. The
+  last line gives the other 3 routes' builds: `use_openssl ?` (2) and
+  `windows && !no_vschannel ? && use_openssl ?` (1). None of Q3's routes was
+  contradictory.
+- **Cost:** extraction time is unchanged (7.9–8.8 s for both). A path answer
+  takes about 1.1 s from the CLI, as before.

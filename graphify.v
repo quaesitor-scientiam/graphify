@@ -1157,6 +1157,8 @@ fn resolve_edges(mut g Graph) {
 	// alias id -> each type it names, in the order of its declarations: more than
 	// one for an alias each build declares in its own file (`ssl.SSLConn`)
 	mut alias_targets := map[string][]string{}
+	// each type such an alias names -> the build of the declarations that name it
+	mut target_build := map[string]string{}
 	mut sum_variants := map[string][]string{}
 	mut embeds_of := map[string][]Edge{}
 	mut field_ids := map[string]string{}
@@ -1210,6 +1212,12 @@ fn resolve_edges(mut g Graph) {
 					if rhs !in alias_targets[s.id] {
 						alias_targets[s.id] << rhs
 					}
+					target := strip_generic_args(bare_type(rhs))
+					target_build[target] = if b := target_build[target] {
+						either_build(b, s.build)
+					} else {
+						s.build
+					}
 				}
 			}
 			.interface_ {
@@ -1252,6 +1260,20 @@ fn resolve_edges(mut g Graph) {
 		}
 	}
 	mut builds := build_worlds(inf, alias_targets, g.symbols)
+	// the build a call that comes out differently in another world needs: that of the
+	// alias declarations that name its callee's type, `use_openssl ?` for
+	// `openssl.SSLConn.dial` through `ssl.SSLConn`
+	// (the type's id may have a label before the module the alias names it by:
+	// `vlib.net.openssl.SSLConn`)
+	world_build := fn [target_build] (e Edge, id string) string {
+		owner := id.all_before('@').all_before_last('.')
+		for target, b in target_build {
+			if owner == target || owner.ends_with('.' + target) {
+				return join_build(e.build, b)
+			}
+		}
+		return e.build
+	}
 	mut resolved := []Edge{cap: g.edges.len}
 	// variants_of maps each platform copy of a function or method to all of its
 	// copies: the same id before the `@file`, in the same module.
@@ -1302,7 +1324,10 @@ fn resolve_edges(mut g Graph) {
 				// only another build has the method
 				for r in in_builds {
 					if !unaddressable[r.id] {
-						add_resolved_call(mut resolved, mut seen_call, e, r)
+						add_resolved_call(mut resolved, mut seen_call, Edge{
+							...e
+							build: world_build(e, r.id)
+						}, r)
 					}
 				}
 				continue
@@ -1324,14 +1349,26 @@ fn resolve_edges(mut g Graph) {
 				if !unaddressable[res.id] {
 					for r in in_builds {
 						if !unaddressable[r.id] {
-							add_resolved_call(mut resolved, mut seen_call, e, r)
+							add_resolved_call(mut resolved, mut seen_call, Edge{
+								...e
+								build: world_build(e, r.id)
+							}, r)
 						}
+					}
+					// here's build too, when another world has a call of its own
+					he := if in_builds.len > 0 {
+						Edge{
+							...e
+							build: world_build(e, res.id)
+						}
+					} else {
+						e
 					}
 					// a call that reaches one platform's copy of a function reaches every copy
 					for id in variants_of[res.id] or { [res.id] } {
 						key := '${e.from}\x00${id}'
 						if at := seen_call[key] {
-							add_lines(mut resolved, at, e)
+							add_lines(mut resolved, at, he)
 							if !res.inferred && resolved[at].provenance == .inferred {
 								resolved[at] = Edge{
 									...resolved[at]
@@ -1350,7 +1387,7 @@ fn resolve_edges(mut g Graph) {
 							file:       e.file
 							arg_sites:  e.arg_sites
 							lines:      e.lines
-							build:      e.build
+							build:      he.build
 						}
 					}
 					continue

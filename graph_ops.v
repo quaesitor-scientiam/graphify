@@ -40,6 +40,12 @@ pub mut:
 	// the declarations each one calls, from the resolved `calls` edges: what call_path
 	// follows, one way
 	callees map[string][]string
+	// the build each declaration needs (Symbol.build), by id, and each call (Edge.build),
+	// by `from` and `to` joined by \0, where some build doesn't have it: the conditions
+	// call_paths keeps a route to. For an id that several files declare, the build of
+	// any of them.
+	builds      map[string]string
+	call_builds map[string]string
 }
 
 // index builds the lookup structures for a graph, or returns the ones cache_index
@@ -79,7 +85,8 @@ fn (g Graph) build_index() Index {
 		// os_js.js.v, see disambiguate_ids); keep the one shown_before prefers,
 		// which explain/get_body/query then show. by_name lists the id once, so
 		// resolve doesn't take the copies for rival declarations.
-		if s.id !in idx.by_id {
+		first := s.id !in idx.by_id
+		if first {
 			idx.by_id[s.id] = s
 			if !isnil(idx.under) && i >= g.base.own {
 				idx.mod_by_name[s.name] << s.id
@@ -88,6 +95,19 @@ fn (g Graph) build_index() Index {
 			}
 		} else if shown_before(s, idx.by_id[s.id]) {
 			idx.by_id[s.id] = s
+		}
+		if first {
+			if s.build != '' {
+				idx.builds[s.id] = s.build
+			}
+		} else if b := idx.builds[s.id] {
+			// a call reaches whichever copy a build compiles
+			either := either_build(b, s.build)
+			if either == '' {
+				idx.builds.delete(s.id)
+			} else {
+				idx.builds[s.id] = either
+			}
 		}
 	}
 	for s in g.library.symbols {
@@ -123,6 +143,18 @@ fn (g Graph) build_index() Index {
 		idx.adj[e.from] << to_id
 		idx.adj[to_id] << e.from
 		if e.kind == .calls {
+			key := e.from + '\0' + to_id
+			if b := idx.call_builds[key] {
+				either := either_build(b, e.build)
+				if either == '' {
+					idx.call_builds.delete(key)
+				} else {
+					idx.call_builds[key] = either
+				}
+			} else if e.build != '' && to_id !in idx.callees[e.from] {
+				// (an earlier edge to the same callee without one stands for every build)
+				idx.call_builds[key] = e.build
+			}
 			idx.callees[e.from] << to_id
 		}
 	}
@@ -272,6 +304,30 @@ fn (idx &Index) callees_into(id string, mut out []string) {
 			}
 		}
 	}
+}
+
+// decl_build is the build declaration `id` needs (Index.builds), the base's under a
+// layered graph included: '' for every build.
+fn (idx &Index) decl_build(id string) string {
+	if id in idx.by_id {
+		return idx.builds[id] or { '' }
+	}
+	if idx.from_under(id) {
+		return idx.under.builds[id] or { '' }
+	}
+	return ''
+}
+
+// call_build is the build under which `from` calls `to` (Index.call_builds), the
+// base's under a layered graph included: '' for every build.
+fn (idx &Index) call_build(from string, to string) string {
+	if from in idx.by_id {
+		return idx.call_builds[from + '\0' + to] or { '' }
+	}
+	if idx.from_under(from) {
+		return idx.under.call_builds[from + '\0' + to] or { '' }
+	}
+	return ''
 }
 
 // neighbors lists the ids linked to `id` (neighbors_into).
@@ -720,32 +776,52 @@ const call_path_steps = 200_000
 
 // call_paths lists the chains of calls by which `a` reaches `b`, up to `max` of them,
 // shortest first: each a different route, none through a declaration twice, none more
-// than call_path_slack steps longer than the shortest. `http.get` reaches `net.dial_tcp`
-// through a pooled transport, a fresh connection or a proxy, and the shortest is the
-// one taken least. [] when there is none, or `a` or `b` isn't found.
+// than call_path_slack steps longer than the shortest, and none whose builds
+// contradict each other (route_terms). `http.get` reaches `net.dial_tcp` through a
+// pooled transport, a fresh connection or a proxy, and the shortest is the one taken
+// least. Those the default build has (default_term) come first. [] when there is none,
+// or `a` or `b` isn't found.
 pub fn (g Graph) call_paths(a string, b string, max int) [][]string {
-	paths, _, _ := g.count_call_paths(a, b, max)
-	return paths
+	return g.count_call_paths(a, b, max).paths
 }
 
 // how many routes count_call_paths counts before it stops counting
 const call_path_count_cap = 1000
 
+// CallRoutes is count_call_paths' answer: the first `max` routes, those the default
+// build has first, how many there are in all and how many of them the default build
+// has, and whether the count is all of them (false when it stopped at
+// call_path_count_cap routes or call_path_steps steps).
+pub struct CallRoutes {
+pub:
+	paths      [][]string
+	total      int
+	in_default int
+	exact      bool = true
+	// how many routes the default build hasn't, by the build each needs
+	other_builds map[string]int
+}
+
 // count_call_paths is call_paths with how many routes there are in all, by the same
-// rules: it goes on past `max`, counting, and says whether the count is all of them
-// (false when it stopped at call_path_count_cap routes or call_path_steps steps).
-pub fn (g Graph) count_call_paths(a string, b string, max int) ([][]string, int, bool) {
+// rules: it goes on past `max`, counting.
+pub fn (g Graph) count_call_paths(a string, b string, max int) CallRoutes {
 	idx := g.index()
 	start := g.resolve_one(a)
 	goal := g.resolve_one(b)
 	if start == '' || goal == '' || max <= 0 {
-		return [][]string{}, 0, true
+		return CallRoutes{}
 	}
 	if start == goal {
-		return [[start]], 1, true
+		return CallRoutes{
+			paths:      [[start]]
+			total:      1
+			in_default: 1
+		}
 	}
-	// what `a` reaches, and the calls among it
+	// what `a` reaches, and the calls among it, with the terms of each call's build
+	// and its callee's
 	mut callees := map[string][]string{}
+	mut step_terms := map[string][]string{}
 	mut queue := [start]
 	callees[start] = []string{}
 	mut head := 0
@@ -759,6 +835,10 @@ pub fn (g Graph) count_call_paths(a string, b string, max int) ([][]string, int,
 		idx.callees_into(cur, mut next)
 		callees[cur] = next.clone()
 		for to in next {
+			terms := idx.step_terms(cur, to)
+			if terms.len > 0 {
+				step_terms[cur + '\0' + to] = terms
+			}
 			if to !in callees {
 				callees[to] = []string{}
 				queue << to
@@ -766,7 +846,7 @@ pub fn (g Graph) count_call_paths(a string, b string, max int) ([][]string, int,
 		}
 	}
 	if goal !in callees {
-		return [][]string{}, 0, true
+		return CallRoutes{}
 	}
 	// how many calls from each of those `b` is, back from `b`
 	mut callers := map[string][]string{}
@@ -790,51 +870,83 @@ pub fn (g Graph) count_call_paths(a string, b string, max int) ([][]string, int,
 			}
 		}
 	}
-	shortest := to_goal[start] or { return [][]string{}, 0, true }
+	shortest := to_goal[start] or { return CallRoutes{} }
 	mut w := PathWalk{
-		callees: callees
-		to_goal: to_goal
-		goal:    goal
-		max:     max
-		cap:     call_path_count_cap
-		steps:   call_path_steps
+		callees:    callees
+		step_terms: step_terms
+		to_goal:    to_goal
+		goal:       goal
+		max:        max
+		cap:        call_path_count_cap
+		steps:      call_path_steps
 	}
 	for length in shortest .. shortest + call_path_slack + 1 {
 		w.on = {
 			start: true
 		}
+		w.terms = map[string]int{}
+		w.add_terms(build_terms(idx.decl_build(start)))
 		w.walk([start], length)
 		if w.total >= w.cap || w.steps <= 0 {
 			break
 		}
 	}
-	return w.found, w.total, w.total < w.cap && w.steps > 0
+	mut paths := w.found.clone()
+	for p in w.found_other {
+		if paths.len >= max {
+			break
+		}
+		paths << p
+	}
+	return CallRoutes{
+		paths:        paths
+		total:        w.total
+		in_default:   w.total_default
+		other_builds: w.other_builds
+		exact:        w.total < w.cap && w.steps > 0
+	}
 }
 
 // PathWalk is call_paths' search for the chains of one length: the calls among what
-// `a` reaches, how far each is from the goal, the declarations on the chain so far,
-// the first `max` chains found, and how many it has found in all.
+// `a` reaches, the terms of each one's build (keyed `from`\0`to`), how far each is
+// from the goal, the declarations on the chain so far and the terms of their builds,
+// the first `max` chains found that the default build has and the first `max` it
+// hasn't, and how many it has found in all and in the default build.
 struct PathWalk {
-	callees map[string][]string
-	to_goal map[string]int
-	goal    string
-	max     int
-	cap     int
+	callees    map[string][]string
+	step_terms map[string][]string
+	to_goal    map[string]int
+	goal       string
+	max        int
+	cap        int
 mut:
-	steps int
-	on    map[string]bool
-	found [][]string
-	total int
+	steps         int
+	on            map[string]bool
+	terms         map[string]int
+	found         [][]string
+	found_other   [][]string
+	total         int
+	total_default int
+	other_builds  map[string]int
 }
 
-// walk extends `path` to every chain of `length` calls that ends at the goal.
+// walk extends `path` to every chain of `length` calls that ends at the goal and
+// whose builds don't contradict each other.
 fn (mut w PathWalk) walk(path []string, length int) {
 	cur := path.last()
 	if cur == w.goal {
 		if path.len - 1 == length {
 			w.total++
-			if w.found.len < w.max {
-				w.found << path.clone()
+			if w.terms.keys().all(default_term(it)) {
+				w.total_default++
+				if w.found.len < w.max {
+					w.found << path.clone()
+				}
+			} else {
+				w.other_builds[terms_build(w.terms.keys())]++
+				if w.found_other.len < w.max {
+					w.found_other << path.clone()
+				}
 			}
 		}
 		return
@@ -848,26 +960,154 @@ fn (mut w PathWalk) walk(path []string, length int) {
 		if to in w.on || path.len + left > length {
 			continue
 		}
+		terms := w.step_terms[cur + '\0' + to] or { []string{} }
+		if terms.any(opposite_term(it) in w.terms) {
+			continue
+		}
 		w.on[to] = true
+		w.add_terms(terms)
 		mut longer := path.clone()
 		longer << to
 		w.walk(longer, length)
 		w.on.delete(to)
+		for t in terms {
+			w.terms[t]--
+			if w.terms[t] == 0 {
+				w.terms.delete(t)
+			}
+		}
 	}
 }
 
+fn (mut w PathWalk) add_terms(terms []string) {
+	for t in terms {
+		w.terms[t]++
+	}
+}
+
+// build_terms splits a build into the conditions joined by `&&` outside any brackets,
+// each without brackets around the whole of it: `a ? && (b || c)` is `a ?` and
+// `b || c`.
+fn build_terms(cond string) []string {
+	mut out := []string{}
+	mut depth := 0
+	mut from := 0
+	for i := 0; i <= cond.len; i++ {
+		if i < cond.len {
+			match cond[i] {
+				`(` {
+					depth++
+					continue
+				}
+				`)` {
+					depth--
+					continue
+				}
+				`&` {
+					if depth != 0 || i + 1 >= cond.len || cond[i + 1] != `&` {
+						continue
+					}
+				}
+				else {
+					continue
+				}
+			}
+		}
+		t := unbracketed(cond[from..i].trim_space())
+		if t != '' && t !in out {
+			out << t
+		}
+		from = i + 2
+		i++
+	}
+	return out
+}
+
+// unbracketed is `cond` without the brackets around the whole of it, if it has them.
+fn unbracketed(cond string) string {
+	mut c := cond
+	for c.starts_with('(') && c.ends_with(')') {
+		mut depth := 0
+		for i := 0; i < c.len; i++ {
+			if c[i] == `(` {
+				depth++
+			} else if c[i] == `)` {
+				depth--
+				if depth == 0 && i < c.len - 1 {
+					return c
+				}
+			}
+		}
+		c = c[1..c.len - 1].trim_space()
+	}
+	return c
+}
+
+// opposite_term is the condition that holds just when the term `t` doesn't: `!x ?`
+// for `x ?`, and `a || b` for `!(a || b)`. A route with both is in no build.
+fn opposite_term(t string) string {
+	if t.starts_with('!(') {
+		inner := unbracketed(t[1..])
+		if inner != t[1..] {
+			return inner
+		}
+	}
+	return unbracketed(negate_build(t))
+}
+
+// default_term reports whether a build term can hold without an option on the command
+// line: false for a `-d` flag, `x ?`, a backend other than C's, `js` or `native`, and
+// an `||` of only those. A term naming an OS holds on that OS's default build.
+fn default_term(t string) bool {
+	for alt in t.split(' || ') {
+		a := unbracketed(alt.trim_space())
+		if !(a.ends_with(' ?') && !a.starts_with('!')) && a !in ['js', 'native'] {
+			return true
+		}
+	}
+	return false
+}
+
+// step_terms is the terms of the builds that a call from `from` to `to` and its
+// callee need (build_terms).
+fn (idx &Index) step_terms(from string, to string) []string {
+	return build_terms(join_build(idx.call_build(from, to), idx.decl_build(to)))
+}
+
+// route_build is the build a chain of calls needs: the terms of its declarations' and
+// its calls' builds, joined by `&&`; '' when every build has it.
+fn (idx &Index) route_build(ids []string) string {
+	mut terms := build_terms(idx.decl_build(ids[0]))
+	for i in 1 .. ids.len {
+		for t in idx.step_terms(ids[i - 1], ids[i]) {
+			if t !in terms {
+				terms << t
+			}
+		}
+	}
+	return terms_build(terms)
+}
+
+// terms_build joins build terms back into one build.
+fn terms_build(terms []string) string {
+	return terms.map(grouped_build(it)).join(' && ')
+}
+
 // render_call_path renders a call_path, one step a line, each call with the lines
-// of its call sites in the caller's file:
+// of its call sites in the caller's file and, for a call or callee only some builds
+// have, their build; then the build the whole chain needs, if not every build:
 //
 //   get (vlib/net/http/http.v:70)
 //     -> fetch (vlib/net/http/http.v:241), called at line 71
+//     -> ssl_do (vlib/net/http/backend.c.v:9), called at line 400 [$if !windows]
+//   needs $if !windows
 pub fn (g Graph) render_call_path(ids []string) string {
 	idx := g.index()
 	mut out := []string{}
 	for i, id in ids {
 		loc := if s := idx.symbol(id) { '${s.name} (${s.loc()})' } else { id }
 		if i == 0 {
-			out << loc
+			out << loc + build_mark(idx.decl_build(id))
 			continue
 		}
 		mut lines := []int{}
@@ -876,24 +1116,32 @@ pub fn (g Graph) render_call_path(ids []string) string {
 				lines = merge_lines(lines, e.lines)
 			}
 		}
-		out << '  -> ${loc}' + if lines.len > 0 { ', called${at_lines(lines)}' } else { '' }
+		mark := build_mark(terms_build(idx.step_terms(ids[i - 1], id)))
+		out << '  -> ${loc}' + if lines.len > 0 { ', called${at_lines(lines)}' } else { '' } +
+			mark
+	}
+	if ids.len > 1 {
+		need := idx.route_build(ids)
+		if need != '' {
+			out << '  needs \$if ${need}'
+		}
 	}
 	return out.join('\n')
 }
 
 // path_between answers "how does `a` reach `b`": the chains of calls from `a` to `b`
-// (call_paths), up to max_call_paths, shortest first; else those from `b` to `a`, said
-// so; else the shortest link through any relation (shortest_path), said so. '' when
-// nothing links them.
+// (call_paths), up to max_call_paths, those the default build has first, then
+// shortest first; else those from `b` to `a`, said so; else the shortest link through
+// any relation (shortest_path), said so. '' when nothing links them.
 pub fn (g Graph) path_between(a string, b string) string {
-	forward, total, exact := g.count_call_paths(a, b, max_call_paths)
-	if forward.len > 0 {
-		return g.render_call_paths(forward, total, exact)
+	forward := g.count_call_paths(a, b, max_call_paths)
+	if forward.paths.len > 0 {
+		return g.render_call_paths(forward)
 	}
-	back, back_total, back_exact := g.count_call_paths(b, a, max_call_paths)
-	if back.len > 0 {
+	back := g.count_call_paths(b, a, max_call_paths)
+	if back.paths.len > 0 {
 		return "(`${a}` doesn't reach `${b}` by calls, but `${b}` reaches `${a}`:)\n" +
-			g.render_call_paths(back, back_total, back_exact)
+			g.render_call_paths(back)
 	}
 	any := g.shortest_path(a, b)
 	if any.len > 0 {
@@ -907,20 +1155,42 @@ pub fn (g Graph) path_between(a string, b string) string {
 const max_call_paths = 5
 
 // render_call_paths renders chains of calls (render_call_path): one as it is, several
-// numbered, after a line that says how many there are in all (`total`, at least that
-// many when not `exact`) and how many of them follow.
-pub fn (g Graph) render_call_paths(paths [][]string, total int, exact bool) string {
-	if paths.len == 1 && total == 1 {
+// numbered, after a line that says how many there are in all (at least that many
+// when the count isn't exact), how many of them the default build has, when not all,
+// and how many of them follow.
+pub fn (g Graph) render_call_paths(r CallRoutes) string {
+	paths := r.paths
+	if paths.len == 1 && r.total == 1 {
 		return g.render_call_path(paths[0])
 	}
 	first := g.index().symbol(paths[0][0]) or { Symbol{ name: paths[0][0] } }
 	last := g.index().symbol(paths[0].last()) or { Symbol{ name: paths[0].last() } }
-	all := if exact { '${total}' } else { 'at least ${total}' }
-	shown := if paths.len < total { '; the ${paths.len} shortest' } else { '' }
-	mut out := ['${all} chains of calls from ${first.name} to ${last.name}, at most ${call_path_slack} calls longer than the shortest${shown}:']
+	all := if r.exact { '${r.total}' } else { 'at least ${r.total}' }
+	defaults := if r.in_default < r.total { ' (${r.in_default} in the default build)' } else { '' }
+	shown := if paths.len < r.total {
+		if r.in_default < r.total {
+			"; ${paths.len} of them, the default build's first"
+		} else {
+			'; the ${paths.len} shortest'
+		}
+	} else {
+		''
+	}
+	mut out := ['${all} chains of calls from ${first.name} to ${last.name}${defaults}, at most ${call_path_slack} calls longer than the shortest${shown}:']
 	for i, p in paths {
 		out << ''
 		out << '${i + 1}. ' + g.render_call_path(p)
+	}
+	// what the routes of other builds that don't follow need
+	shown_other := if r.in_default < paths.len { paths.len - r.in_default } else { 0 }
+	others := r.total - r.in_default
+	if others > shown_other {
+		mut needs := []string{}
+		for need, n in r.other_builds {
+			needs << '\$if ${need} (${n})'
+		}
+		out << ''
+		out << '(${others - shown_other} more that only other builds have; the builds of all ${others} such: ${needs.join(', ')})'
 	}
 	return out.join('\n')
 }
@@ -1002,7 +1272,12 @@ struct DeclRow {
 // build_mark is ` [$if use_openssl ?]` for a declaration only some builds have
 // (Symbol.build), and nothing for one every build has.
 fn (s Symbol) build_mark() string {
-	return if s.build == '' { '' } else { ' [\$if ${s.build}]' }
+	return build_mark(s.build)
+}
+
+// build_mark is ` [$if use_openssl ?]` for a build, and nothing for every build.
+fn build_mark(build string) string {
+	return if build == '' { '' } else { ' [\$if ${build}]' }
 }
 
 // other_builds lists the declarations of `s`'s id in other files that another
