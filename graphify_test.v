@@ -10083,6 +10083,75 @@ pub fn gen[T](x T) {
 	assert g.explain('m.k').contains('f (m/m.v:25) at line 47 [\$if linux && (x ? || y ?)]')
 }
 
+// A build and its opposite hold between them in every build, so two call sites or two
+// copies of a declaration that have them are in every build, not in
+// `windows || !windows`.
+fn test_two_builds_that_are_opposites_make_every_build() {
+	assert either_build('windows', '!windows') == ''
+	assert either_build('!x ?', 'x ?') == ''
+	assert either_build("@OS == 'linux'", "!(@OS == 'linux')") == ''
+	// among more, from either side
+	assert either_build('windows || linux', '!windows') == ''
+	assert either_build('!darwin', 'linux || darwin') == ''
+	assert either_build('a ? || !(b ? && c ?)', 'b ? && c ?') == ''
+	// a group and the opposite of the whole of it
+	assert either_build('windows || linux', '!(windows || linux)') == ''
+	assert either_build('!(a ? || b ?)', 'a ? || b ?') == ''
+	assert either_build('(js || windows)', '!(js || windows)') == ''
+	// builds that aren't opposites are joined as before
+	assert either_build('windows || linux', '!(windows || darwin)') == '(windows || linux) || !(windows || darwin)'
+	assert either_build('a ? && b ?', '!a ? && b ?') == 'a ? && b ? || !a ? && b ?'
+	assert either_build('windows', 'linux') == 'windows || linux'
+	assert either_build('windows', '!linux') == 'windows || !linux'
+	assert either_build('windows || linux', '!darwin') == '(windows || linux) || !darwin'
+	assert either_build('windows && x ?', '!windows') == 'windows && x ? || !windows'
+	assert either_build('a ?', 'a ?') == 'a ?'
+	assert either_build('', '!windows') == ''
+	// two calls of one callee, in the two branches of one `$if`, are an edge in every
+	// build; one in a branch alone is not
+	g := graph_of({
+		'm/m.v': 'module m\n\nfn f() {}\n\npub fn g() {\n\t\$if windows {\n\t\tf()\n\t} \$else {\n\t\tf()\n\t}\n}\n\npub fn h() {\n\t\$if windows {\n\t\tf()\n\t}\n}\n'
+	})
+	mut builds := map[string]string{}
+	for e in g.edges {
+		if e.kind == .calls {
+			builds['${e.from} ${e.to}'] = e.build
+		}
+	}
+	assert builds['m.g m.f'] == '', builds.str()
+	assert builds['m.h m.f'] == 'windows', builds.str()
+}
+
+// A name that only a command-line option makes true (`-prod`, `-g`, `v test`,
+// `-freestanding`, a backend other than C's) isn't the default build's, as a `-d` flag
+// isn't; one that holds on a host's default build is.
+fn test_a_name_only_an_option_makes_true_is_not_the_default_build() {
+	for name in ['prod', 'debug', 'test', 'profile', 'autofree', 'nofloat', 'freestanding', 'prealloc',
+		'no_bounds_checking', 'js', 'js_node', 'js_browser', 'js_freestanding', 'native'] {
+		assert !default_term(name), name
+		assert !default_term('(' + name + ')'), name
+		assert !default_term('${name} || a ?'), name
+		// without the option, or beside a name that holds by default
+		assert default_term('!' + name), name
+		assert default_term('${name} || linux'), name
+	}
+	for name in ['windows', 'linux', 'macos', 'tinyc', 'gcboehm', 'amd64', 'threads', 'no_backtrace',
+		'glibc'] {
+		assert default_term(name), name
+	}
+	// so a route that needs one is another build's, and the default build's come first
+	g := graph_of({
+		'm/a.v': 'module m\n\npub fn goal() {}\n\npub fn start() {\n\tdirect()\n\t\$if freestanding {\n\t\tbare()\n\t}\n}\n\nfn direct() {\n\tgoal()\n}\n\nfn bare() {\n\tgoal()\n}\n'
+	})
+	r := g.count_call_paths('start', 'goal', 5)
+	assert r.total == 2 && r.in_default == 1, r.str()
+	assert r.other_builds == {
+		'freestanding': 1
+	}, r.other_builds.str()
+	text := g.path_between('start', 'goal')
+	assert text.all_before('\n') == '2 chains of calls from start to goal (1 in the default build), at most 3 calls longer than the shortest:', text
+}
+
 // A route of calls through declarations or calls of builds that contradict each
 // other, `use_openssl ?` and `!use_openssl ?`, is in no build, and isn't one. The
 // others say what they need, and those the default build has come first, even when
