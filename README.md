@@ -604,8 +604,10 @@ daemon, against 2.26 GB when each layer copied vlib's symbols. A daemon exits 15
 last session goes, or once none is connected when `bin/graphify-mcp` has been
 rebuilt; a rebuilt server starts a daemon of its own. Its log is beside its
 socket. A daemon that exits on its own removes its socket and leaves its log
-(and on Windows its copy of the binary); the next daemon to start removes those
-once the log is a minute old, and a killed daemon's files at once. On Windows (10 1803 and later, which have Unix sockets) the daemon runs
+(and on Windows its copy of the binary); a daemon that is running removes those
+when it next looks whether it is done (about every minute while no server
+connects), once the log is a minute old, and a daemon starting removes a killed
+daemon's files at once. On Windows (10 1803 and later, which have Unix sockets) the daemon runs
 from a copy of `graphify-mcp.exe` beside its socket, since a running `.exe` can't
 be rebuilt. It is started detached, with no console and none of the server's
 handles, so it outlives the session that started it as it does elsewhere.

@@ -218,6 +218,92 @@ fn test_a_running_daemon_and_the_one_clearing_up_are_left_alone() {
 		'mcp-1111111111111111.sock', 'mcp-2222222222222222.exe', 'mcp-2222222222222222.log', 'notes.log']
 }
 
+// check_daemon is a daemon that has just been used, as run_daemon makes one, with the
+// idle time GRAPHIFY_DAEMON_IDLE names left alone for the length of the test.
+fn check_daemon(used_ago i64) &Daemon {
+	return &Daemon{
+		cfg:     Config{
+			graph_path: os.join_path(os.temp_dir(), 'graphify no such graph.json')
+		}
+		used_at: time.now().unix() - used_ago
+	}
+}
+
+// A daemon that has gone down on its own since the running one started would otherwise
+// leave its log and copy until the next daemon starts, a rebuild away: the running one
+// clears them away when it looks whether it is done, at least once a minute.
+fn test_a_running_daemon_clears_away_one_that_exits_while_it_runs() {
+	dir := daemon_files_dir('run')
+	defer {
+		os.rmdir_all(dir) or {}
+	}
+	old := os.getenv('GRAPHIFY_DAEMON_IDLE')
+	defer {
+		os.setenv('GRAPHIFY_DAEMON_IDLE', old, true)
+	}
+	os.setenv('GRAPHIFY_DAEMON_IDLE', '900', true)
+	exe := os.executable()
+	mut d := check_daemon(0)
+	touch(dir, 'mcp-1111111111111111.log', 3600)
+	touch(dir, 'mcp-1111111111111111.exe', 3600)
+	// its own files, which a running daemon has all of
+	touch(dir, 'mcp-2222222222222222.log', 3600)
+	touch(dir, 'mcp-2222222222222222.exe', 3600)
+	assert !d.check(dir, 'mcp-2222222222222222', exe, file_stamp(exe))
+	assert files_in(dir) == ['mcp-2222222222222222.exe', 'mcp-2222222222222222.log']
+}
+
+// ...and reports whether it is done all the same, which is what ends its loop.
+fn test_a_daemon_that_has_been_idle_is_done_when_it_checks() {
+	dir := daemon_files_dir('idle')
+	defer {
+		os.rmdir_all(dir) or {}
+	}
+	old := os.getenv('GRAPHIFY_DAEMON_IDLE')
+	defer {
+		os.setenv('GRAPHIFY_DAEMON_IDLE', old, true)
+	}
+	os.setenv('GRAPHIFY_DAEMON_IDLE', '900', true)
+	exe := os.executable()
+	mut d := check_daemon(901)
+	assert d.check(dir, 'mcp-2222222222222222', exe, file_stamp(exe))
+	// the binary rebuilt since it started, with no server connected, ends it as well
+	mut fresh := check_daemon(0)
+	assert fresh.check(dir, 'mcp-2222222222222222', exe, 'a stamp the binary no longer has')
+}
+
+// A server that connects to a daemon counts as a session to it: the connection lasts
+// for as long as the daemon takes to see it closed, and restarts its time to idle.
+// Looking at the other daemons' sockets once a minute would hold each of two daemons up
+// for ever, so a running daemon leaves the daemons that have a socket alone.
+fn test_a_running_daemon_does_not_connect_to_the_daemons_that_listen() {
+	dir := daemon_files_dir('probe')
+	defer {
+		os.rmdir_all(dir) or {}
+	}
+	old := os.getenv('GRAPHIFY_DAEMON_IDLE')
+	defer {
+		os.setenv('GRAPHIFY_DAEMON_IDLE', old, true)
+	}
+	os.setenv('GRAPHIFY_DAEMON_IDLE', '900', true)
+	mut listener := unix.listen_stream(os.join_path(dir, 'mcp-1111111111111111.sock')) or {
+		panic(err)
+	}
+	defer {
+		listener.close() or {}
+	}
+	touch(dir, 'mcp-1111111111111111.log', 3600)
+	exe := os.executable()
+	mut d := check_daemon(0)
+	assert !d.check(dir, 'mcp-2222222222222222', exe, file_stamp(exe))
+	// a connection would be waiting to be accepted
+	listener.set_accept_timeout(time.millisecond * 300)
+	mut seen := true
+	listener.wait_for_accept() or { seen = false }
+	assert !seen
+	assert files_in(dir) == ['mcp-1111111111111111.log', 'mcp-1111111111111111.sock']
+}
+
 // The daemon answers the sessions of two directories from one base graph, read once.
 fn test_the_daemon_shares_one_base_graph_between_sessions() {
 	dir := os.join_path(os.temp_dir(), 'graphify daemon ${os.getpid()}')
