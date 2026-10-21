@@ -3865,6 +3865,9 @@ fn test_imports_resolve_to_the_module_they_mean_in_the_tree() {
 		'examples/app/main.v':                'module main\n\nimport widgets as w\nimport os\n\nfn main() {\n\tw.draw()\n}\n'
 		'examples/app/widgets/widgets.v':     'module widgets\n\npub fn draw() {}\n'
 		'examples/app/empty/readme.md':       'no sources\n'
+		'cmd/mcp/main.v':                     'module main\n\nimport mcp\n\nfn main() {\n\tmcp.serve()\n}\n'
+		'lib/shapes/shapes.v':                 'module shapes\n\npub fn square() int {\n\treturn 4\n}\n'
+		'lib/shapes/shapes_test.v':            'module main\n\nimport shapes\n\nfn test_s() {\n\tshapes.square()\n}\n'
 	})
 	defer {
 		os.rmdir_all(root) or {}
@@ -3898,6 +3901,16 @@ fn test_imports_resolve_to_the_module_they_mean_in_the_tree() {
 	assert 'import examples.app.widgets as w' in app, app.str()
 	assert 'import os' in app, app.str()
 	assert 'call examples.app.widgets.draw' in app, app.str()
+	// a program in a directory named like a module it imports, which it doesn't
+	// declare, doesn't import itself: cmd/mcp's `import mcp` is the library's (here,
+	// as written)
+	mcp := imports('cmd/mcp/main.v')
+	assert 'import mcp' in mcp, mcp.str()
+	assert 'call mcp.serve' in mcp, mcp.str()
+	// an external test imports the module of its own directory
+	ext := imports('lib/shapes/shapes_test.v')
+	assert 'import lib.shapes as shapes' in ext, ext.str()
+	assert 'call lib.shapes.square' in ext, ext.str()
 	// text has no place in a tree, so its imports stay as written
 	t := extract_v_text_result('module m\n\nimport geometry\n', 'vlib/crypto/x/m.v')
 	assert t.symbols.any(it.kind == .import_ && it.name == 'geometry')
