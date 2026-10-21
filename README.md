@@ -466,7 +466,7 @@ same server works with both Claude Code and Codex:
 | `get_node(node)` | a symbol + its relationships (defines, references, embeds, calls), each with file:line; a call also with the lines it is made on; for a declaration only some builds compile, their condition (`[$if use_openssl ?]`) and the other builds' declarations of it; for a call made only inside a `$if`, its condition (`at line 39 [$if linux]`) |
 | `get_body(node)` | the source of ONE declaration by name (instead of reading its file); notes when that file has changed since the graph was built |
 | `get_neighbors(node)` | names of all directly linked symbols |
-| `shortest_path(a, b)` | how `a` reaches `b`: how many chains of calls lead from `a` to `b` (at most 3 calls longer than the shortest), and the 5 shortest, each call with the line it is made on (or those from `b` to `a`); with none either way, the shortest link through any relation |
+| `shortest_path(a, b)` | how `a` reaches `b`: how many chains of calls lead from `a` to `b` (at most 3 calls longer than the shortest, and none through builds that contradict each other, `use_openssl ?` and `!use_openssl ?`), and the 5 shortest, those the default build has first, each call with the line it is made on and its `[$if …]` build, each route with the build it needs (or those from `b` to `a`); with none either way, the shortest link through any relation |
 
 A `node` is an id (`net.unix.StreamListener.accept`), a dotted tail of one
 (`StreamListener.accept`, `unix.StreamListener.accept`), a `file:line` inside a

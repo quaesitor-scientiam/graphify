@@ -9828,8 +9828,8 @@ fn test_a_path_says_how_many_routes_there_are_past_those_it_shows() {
 	g := graph_of({
 		'm/m.v': src
 	})
-	paths, total, exact := g.count_call_paths('start', 'goal', 5)
-	assert paths.len == 5 && total == 7 && exact, '${paths.len} ${total} ${exact}'
+	r := g.count_call_paths('start', 'goal', 5)
+	assert r.paths.len == 5 && r.total == 7 && r.exact, r.str()
 	text := g.path_between('start', 'goal')
 	assert text.all_before('\n') == '7 chains of calls from start to goal, at most 3 calls longer than the shortest; the 5 shortest:', text
 	assert text.contains('5. start') && !text.contains('6. start')
@@ -9964,6 +9964,20 @@ pub fn run(c &pick.Conn) {
 	}
 	assert calls('app.run') == ['tls.ma.Conn.connect', 'tls.mb.Conn.connect', 'tls.mb.Conn.only_b']
 	assert calls('tls.ma.Conn.self_check') == ['tls.ma.Conn.connect']
+	// each call through the alias needs the build of the declaration that names its
+	// callee's type; the call on one of the types itself needs none
+	mut build_of := map[string]string{}
+	for e in g.edges {
+		if e.kind == .calls {
+			build_of['${e.from} ${e.to}'] = e.build
+		}
+	}
+	assert build_of['app.run tls.ma.Conn.connect'] == '!use_b ?', build_of.str()
+	assert build_of['app.run tls.mb.Conn.connect'] == 'use_b ?'
+	assert build_of['tls.ma.Conn.self_check tls.ma.Conn.connect'] == ''
+	// so a route through one build's type says so
+	route := g.path_between('run', 'tls.mb.Conn.connect')
+	assert route.ends_with('  needs \$if use_b ?'), route
 	// get_node shows the build of the copy it shows, and the other build's copy
 	text := g.explain('tls.pick.Conn')
 	assert text.contains('type Conn  (tls/pick/pick_notd_use_b.v:5) [\$if !use_b ?]'), text
@@ -10067,4 +10081,66 @@ pub fn gen[T](x T) {
 	assert text.contains('a (m/m.v:7) at line 27 [\$if linux], b (m/m.v:9) at line 29 [\$if !linux], c (m/m.v:11) at lines 32, 34, d'), text
 	assert text.contains('h (m/m.v:17) at lines 39, 45 [\$if windows || linux]'), text
 	assert g.explain('m.k').contains('f (m/m.v:25) at line 47 [\$if linux && (x ? || y ?)]')
+}
+
+// A route of calls through declarations or calls of builds that contradict each
+// other, `use_openssl ?` and `!use_openssl ?`, is in no build, and isn't one. The
+// others say what they need, and those the default build has come first, even when
+// longer.
+fn test_a_route_of_calls_keeps_to_one_build_and_the_default_builds_come_first() {
+	g := graph_of({
+		'net/tcp.v':                    'module net
+
+pub fn dial_tcp() {}
+
+pub fn get() {
+	direct()
+	\$if use_openssl ? {
+		ssl_dial()
+	}
+	plain_check()
+}
+
+fn direct() {
+	via()
+}
+
+fn via() {
+	dial_tcp()
+}
+'
+		'net/ssl_d_use_openssl.v':      'module net
+
+pub fn ssl_dial() {
+	dial_tcp()
+}
+'
+		'net/plain_notd_use_openssl.v': 'module net
+
+fn plain_check() {
+	ssl_dial()
+}
+'
+	})
+	r := g.count_call_paths('get', 'dial_tcp', 5)
+	assert r.total == 2 && r.in_default == 1 && r.exact, r.str()
+	assert r.paths == [['net.get', 'net.direct', 'net.via', 'net.dial_tcp'],
+		['net.get', 'net.ssl_dial', 'net.dial_tcp']], r.paths.str()
+	assert g.call_path('get', 'dial_tcp') == r.paths[0]
+	text := g.path_between('get', 'dial_tcp')
+	assert text.all_before('\n') == '2 chains of calls from get to dial_tcp (1 in the default build), at most 3 calls longer than the shortest:', text
+	assert text.contains(['2. get (net/tcp.v:5)',
+		'  -> ssl_dial (net/ssl_d_use_openssl.v:3), called at line 8 [\$if use_openssl ?]',
+		'  -> dial_tcp (net/tcp.v:3), called at line 4', '  needs \$if use_openssl ?'].join('\n')), text
+	assert !text.contains('plain_check')
+	// one shown: the other build's route is said to be there, and what it needs
+	one := g.render_call_paths(g.count_call_paths('get', 'dial_tcp', 1))
+	assert one.ends_with('(1 more that only other builds have; the builds of all 1 such: \$if use_openssl ? (1))'), one
+	// the terms of a build, and what contradicts each
+	assert build_terms('a ? && (b || c) && !windows') == ['a ?', 'b || c', '!windows']
+	assert opposite_term('a ?') == '!a ?'
+	assert opposite_term('!(b || c)') == 'b || c'
+	assert opposite_term('b || c') == '!(b || c)'
+	assert default_term('!a ?') && default_term('windows') && default_term('a ? || linux')
+	assert !default_term('a ?') && !default_term('a ? || b ?') && !default_term('js')
 }
