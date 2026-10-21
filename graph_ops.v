@@ -1003,8 +1003,12 @@ fn (mut w PathWalk) add_terms(terms []string) {
 
 // build_terms splits a build into the conditions joined by `&&` outside any brackets,
 // each without brackets around the whole of it: `a ? && (b || c)` is `a ?` and
-// `b || c`.
+// `b || c`. `&&` binds tighter than `||`, so a build with an `||` outside its brackets
+// is one term: `a ? && b ? || c ? && d ?` is not `a ?` and `b ? || c ?` and `d ?`.
 fn build_terms(cond string) []string {
+	if split_build(cond, `|`).len > 1 {
+		return [cond.trim_space()]
+	}
 	return split_build(cond, `&`)
 }
 
@@ -1083,17 +1087,25 @@ const option_terms = ['prod', 'debug', 'test', 'profile', 'autofree', 'nofloat',
 	'prealloc', 'no_bounds_checking', 'js', 'js_node', 'js_browser', 'js_freestanding', 'native']
 
 // default_term reports whether a build term can hold without an option on the command
-// line: false for a `-d` flag (`x ?`), for an option_terms name, and for an `||` of only
-// those. A term naming an OS, an architecture or a C compiler holds on a host's default
-// build.
+// line: some alternative of it, joined by `||`, has only names that do. A `-d` flag
+// (`x ?`) and an option_terms name don't; a term naming an OS, an architecture or a C
+// compiler holds on a host's default build, and so does the opposite of any name.
 fn default_term(t string) bool {
-	for alt in t.split(' || ') {
-		a := unbracketed(alt.trim_space())
-		if !(a.ends_with(' ?') && !a.starts_with('!')) && a !in option_terms {
+	for alt in split_build(t, `|`) {
+		if split_build(alt, `&`).all(default_conjunct(it)) {
 			return true
 		}
 	}
 	return false
+}
+
+// default_conjunct is default_term for one name joined by `&&`, or a group of
+// alternatives in brackets.
+fn default_conjunct(c string) bool {
+	if split_build(c, `|`).len > 1 {
+		return default_term(c)
+	}
+	return !(c.ends_with(' ?') && !c.starts_with('!')) && c !in option_terms
 }
 
 // step_terms is the terms of the builds that a call from `from` to `to` and its
