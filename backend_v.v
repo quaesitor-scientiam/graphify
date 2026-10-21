@@ -1039,13 +1039,25 @@ fn join_build(a string, b string) string {
 }
 
 // either_build is the condition that `a` or `b` holds, for two call sites of one
-// edge: empty, every build, when either is.
+// edge: empty, every build, when either is, or when they have a condition and its
+// opposite between them (`windows` and `!windows`, `windows || linux` and `!windows`,
+// or `windows || linux` and `!(windows || linux)`).
 fn either_build(a string, b string) string {
 	if a == '' || b == '' {
 		return ''
 	}
 	if a == b {
 		return a
+	}
+	// each one's alternatives, and each as a whole
+	mut alternatives := split_build(a, `|`)
+	alternatives << split_build(b, `|`)
+	alternatives << unbracketed(a)
+	alternatives << unbracketed(b)
+	for alt in alternatives {
+		if opposite_term(alt) in alternatives {
+			return ''
+		}
 	}
 	return '${grouped_build(a)} || ${grouped_build(b)}'
 }

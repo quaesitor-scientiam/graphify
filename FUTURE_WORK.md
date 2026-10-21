@@ -1701,8 +1701,12 @@ On vlang, against master:
 - **Marks.** Each step of a route says the build its call and its callee need, ` [$if
   use_openssl ?]`. A route that needs one ends with `needs $if …`.
 - **Default build first.** A route is the default build's unless one of its terms
-  needs an option on the command line: a `-d` flag, `x ?`, or the `js` or `native`
-  backend (`default_term`). A term naming an OS holds on that OS's default build.
+  needs an option on the command line: a `-d` flag, `x ?`, or one of `option_terms`
+  (`default_term`): `prod`, `debug` (`-g`), `test` (`v test`), `profile`, `autofree`,
+  `nofloat`, `freestanding`, `prealloc`, `no_bounds_checking`, and the `js` and
+  `native` backends. A term naming an OS, an architecture or a C compiler holds on
+  a host's default build. The names V has beyond these, `wasm32` for one, are taken
+  for the default build's.
   The default build's routes are listed first, then the others, each shortest first.
   The count says how many are the default build's. When routes of other builds
   don't fit among the 5 shown, a last line gives their builds, with how many routes

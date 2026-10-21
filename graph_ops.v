@@ -1005,6 +1005,12 @@ fn (mut w PathWalk) add_terms(terms []string) {
 // each without brackets around the whole of it: `a ? && (b || c)` is `a ?` and
 // `b || c`.
 fn build_terms(cond string) []string {
+	return split_build(cond, `&`)
+}
+
+// split_build splits a build at each `&&` (`op` is `&`) or `||` (`|`) outside any
+// brackets, into the conditions it joins, each without brackets around the whole of it.
+fn split_build(cond string, op u8) []string {
 	mut out := []string{}
 	mut depth := 0
 	mut from := 0
@@ -1019,13 +1025,10 @@ fn build_terms(cond string) []string {
 					depth--
 					continue
 				}
-				`&` {
-					if depth != 0 || i + 1 >= cond.len || cond[i + 1] != `&` {
+				else {
+					if cond[i] != op || depth != 0 || i + 1 >= cond.len || cond[i + 1] != op {
 						continue
 					}
-				}
-				else {
-					continue
 				}
 			}
 		}
@@ -1071,13 +1074,22 @@ fn opposite_term(t string) string {
 	return unbracketed(negate_build(t))
 }
 
+// option_terms are the names a `$if` tests that only an option on the command line
+// makes true: `-prod`, `-g` (`debug`), `v test`, `-profile`, `-autofree`, `-nofloat`,
+// `-freestanding`, `-prealloc`, `-no-bounds-checking`, and the backends other than C's
+// that V names there (`js` with its variants, and `native`). Others that are not
+// listed, such as `wasm32`, are taken for the default build's.
+const option_terms = ['prod', 'debug', 'test', 'profile', 'autofree', 'nofloat', 'freestanding',
+	'prealloc', 'no_bounds_checking', 'js', 'js_node', 'js_browser', 'js_freestanding', 'native']
+
 // default_term reports whether a build term can hold without an option on the command
-// line: false for a `-d` flag, `x ?`, a backend other than C's, `js` or `native`, and
-// an `||` of only those. A term naming an OS holds on that OS's default build.
+// line: false for a `-d` flag (`x ?`), for an option_terms name, and for an `||` of only
+// those. A term naming an OS, an architecture or a C compiler holds on a host's default
+// build.
 fn default_term(t string) bool {
 	for alt in t.split(' || ') {
 		a := unbracketed(alt.trim_space())
-		if !(a.ends_with(' ?') && !a.starts_with('!')) && a !in ['js', 'native'] {
+		if !(a.ends_with(' ?') && !a.starts_with('!')) && a !in option_terms {
 			return true
 		}
 	}
