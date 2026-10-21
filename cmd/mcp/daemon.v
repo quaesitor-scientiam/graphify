@@ -221,14 +221,12 @@ fn run_daemon(cfg Config) {
 		60
 	})
 	for {
-		// accept blocks with no timeout of its own: wait_for_accept has one
-		listener.wait_for_accept() or {
+		mut conn := listener.accept() or {
 			if d.done(exe, exe_stamp) {
 				break
 			}
 			continue
 		}
-		mut conn := listener.accept() or { continue }
 		// a server is quiet between its client's tool calls, for as long as it is
 		conn.set_read_timeout(time.infinite)
 		d.mu.lock()
@@ -387,10 +385,9 @@ fn detach(log string) {
 		for fd in 3 .. 256 {
 			os.fd_close(fd)
 		}
-		// open_file sets a File's fd; os.open and open_append leave it 0
-		null := os.open_file('/dev/null', 'r') or { return }
+		null := os.open('/dev/null') or { return }
 		os.fd_dup2(null.fd, 0)
-		out := os.open_file(log, 'a') or { return }
+		out := os.open_append(log) or { return }
 		os.fd_dup2(out.fd, 1)
 		os.fd_dup2(out.fd, 2)
 	}

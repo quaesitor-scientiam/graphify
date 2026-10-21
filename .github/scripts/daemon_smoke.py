@@ -4,7 +4,8 @@
     python3 daemon_smoke.py <graphify-mcp> <graph.json> <symbol>
 
 Two servers, started as a client starts them, answer a get_node call through one
-daemon: the first starts it and the second finds it. Each exits once its client
+daemon: the first starts it and the second finds it. The second's client has roots,
+and the server asks it for them after the handshake. Each exits once its client
 closes its stdin, which a handle of the client's left open in the daemon would stop.
 The server's binary is then rebuilt (copied over itself) while the daemon runs, which
 on Windows works only because the daemon runs from a copy of it, and the daemon,
@@ -61,13 +62,36 @@ class Server:
             time.sleep(0.1)
         return None
 
-    def ask(self, symbol, timeout=180):
+    def request(self, method, timeout):
+        """The first request the server sent the client with this method."""
+        end = time.time() + timeout
+        while time.time() < end:
+            for line in self.lines:
+                try:
+                    m = json.loads(line)
+                except ValueError:
+                    continue
+                if m.get('method') == method and 'id' in m:
+                    return m
+            time.sleep(0.1)
+        return None
+
+    def ask(self, symbol, timeout=180, root=None):
+        """get_node `symbol`; a client with `root` says it has roots, and answers
+        the server's roots/list with it, which the server must send."""
+        caps = {'roots': {'listChanged': True}} if root else {}
         self.send({'jsonrpc': '2.0', 'id': 1, 'method': 'initialize', 'params': {
-            'protocolVersion': '2025-06-18', 'capabilities': {},
+            'protocolVersion': '2025-11-25', 'capabilities': caps,
             'clientInfo': {'name': 'smoke', 'version': '0'}}})
         if not self.reply(1, 30):
             return None
         self.send({'jsonrpc': '2.0', 'method': 'notifications/initialized'})
+        if root:
+            req = self.request('roots/list', 30)
+            if not req:
+                fail('the server did not ask a client with roots for them:\n' + ''.join(self.err))
+            uri = 'file://' + ('' if root.startswith('/') else '/') + root.replace('\\', '/')
+            self.send({'jsonrpc': '2.0', 'id': req['id'], 'result': {'roots': [{'uri': uri}]}})
         self.send({'jsonrpc': '2.0', 'id': 2, 'method': 'tools/call',
                    'params': {'name': 'get_node', 'arguments': {'node': symbol}}})
         r = self.reply(2, timeout)
@@ -103,11 +127,13 @@ def main():
         fail('the first server did not answer: %r\n%s' % (text, ''.join(a.err)), d)
     if len(socks(d)) != 1:
         fail('expected one daemon socket, found %s' % socks(d), d)
+    if a.request('roots/list', 0.5):
+        fail('the server asked a client without roots for them', d)
     if os.name == 'nt' and not [n for n in os.listdir(d) if n.endswith('.exe')]:
         fail('the daemon is not running from a copy of the binary', d)
 
     b = Server(exe, graph, env, cwd)
-    text = b.ask(symbol)
+    text = b.ask(symbol, root=cwd)
     if text is None or symbol not in text:
         fail('the second server did not answer: %r\n%s' % (text, ''.join(b.err)), d)
     if len(socks(d)) != 1:

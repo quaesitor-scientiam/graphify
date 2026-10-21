@@ -163,7 +163,7 @@ fn main() {
 		return
 	}
 	// the session's directory: where the server was started until the client says
-	// otherwise (session_dir)
+	// otherwise (ask_roots)
 	mut sess := &Session{
 		cfg:  cfg
 		here: os.getwd()
@@ -180,7 +180,17 @@ fn main() {
 		}
 	}
 
-	mut server := mcp.new_server(name: 'graphify', version: '0.0.1')
+	mut server := mcp.new_server(
+		name:                 'graphify'
+		version:              '0.0.1'
+		notification_handler: fn [sess] (ctx mcp.Context, method string, _ string) {
+			// the client's roots, after the handshake and when they change: asked
+			// from another thread, since the read loop must go on to read the answer
+			if method in roots_notifications && caps_have_roots(ctx.client_capabilities) {
+				spawn ask_roots(ctx, sess.dirs)
+			}
+		}
+	)
 	for t in tool_list() {
 		name := t.name
 		server.add_tool(t, fn [mut sess, name] (ctx mcp.Context, arguments string) !mcp.ToolResult {
@@ -190,7 +200,6 @@ fn main() {
 	// reading the graph leaves as much garbage again: let it go before the first
 	// tool call adds its own, which would grow the heap past it
 	gc_collect()
-	tap_stdin(sess.dirs) or { eprintln("graphify-mcp: cannot watch for the client's roots: ${err}") }
 	server.serve_stdio() or {
 		eprintln('graphify-mcp: ${err}')
 		exit(1)
@@ -251,7 +260,7 @@ mut:
 	// what the daemon sent after the last answer it read
 	pending []u8
 	app     &App = unsafe { nil }
-	// the session's directory, from the client's roots (tap_stdin): the latest only
+	// the session's directory, from the client's roots (ask_roots): the latest only
 	dirs chan string = chan string{cap: 1}
 	// whether a 2026-07-28 client was asked for its roots, which it is once
 	roots_asked bool
@@ -747,122 +756,32 @@ fn join_notes(a string, b string) string {
 	}
 }
 
-// tap_stdin puts itself between the client and the mcp module's stdio loop, which
-// reads fd 0: the client's messages go on to it through a pipe, and the tap asks the
-// client for its roots after the handshake and when they change, and sends the
-// session's directory it reads from the answer on `dirs`. The module can't do this
-// itself over stdio: a notification reaches no handler, and the roots/list
-// `Server.list_roots` sends is written only after the next message the client sends
-// is answered, and waits for an answer that the loop running a handler can't read.
-fn tap_stdin(dirs chan string) ! {
-	client := os.fd_dup(0)
-	if client < 0 {
-		return error('cannot duplicate stdin')
-	}
-	mut p := os.pipe()!
-	if os.fd_dup2(p.read_fd, 0) < 0 {
-		p.close()
-		return error('cannot replace stdin')
-	}
-	os.fd_close(p.read_fd)
-	spawn pass_stdin(client, p.write_fd, os.stdout(), dirs)
-}
+// roots_notifications are the client's notifications after which it is asked for
+// its roots: the end of the handshake, and the roots changing.
+const roots_notifications = ['notifications/initialized', 'notifications/roots/list_changed']
 
-// pass_stdin passes the lines read from `from` on to `to`, all but the client's
-// answer to roots_request, and closes `to` at the end of the input; it writes
-// roots_request to `out`, stdout.
-fn pass_stdin(from int, to int, out os.File, dirs chan string) {
-	mut requests := out
-	mut has_roots := false
-	mut pending := ''
-	for {
-		chunk, n := os.fd_read(from, 65536)
-		if n <= 0 {
-			break
-		}
-		pending += chunk
-		for {
-			i := pending.index_u8(`\n`)
-			if i < 0 {
-				break
-			}
-			line := pending[..i + 1]
-			pending = pending[i + 1..]
-			if line.contains('"initialize"') {
-				has_roots = client_has_roots(line)
-			}
-			if dir := session_dir(line) {
-				// only the latest is wanted: the tool call takes it from here
-				mut old := ''
-				dirs.try_pop(mut old)
-				dirs.try_push(dir)
-				continue
-			}
-			os.fd_write(to, line)
-			if has_roots && roots_asked(line) {
-				// a whole line in one write: the mcp module writes to stdout as well
-				requests.write_string(roots_request + '\n') or {}
-				requests.flush()
-			}
-		}
-	}
-	os.fd_write(to, pending)
-	os.fd_close(to)
-}
+// roots_timeout bounds waiting for the client's answer to roots/list.
+const roots_timeout = 10 * time.second
 
-// roots_request asks the client for its roots, the directories it works in.
-const roots_request = '{"jsonrpc":"2.0","id":"graphify-roots","method":"roots/list"}'
+// ask_roots asks the client for its roots and sends the session's directory, its
+// first root, on `dirs`, where the next tool call takes it.
+fn ask_roots(ctx mcp.Context, dirs chan string) {
+	res := ctx.list_roots(roots_timeout) or { return }
+	if res.roots.len == 0 {
+		return
+	}
+	dir := dir_of_uri(res.roots[0].uri) or { return }
+	// only the latest is wanted
+	mut old := ''
+	dirs.try_pop(mut old)
+	dirs.try_push(dir)
+}
 
 // caps_have_roots reports whether the client's capabilities, a JSON object, say it
 // can list its roots.
 fn caps_have_roots(caps string) bool {
 	any := json2.decode[json2.Any](caps) or { return false }
 	return 'roots' in any.as_map()
-}
-
-// client_has_roots reports whether `line` is the client's `initialize` request and
-// says the client can list its roots.
-fn client_has_roots(line string) bool {
-	any := json2.decode[json2.Any](line) or { return false }
-	msg := any.as_map()
-	if (msg['method'] or { return false }).str() != 'initialize' {
-		return false
-	}
-	params := (msg['params'] or { return false }).as_map()
-	caps := (params['capabilities'] or { return false }).as_map()
-	return 'roots' in caps
-}
-
-// roots_asked reports whether `line` is a notification after which the server asks
-// for the client's roots: the end of the handshake, or the roots changing.
-fn roots_asked(line string) bool {
-	if !line.contains('notifications/') {
-		return false
-	}
-	any := json2.decode[json2.Any](line) or { return false }
-	method := (any.as_map()['method'] or { return false }).str()
-	return method in ['notifications/initialized', 'notifications/roots/list_changed']
-}
-
-// session_dir is the directory of the first root in `line` when it is the client's
-// answer to roots_request; none for any other line, or a root that isn't a local
-// directory.
-fn session_dir(line string) ?string {
-	if !line.contains('"graphify-roots"') {
-		return none
-	}
-	any := json2.decode[json2.Any](line) or { return none }
-	msg := any.as_map()
-	if (msg['id'] or { return none }).str() != 'graphify-roots' {
-		return none
-	}
-	result := (msg['result'] or { return none }).as_map()
-	roots := (result['roots'] or { return none }).as_array()
-	if roots.len == 0 {
-		return none
-	}
-	uri := (roots[0].as_map()['uri'] or { return none }).str()
-	return dir_of_uri(uri)
 }
 
 // dir_of_uri is the local directory a `file://` URI names, percent-decoded, with
