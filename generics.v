@@ -207,6 +207,7 @@ fn expand_type_param_calls(edges []Edge, sources []Edge, fields []Symbol, mut in
 					file:       e.file
 					provenance: .inferred
 					lines:      e.lines
+					build:      e.build
 				}
 			}
 			continue
@@ -252,6 +253,7 @@ fn expand_type_param_calls(edges []Edge, sources []Edge, fields []Symbol, mut in
 				file:       e.file
 				provenance: .inferred
 				lines:      e.lines
+				build:      e.build
 			}
 		}
 	}

@@ -120,6 +120,12 @@ pub:
 	// order: an edge stands for every call of its callee in one declaration. Written
 	// to graph.json; empty on other edges, and on a graph extracted before them.
 	lines []int
+	// build is the condition, as a `$if` would write it, under which V compiles a
+	// `calls` edge's calls: the `$if` branches around them in the caller's body,
+	// joined by `&&`, or by `||` across call sites under different ones. Empty when
+	// a build compiles every call site's branch, or the call is under none (see
+	// Symbol.build for the declaration's own).
+	build string
 	// file is the path of the file that emitted this edge — populated for
 	// `calls`/`embeds`/`references` edges, whose `from` is the id of a
 	// declaration that may need disambiguating (see disambiguate_ids in

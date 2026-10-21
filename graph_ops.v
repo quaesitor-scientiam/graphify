@@ -118,6 +118,7 @@ fn (g Graph) build_index() Index {
 			kind:       e.kind
 			provenance: e.provenance
 			lines:      e.lines
+			build:      e.build
 		}
 		idx.adj[e.from] << to_id
 		idx.adj[to_id] << e.from
@@ -1062,7 +1063,7 @@ fn (g Graph) explain_id(id string, uncertain bool) string {
 		if e.from == id {
 			match e.kind {
 				.calls {
-					calls.add(label(idx, e.to) + prov_suffix(e.provenance), e.lines)
+					calls.add(label(idx, e.to) + prov_suffix(e.provenance), e.lines, e.build)
 					any_inferred = any_inferred || e.provenance == .inferred
 				}
 				.defines { defines << label(idx, e.to) }
@@ -1080,7 +1081,7 @@ fn (g Graph) explain_id(id string, uncertain bool) string {
 		if e.to == id {
 			match e.kind {
 				.calls {
-					called_by.add(label(idx, e.from) + prov_suffix(e.provenance), e.lines)
+					called_by.add(label(idx, e.from) + prov_suffix(e.provenance), e.lines, e.build)
 					any_inferred = any_inferred || e.provenance == .inferred
 				}
 				.defines { defined_in << label(idx, e.from) }
@@ -1160,26 +1161,36 @@ fn (g Graph) explain_id(id string, uncertain bool) string {
 }
 
 // CallList is a `calls` or `called by` list, each declaration once with the lines of
-// its call sites (Edge.lines): two edges between the same declarations, which calls
-// under different comptime conditions make, are one entry.
+// its call sites (Edge.lines) and the builds that make them (Edge.build): two edges
+// between the same declarations, which calls under different comptime conditions
+// make, are one entry.
 struct CallList {
 mut:
 	labels []string
 	lines  map[string][]int
+	builds map[string]string
 }
 
-fn (mut c CallList) add(label string, lines []int) {
+fn (mut c CallList) add(label string, lines []int, build string) {
 	if label !in c.lines {
 		c.labels << label
 		c.lines[label] = []int{}
+		c.builds[label] = build
+	} else {
+		c.builds[label] = either_build(c.builds[label], build)
 	}
 	c.lines[label] = merge_lines(c.lines[label], lines)
 }
 
 // items renders each entry, `read_ptr (vlib/net/tcp.c.v:183) at lines 198, 224`: the
-// lines are in the caller's file.
+// lines are in the caller's file. A call only some builds make says which, as a `$if`
+// would: `dial (vlib/net/openssl/ssl_connection.c.v:329) at line 39 [$if linux]`.
 fn (c CallList) items() []string {
-	return c.labels.map(it + at_lines(c.lines[it]))
+	return c.labels.map(it + at_lines(c.lines[it]) + if c.builds[it] == '' {
+		''
+	} else {
+		' [\$if ${c.builds[it]}]'
+	})
 }
 
 // at_lines renders call-site lines, ' at line 198' or ' at lines 198, 224'; '' for none.

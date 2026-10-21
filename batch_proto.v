@@ -10,7 +10,7 @@ module graphify
 //   edge_section: edge\x02edge\x02... (empty if no edges)
 //   parse_error : FileResult.parse_error (empty if the file parsed cleanly)
 //   sym  : id\x01name\x01kind_int\x01sig\x01file\x01line\x01end_line\x01is_pub\x01parent\x01doc\x01recipe\x01tparams\x01build
-//   edge : from\x01to\x01kind_int\x01is_method\x01recv_type\x01file\x01recv_recipe\x01provenance_int\x01arg_sites\x01guards\x01lines
+//   edge : from\x01to\x01kind_int\x01is_method\x01recv_type\x01file\x01recv_recipe\x01provenance_int\x01arg_sites\x01guards\x01lines\x01build
 //   lines: a calls edge's call-site lines, joined by commas
 //
 // \x01 = field sep, \x02 = record sep, \x03 = section sep, \x04 = encoded
@@ -53,7 +53,7 @@ pub fn encode_file_result(fr FileResult) string {
 			'1'
 		} else {
 			'0'
-		}}${bp_fs}${bp_clean(e.recv_type)}${bp_fs}${bp_clean(e.file)}${bp_fs}${bp_clean(e.recv_recipe)}${bp_fs}${int(e.provenance)}${bp_fs}${bp_clean(e.arg_sites)}${bp_fs}${bp_clean(e.guards)}${bp_fs}${e.lines.map(it.str()).join(',')}'
+		}}${bp_fs}${bp_clean(e.recv_type)}${bp_fs}${bp_clean(e.file)}${bp_fs}${bp_clean(e.recv_recipe)}${bp_fs}${int(e.provenance)}${bp_fs}${bp_clean(e.arg_sites)}${bp_fs}${bp_clean(e.guards)}${bp_fs}${e.lines.map(it.str()).join(',')}${bp_fs}${bp_clean(e.build)}'
 	}
 	return sym_parts.join(bp_rs) + bp_ss + edge_parts.join(bp_rs) + bp_ss + bp_clean(fr.parse_error)
 }
@@ -108,6 +108,7 @@ pub fn decode_file_result(line string) FileResult {
 				arg_sites:  if f.len > 8 { f[8] } else { '' }
 				guards:     if f.len > 9 { f[9] } else { '' }
 				lines:      if f.len > 10 && f[10] != '' { f[10].split(',').map(it.int()) } else { []int{} }
+				build:      if f.len > 11 { f[11] } else { '' }
 			}
 		}
 	}

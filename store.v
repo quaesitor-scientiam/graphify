@@ -132,6 +132,10 @@ fn graph_to_json(g Graph) string {
 			}
 			sb.write_u8(`]`)
 		}
+		if e.build != '' {
+			sb.write_string(',"build":')
+			write_json_str(mut sb, e.build)
+		}
 		sb.write_u8(`}`)
 	}
 	sb.write_u8(`]`)

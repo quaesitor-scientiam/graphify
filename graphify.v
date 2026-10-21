@@ -1282,7 +1282,7 @@ fn resolve_edges(mut g Graph) {
 				// a call of a function value, found at extraction
 				key := '${e.from}\x00${e.to}'
 				if at := seen_call[key] {
-					add_lines(mut resolved, at, e.lines)
+					add_lines(mut resolved, at, e)
 				} else {
 					seen_call[key] = resolved.len
 					resolved << e
@@ -1311,7 +1311,7 @@ fn resolve_edges(mut g Graph) {
 				if res.undeclared {
 					key := '${e.from}\x00${e.to}'
 					if at := seen_call[key] {
-						add_lines(mut resolved, at, e.lines)
+						add_lines(mut resolved, at, e)
 					} else {
 						seen_call[key] = resolved.len
 						resolved << Edge{
@@ -1331,7 +1331,7 @@ fn resolve_edges(mut g Graph) {
 					for id in variants_of[res.id] or { [res.id] } {
 						key := '${e.from}\x00${id}'
 						if at := seen_call[key] {
-							add_lines(mut resolved, at, e.lines)
+							add_lines(mut resolved, at, e)
 							if !res.inferred && resolved[at].provenance == .inferred {
 								resolved[at] = Edge{
 									...resolved[at]
@@ -1350,6 +1350,7 @@ fn resolve_edges(mut g Graph) {
 							file:       e.file
 							arg_sites:  e.arg_sites
 							lines:      e.lines
+							build:      e.build
 						}
 					}
 					continue
@@ -1359,7 +1360,7 @@ fn resolve_edges(mut g Graph) {
 				for v in variants {
 					key := '${e.from}\x00${v.id}'
 					if at := seen_call[key] {
-						add_lines(mut resolved, at, e.lines)
+						add_lines(mut resolved, at, e)
 					} else {
 						seen_call[key] = resolved.len
 						resolved << Edge{
@@ -1371,6 +1372,7 @@ fn resolve_edges(mut g Graph) {
 							file:       e.file
 							arg_sites:  e.arg_sites
 							lines:      e.lines
+							build:      e.build
 						}
 					}
 				}
@@ -1405,7 +1407,7 @@ fn resolve_edges(mut g Graph) {
 		if e.kind == .calls {
 			key := if e.guards == '' { '${e.from}\x00${e.to}' } else { '${e.from}\x00${e.to}\x00${e.guards}' }
 			if at := seen_call[key] {
-				add_lines(mut resolved, at, e.lines)
+				add_lines(mut resolved, at, e)
 				continue
 			}
 			seen_call[key] = resolved.len
@@ -1422,6 +1424,7 @@ fn resolve_edges(mut g Graph) {
 						kind:       .calls
 						provenance: .inferred
 						lines:      e.lines
+						build:      e.build
 					}
 					continue
 				}
@@ -1574,7 +1577,7 @@ fn (mut b BuildWorlds) infer_call(e Edge, here ?CallResolution) []CallResolution
 fn add_resolved_call(mut resolved []Edge, mut seen_call map[string]int, e Edge, r CallResolution) {
 	key := '${e.from}\x00${r.id}'
 	if at := seen_call[key] {
-		add_lines(mut resolved, at, e.lines)
+		add_lines(mut resolved, at, e)
 		return
 	}
 	seen_call[key] = resolved.len
@@ -1587,6 +1590,7 @@ fn add_resolved_call(mut resolved []Edge, mut seen_call map[string]int, e Edge, 
 		file:       e.file
 		arg_sites:  e.arg_sites
 		lines:      e.lines
+		build:      e.build
 	}
 }
 
@@ -2157,14 +2161,12 @@ fn rel_path(root string, path string) string {
 	return rel.replace('\\', '/')
 }
 
-// add_lines adds `lines`, the call sites of another raw edge that resolved to the same
-// call, to the resolved edge at `at`.
-fn add_lines(mut edges []Edge, at int, lines []int) {
-	if lines.len == 0 {
-		return
-	}
+// add_lines adds the call sites of `e`, another raw edge that resolved to the same
+// call, to the resolved edge at `at`: their lines, and the builds that make them.
+fn add_lines(mut edges []Edge, at int, e Edge) {
 	edges[at] = Edge{
 		...edges[at]
-		lines: merge_lines(edges[at].lines, lines)
+		lines: merge_lines(edges[at].lines, e.lines)
+		build: either_build(edges[at].build, e.build)
 	}
 }
