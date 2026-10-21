@@ -185,7 +185,11 @@ fn with_every_match_branch(src string) string {
 // import is kept as written. The lookup follows V3's order: the importing
 // project's root (its nearest v.mod), the importing file's directory, the
 // tree's own `vlib` (when extracting V itself), then each ancestor directory.
-// A candidate is a directory holding .v files. The name is the module's path
+// A candidate is a directory holding .v files. The importing file's own directory
+// counts only when it declares the module imported: an external test, `module main`
+// in vlib/v/tests/private_mutability, imports `private_mutability` from beside it,
+// but `import mcp` in cmd/mcp/main.v, a `module main` program, is vlib's mcp. The
+// name is the module's path
 // below `vlib` (`v.tests.geometry`, and `os` for vlib/os), or below the tree's
 // root elsewhere. A module found nowhere, such as the standard library of a
 // project that doesn't include it, stays as written, unless the library is read
@@ -227,7 +231,7 @@ fn resolve_import(mod string, file_path string, rel string) string {
 		d = d.all_before_last('/')
 	}
 	for c in cands {
-		if has_v_sources(c) {
+		if has_v_sources(c) && (c != file_dir || declares_module(c, mod.all_after_last('.'))) {
 			// an alias directory holds only the attribute, and `import x.json2` is
 			// the module it names (`json2`, for vlib/json2)
 			if target := alias_dir_target(c) {
@@ -263,6 +267,27 @@ fn alias_dir_target(dir string) ?string {
 	prefix := "@[alias: '@VMODROOT/"
 	start := src.index(prefix) or { return none }
 	return src[start + prefix.len..].all_before("'")
+}
+
+// declares_module reports whether a file in `dir` other than a test declares
+// `module name`.
+fn declares_module(dir string, name string) bool {
+	for f in os.ls(dir) or { return false } {
+		if !f.ends_with('.v') || f.ends_with('_test.v') {
+			continue
+		}
+		text := os.read_file(os.join_path(dir, f)) or { continue }
+		for line in text.split_into_lines() {
+			l := line.trim_space()
+			if l.starts_with('module ') {
+				if l.all_after('module ').trim_space() == name {
+					return true
+				}
+				break
+			}
+		}
+	}
+	return false
 }
 
 fn has_v_sources(dir string) bool {
