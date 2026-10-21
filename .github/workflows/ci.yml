@@ -5,11 +5,10 @@ on:
   pull_request:
 
 # The vlang commit every job builds V from, when V's newest one is broken: empty
-# takes the newest. Set while vlang/v da62dd4bd7 (v3: represent sum types as tagged
-# unions) crashes its own build on Linux ("V panic: invalid source type ID"); empty
-# it again once a later commit builds.
+# takes the newest. Set to one while V's newest crashes its own build, and emptied
+# again once a later commit builds.
 env:
-  VLANG_PIN: 7940bb1a8eca9959a5884deb14a80edeb6e3e518
+  VLANG_PIN: ''
 
 jobs:
   build-and-smoke-test:

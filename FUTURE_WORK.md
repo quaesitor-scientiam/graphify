@@ -1421,10 +1421,13 @@ stdio the module can't ask a 2025-11-25 client itself: no handler sees a notific
 so nothing knows the handshake is done or the roots changed; the `roots/list` that
 `Server.list_roots` sends is queued until the module has answered the next message the
 client sends; and `list_roots` blocks, so a tool handler calling it waits for an answer
-that the loop running the handler would have to read. So the server sits between the
-client and the module (`tap_stdin`): the client's messages reach the module through a
-pipe put on fd 0, and the tap asks for the roots and takes the answer, as the server
-did before. Tool results are the same, and so is what the session allocates (4.26 GB
+that the loop running the handler would have to read. So the server sat between the
+client and the module (`tap_stdin`): the client's messages reached the module through a
+pipe put on fd 0, and the tap asked for the roots and took the answer, as the server
+did before. vlang/v#30940 fixed the module: a `notification_handler` sees each of the
+client's notifications, and a request from another thread is written at once. The
+server now asks with `Context.list_roots` from a thread its handler spawns
+(`ask_roots`), and the tap is gone. Tool results are the same, and so is what the session allocates (4.26 GB
 over a run of 42 tool calls on the vlang graph, against 4.26 GB). The run's peak was
 1.45 GB or 1.57 GB from one run to the next, with either server: the graph read leaves
 0.7 GB of garbage that the first calls added to before the collector ran. One collection
@@ -1458,10 +1461,12 @@ session's layered graph, 3.0 GB with six; six servers each reading their own too
 about 7 GB. A call to a daemon already running took 0.04 s.
 
 Three things V's library did that had to be worked around: a `unix.StreamListener`
-blocks in `accept` whatever its accept timeout (the daemon waits with
+blocked in `accept` whatever its accept timeout (the daemon waited with
 `wait_for_accept` first), a `unix.StreamConn` reads with a 30 s timeout by default
-(a quiet session would have lost its connection), and a File from `os.open` or
-`os.open_append` has `fd` 0 (the daemon's log is opened with `os.open_file`).
+(a quiet session would have lost its connection), and a File from `os.open_append`
+had `fd` 0 (the daemon's log was opened with `os.open_file`). vlang/v#30944 and
+#30945 fixed the first and the last, and the daemon now uses `accept` and
+`open_append` as they are; the read timeout is still set to `time.infinite`.
 
 **A layer falls through to the base's index (October 2026).** Each layered graph
 copied vlang's 69,000 vlib symbols and the edges from them, and indexed all of it,
