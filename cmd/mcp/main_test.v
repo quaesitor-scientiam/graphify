@@ -343,3 +343,40 @@ fn test_the_daemon_shares_one_base_graph_between_sessions() {
 	_, bad := d.answer('not json')
 	assert bad
 }
+
+// shortest_path lists 5 chains of calls, or the `routes` it is given, up to 50.
+fn test_shortest_path_lists_as_many_routes_as_it_is_asked_for() {
+	dir := os.join_path(os.temp_dir(), 'graphify routes ${os.getpid()}')
+	defer {
+		os.rmdir_all(dir) or {}
+	}
+	src := os.join_path(dir, 'src')
+	os.mkdir_all(src) or { panic(err) }
+	mut code := 'module m\n\npub fn goal() {}\n\npub fn start() {\n'
+	for i in 0 .. 7 {
+		code += '\tvia_${i}()\n'
+	}
+	code += '}\n'
+	for i in 0 .. 7 {
+		code += '\nfn via_${i}() {\n\tgoal()\n}\n'
+	}
+	os.write_file(os.join_path(src, 'm.v'), code) or { panic(err) }
+	g := graphify.build_graph(graphify.Options{ root: src })
+	served := Served{
+		g:       g
+		project: g
+	}
+	mut args := {
+		'a': json2.Any('start')
+		'b': json2.Any('goal')
+	}
+	text, is_error := call_tool('shortest_path', args, served, '')
+	assert !is_error
+	assert text.contains('5. start') && !text.contains('6. start'), text
+	args['routes'] = json2.Any(7)
+	all, _ := call_tool('shortest_path', args, served, '')
+	assert all.contains('7. start') && !all.contains('the 5 shortest'), all
+	args['routes'] = json2.Any(0)
+	one, _ := call_tool('shortest_path', args, served, '')
+	assert one.contains('the 1 shortest') && !one.contains('2. start'), one
+}

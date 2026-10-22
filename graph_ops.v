@@ -768,8 +768,13 @@ pub fn (g Graph) call_path(a string, b string) []string {
 	return if paths.len > 0 { paths[0] } else { []string{} }
 }
 
-// how many steps longer than the shortest a chain call_paths lists may be
-const call_path_slack = 3
+// how many steps longer than the shortest a chain call_paths lists may be. The routes
+// of a build the default one lacks are the long ones: of the 17 from `http.get` to
+// `net.dial_tcp`, the 10 that need `use_openssl ?` are up to 9 longer than the
+// shortest, and 3 was far enough for only 3 of them. It is cheap to look this far (about
+// 3,000 of call_path_steps' 200,000 steps there), and call_path_steps and
+// call_path_count_cap bound a search that isn't.
+const call_path_slack = 10
 
 // how many steps call_paths takes looking for chains before it stops with those it has
 const call_path_steps = 200_000
@@ -1174,11 +1179,24 @@ pub fn (g Graph) render_call_path(ids []string) string {
 // shortest first; else those from `b` to `a`, said so; else the shortest link through
 // any relation (shortest_path), said so. '' when nothing links them.
 pub fn (g Graph) path_between(a string, b string) string {
-	forward := g.count_call_paths(a, b, max_call_paths)
+	return g.path_between_routes(a, b, max_call_paths)
+}
+
+// path_between_routes is path_between with up to `routes` chains listed instead of
+// max_call_paths: at least 1 and at most max_listed_call_paths, whatever it is given.
+pub fn (g Graph) path_between_routes(a string, b string, routes int) string {
+	max := if routes < 1 {
+		1
+	} else if routes > max_listed_call_paths {
+		max_listed_call_paths
+	} else {
+		routes
+	}
+	forward := g.count_call_paths(a, b, max)
 	if forward.paths.len > 0 {
 		return g.render_call_paths(forward)
 	}
-	back := g.count_call_paths(b, a, max_call_paths)
+	back := g.count_call_paths(b, a, max)
 	if back.paths.len > 0 {
 		return "(`${a}` doesn't reach `${b}` by calls, but `${b}` reaches `${a}`:)\n" +
 			g.render_call_paths(back)
@@ -1193,6 +1211,9 @@ pub fn (g Graph) path_between(a string, b string) string {
 
 // the most chains of calls path_between shows
 const max_call_paths = 5
+
+// the most chains of calls path_between_routes will show
+const max_listed_call_paths = 50
 
 // render_call_paths renders chains of calls (render_call_path): one as it is, several
 // numbered, after a line that says how many there are in all (at least that many

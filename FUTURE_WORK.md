@@ -1728,3 +1728,45 @@ On vlang `22b23697e8`, against master:
   contradictory.
 - **Cost:** extraction time is unchanged (7.9–8.8 s for both). A path answer
   takes about 1.1 s from the CLI, as before.
+
+### PR 4: the routes of another build that are long (October 2026)
+
+PR 3 counted 10 chains from `http.get` to `net.dial_tcp` where the benchmark's key
+(bench/compare/key.md) has 17: the 7 every build has, and 10 that need `use_openssl ?`.
+The 7 missing were not a build problem. A route is listed only if it is at most
+`call_path_slack` calls longer than the shortest, which was 3, and the OpenSSL routes
+are the long ones: the shortest route has 5 calls, and they have 7 to 14.
+
+- **`call_path_slack` is 10.** On vlang `22b23697e8`, `http.get` to `net.dial_tcp`:
+
+  | slack | chains | default build's | other builds' |
+  | --- | --- | --- | --- |
+  | 3 | 10 | 7 | 3 |
+  | 5 | 12 | 7 | 5 |
+  | 8 | 16 | 7 | 9 |
+  | 10 | 17 | 7 | 10 |
+  | 13 | 17 | 7 | 10 |
+
+  The longest route has 14 calls, 9 more than the shortest, so 9 is the least that
+  finds all 17 (8 finds 16), and 10 leaves a call to spare. The 17 are the key's 17,
+  one for one: the same functions in the same order of calls, the 10 others being 5
+  under `use_openssl ?` and 5 under `windows && !no_vschannel ? && use_openssl ?`
+  (one) or the same with `(cross ? || windows)` (four).
+- **It is cheap to look this far.** The search took 430 of its 200,000 steps at slack 3
+  and about 3,000 at 10, and a path answer takes the same 3 s from the `-prod` CLI
+  (3 runs each: 2.8–3.6 s before, 3.0–3.6 s after). `http.fetch`, `http.download_file`
+  and `http.post_json` to `net.dial_tcp` go from 10 chains to 17 as well, and
+  `veb.run` to `join_path` from 6 to 11 (8 in the default build). The other pairs I
+  tried, such as `os.walk` to `os.is_dir`, are unchanged. A search that is dearer is
+  still stopped at 200,000 steps or 1,000 routes, and says so ("at least").
+- **`routes` lists more.** With 7 default routes, the 5 shown never included one of
+  another build, only a line naming their builds, so the 10 were counted but not
+  there to read. `shortest_path` takes `routes` (`graphify path a b --routes 20`): how
+  many chains to list, 5 by default, at most 50, at least 1. The default build's come
+  first, then the others, each shortest first, as before.
+
+Not changed:
+
+- Only routes up to 10 calls longer than the shortest are found. A longer one, of
+  any build, is neither listed nor counted.
+- The benchmark has not been re-run with this.

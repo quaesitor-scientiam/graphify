@@ -519,9 +519,13 @@ fn call_tool(name string, args map[string]json2.Any, served Served, note string)
 			}
 		}
 		'shortest_path' {
-			path := g.path_between((args['a'] or { json2.null }).str(), (args['b'] or {
-				json2.null
-			}).str())
+			a := (args['a'] or { json2.null }).str()
+			b := (args['b'] or { json2.null }).str()
+			path := if 'routes' in args {
+				g.path_between_routes(a, b, (args['routes'] or { json2.null }).int())
+			} else {
+				g.path_between(a, b)
+			}
 			if path == '' {
 				'(no path)'
 			} else {
@@ -564,9 +568,10 @@ fn tool_list() []mcp.Tool {
 			'List the names of all symbols directly linked to a symbol (calls, callers, defines, imports).', schema({
 			'node': prop('string', 'symbol name or id')
 		}, ['node'])),
-		tool('shortest_path', 'How a reaches b: how many chains of calls lead from a to b, none needing builds that contradict each other, and the 5 shortest, those of the default build first, each call with its line and the build it needs where not every build has it (or those from b to a, when only that way has one); with no chain of calls, the shortest link through any relation.', schema({
-			'a': prop('string', 'start symbol name or id')
-			'b': prop('string', 'goal symbol name or id')
+		tool('shortest_path', 'How a reaches b: how many chains of calls lead from a to b, none needing builds that contradict each other, and the 5 shortest (`routes` for more), those of the default build first, each call with its line and the build it needs where not every build has it (or those from b to a, when only that way has one); with no chain of calls, the shortest link through any relation.', schema({
+			'a':      prop('string', 'start symbol name or id')
+			'b':      prop('string', 'goal symbol name or id')
+			'routes': prop('integer', 'how many chains of calls to list (default 5, at most 50)')
 		}, ['a', 'b'])),
 	]
 }

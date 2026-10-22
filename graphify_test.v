@@ -9767,7 +9767,7 @@ fn again() {
 	assert g.call_paths('get', 'dial_tcp', 1) == [paths[0]]
 	assert g.call_path('get', 'dial_tcp') == paths[0]
 	text := g.path_between('get', 'dial_tcp')
-	assert text == ['2 chains of calls from get to dial_tcp, at most 3 calls longer than the shortest:',
+	assert text == ['2 chains of calls from get to dial_tcp, at most 10 calls longer than the shortest:',
 		'',
 		'1. get (http/http.v:5)', '  -> fresh (http/http.v:13), called at line 7',
 		'  -> dial_tcp (net/tcp.v:3), called at line 14', '', '2. get (http/http.v:5)',
@@ -9831,8 +9831,72 @@ fn test_a_path_says_how_many_routes_there_are_past_those_it_shows() {
 	r := g.count_call_paths('start', 'goal', 5)
 	assert r.paths.len == 5 && r.total == 7 && r.exact, r.str()
 	text := g.path_between('start', 'goal')
-	assert text.all_before('\n') == '7 chains of calls from start to goal, at most 3 calls longer than the shortest; the 5 shortest:', text
+	assert text.all_before('\n') == '7 chains of calls from start to goal, at most 10 calls longer than the shortest; the 5 shortest:', text
 	assert text.contains('5. start') && !text.contains('6. start')
+}
+
+// The routes of a build the default one lacks are the long ones: `http.get` has 10 to
+// `net.dial_tcp` that need `use_openssl ?`, and they run up to 9 calls longer than the
+// shortest. A chain 10 longer is listed and counted, in its own build; one 11 longer is
+// not.
+fn test_a_route_ten_calls_longer_than_the_shortest_is_a_route_and_one_eleven_longer_is_not() {
+	mut src := 'module m\n\npub fn goal() {}\n\npub fn start() {\n\tgoal()\n\t\$if use_openssl ? {\n\t\tslow_0()\n\t}\n\ttoo_slow_0()\n}\n'
+	// start, 10 functions, goal: 11 calls
+	for i in 0 .. 10 {
+		next := if i == 9 { 'goal' } else { 'slow_${i + 1}' }
+		src += '\nfn slow_${i}() {\n\t${next}()\n}\n'
+	}
+	// start, 11 functions, goal: 12 calls
+	for i in 0 .. 11 {
+		next := if i == 10 { 'goal' } else { 'too_slow_${i + 1}' }
+		src += '\nfn too_slow_${i}() {\n\t${next}()\n}\n'
+	}
+	g := graph_of({
+		'm/m.v': src
+	})
+	r := g.count_call_paths('start', 'goal', 5)
+	assert r.total == 2 && r.in_default == 1 && r.exact, r.str()
+	assert r.other_builds == {
+		'use_openssl ?': 1
+	}, r.other_builds.str()
+	assert r.paths.map(it.len) == [2, 12], r.paths.str()
+	text := g.path_between('start', 'goal')
+	assert text.all_before('\n') == '2 chains of calls from start to goal (1 in the default build), at most 10 calls longer than the shortest:', text
+	assert text.contains('slow_9') && !text.contains('too_slow')
+}
+
+// `routes` is how many chains of calls are listed: all of them when there are no more
+// than that, and never more than 50, nor fewer than 1.
+fn test_a_path_lists_as_many_routes_as_asked_for_up_to_fifty() {
+	mut src := 'module m\n\npub fn goal() {}\n\npub fn start() {\n'
+	for i in 0 .. 60 {
+		src += '\tvia_${i}()\n'
+	}
+	src += '}\n'
+	for i in 0 .. 60 {
+		src += '\nfn via_${i}() {\n\tgoal()\n}\n'
+	}
+	g := graph_of({
+		'm/m.v': src
+	})
+	assert g.path_between('start', 'goal') == g.path_between_routes('start', 'goal', 5)
+	seven := g.path_between_routes('start', 'goal', 7)
+	assert seven.all_before('\n') == '60 chains of calls from start to goal, at most 10 calls longer than the shortest; the 7 shortest:', seven
+	assert seven.contains('7. start') && !seven.contains('8. start')
+	// more than there are, and than a path lists
+	most := g.path_between_routes('start', 'goal', 1000)
+	assert most.contains('50. start') && !most.contains('51. start')
+	assert most.all_before('\n').ends_with('; the 50 shortest:'), most
+	// fewer than 1 is 1
+	assert g.path_between_routes('start', 'goal', 0) == g.path_between_routes('start', 'goal', 1)
+	assert g.path_between_routes('start', 'goal', -3) == g.path_between_routes('start', 'goal', 1)
+	// and when all of them fit, they are all there, with no count of the rest
+	few := graph_of({
+		'm/m.v': 'module m\n\npub fn goal() {}\n\npub fn start() {\n\tone()\n\ttwo()\n\tthree()\n}\n\nfn one() {\n\tgoal()\n}\n\nfn two() {\n\tgoal()\n}\n\nfn three() {\n\tgoal()\n}\n'
+	})
+	all := few.path_between_routes('start', 'goal', 3)
+	assert all.all_before('\n') == '3 chains of calls from start to goal, at most 10 calls longer than the shortest:', all
+	assert all.contains('3. start')
 }
 
 fn test_a_file_name_says_which_builds_compile_it() {
@@ -10149,7 +10213,7 @@ fn test_a_name_only_an_option_makes_true_is_not_the_default_build() {
 		'freestanding': 1
 	}, r.other_builds.str()
 	text := g.path_between('start', 'goal')
-	assert text.all_before('\n') == '2 chains of calls from start to goal (1 in the default build), at most 3 calls longer than the shortest:', text
+	assert text.all_before('\n') == '2 chains of calls from start to goal (1 in the default build), at most 10 calls longer than the shortest:', text
 }
 
 // `&&` binds tighter than `||`: a build with an `||` outside any brackets is one term,
@@ -10231,7 +10295,7 @@ fn plain_check() {
 		['net.get', 'net.ssl_dial', 'net.dial_tcp']], r.paths.str()
 	assert g.call_path('get', 'dial_tcp') == r.paths[0]
 	text := g.path_between('get', 'dial_tcp')
-	assert text.all_before('\n') == '2 chains of calls from get to dial_tcp (1 in the default build), at most 3 calls longer than the shortest:', text
+	assert text.all_before('\n') == '2 chains of calls from get to dial_tcp (1 in the default build), at most 10 calls longer than the shortest:', text
 	assert text.contains(['2. get (net/tcp.v:5)',
 		'  -> ssl_dial (net/ssl_d_use_openssl.v:3), called at line 8 [\$if use_openssl ?]',
 		'  -> dial_tcp (net/tcp.v:3), called at line 4', '  needs \$if use_openssl ?'].join('\n')), text
