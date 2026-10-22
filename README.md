@@ -673,22 +673,20 @@ v run bin/update-vlang-graph.vsh -NoBuild         # never rebuild graphify
 v run bin/update-vlang-graph.vsh -PrintStamp      # print the build stamp and stop
 ```
 
-The graph depends on graphify's own code and on the V parser it was compiled
-with, the `vlib` of the `v` on `PATH`, so a binary built before either one
-changed extracts a different graph. The script records what each build saw in
-`bin/.build-stamp` (graphify's commit and uncommitted changes, and the git
-tree of each `vlib/v` directory graphify compiles in, which `v -print-v-files`
-lists) and, after pulling, rebuilds `bin/graphify` and any `graphify-mcp` and
+graphify's binaries depend on graphify's own code and on the V that builds them:
+the compiler, the `v` on `PATH`, and the `vlib` and `thirdparty` (the garbage
+collector) it compiles in. The script records what each build saw in
+`bin/.build-stamp` (graphify's commit and uncommitted changes, `v version`, and
+the git trees of `vlib` and `thirdparty` with their uncommitted changes) and,
+after pulling, rebuilds `bin/graphify` and any `graphify-mcp` and
 `graphify-hook` beside it whenever that no longer matches. Each binary is built
 under a temporary name and swapped in, so an MCP server that is running it
-doesn't block the build on Windows. When the `v` on `PATH` is the vlang
-checkout being extracted, a pull that changes one of those directories (the
-parser: `flat`, `parser`, `scanner`, `token`, and a few helpers) triggers the
-rebuild by itself; a pull that only touches the rest of `vlib` (`os`,
-`strings`, ...) or rebuilds `v` does not, since it can't change the graph. If
-`v` isn't a git checkout, or the compiler can't list the directories, the stamp
-falls back to `v version` and the whole of `vlib`. `-PrintStamp` prints the
-stamp and stops.
+doesn't block the build on Windows. So every `v up` rebuilds them, about 36 s:
+a new compiler can change how they run even when the graph they extract is the
+same (vlang/v#30996, a fix in the C backend alone, stopped `graphify-mcp`
+losing live strings to the garbage collector). If `v` isn't a git checkout, the
+stamp names its `vlib` and `thirdparty` directories instead. `-PrintStamp`
+prints the stamp and stops.
 
 A graph, vlang's or a project's, is out of date when it has none yet, or its
 `manifest.json` says it was extracted from another commit of its repo, by

@@ -244,34 +244,13 @@ fn set_vroot(log_path string) {
 	log_line(log_path, 'libraries: vlib from ${vroot}, VMODULES ${vmodules}')
 }
 
-// v_dirs_compiled_in lists the `vlib/v` directories (`v/flat`, `v/parser`, ...)
-// that graphify's programs compile in, as the V compiler reports them. The
-// rest of vlib (os, strings, ...) is compiled in too, but only these hold the
-// parser the graph is read through. Empty when the compiler can't say.
-fn v_dirs_compiled_in(graphify_root string, v_exe string) []string {
-	mut dirs := map[string]bool{}
-	for program in ['cmd/cli', 'cmd/mcp'] {
-		res := os.exec([v_exe, '-print-v-files', os.join_path(graphify_root, program)])
-		if res.exit_code != 0 {
-			return []
-		}
-		for line in res.output.split_into_lines() {
-			path := line.trim_space().replace('\\', '/')
-			i := path.last_index('/vlib/v/') or { continue }
-			rest := path[i + '/vlib/v/'.len..]
-			dirs[if rest.contains('/') { 'v/' + rest.all_before_last('/') } else { 'v' }] = true
-		}
-	}
-	mut out := dirs.keys()
-	out.sort()
-	return out
-}
-
-// build_stamp names what a graphify build depends on: graphify's commit (plus
-// its uncommitted changes) and the git tree of each vlib/v directory it
-// compiles in. A change elsewhere in vlib, or a rebuilt `v`, doesn't alter the
-// graph, so it doesn't count: most of vlang's pulls touch vlib, and a rebuild
-// and a cold re-extract after each is minutes of work.
+// build_stamp names what a graphify build depends on: graphify's commit (plus its
+// uncommitted changes), the compiler that builds it, `v version`, and the vlib and
+// thirdparty (libgc) it compiles in, as their git trees (plus their uncommitted
+// changes). A new compiler counts even when vlib/v's parser, all the graph is read
+// through, is the same: vlang/v#30996 changed only the C backend, and graphify-mcp
+// went on losing live strings to the GC until it was rebuilt. A rebuild after each
+// `v up` is about 36 s on top of the re-extract the moved vlib asks for anyway.
 fn build_stamp(graphify_root string, v_exe string) !string {
 	v_root := os.dir(os.real_path(v_exe))
 	mut lines := []string{}
@@ -280,27 +259,19 @@ fn build_stamp(graphify_root string, v_exe string) !string {
 	if diff.output.trim_space() != '' {
 		lines << 'graphify-diff ${sha256.hexhash(diff.output)}'
 	}
-	mut trees := []string{}
-	for dir in v_dirs_compiled_in(graphify_root, v_exe) {
-		tree := git(v_root, 'rev-parse', 'HEAD:vlib/${dir}')
-		if tree.exit_code != 0 {
-			trees.clear()
-			break
+	lines << 'compiler ${os.exec([v_exe, 'version']).output.trim_space()}'
+	for dir in ['vlib', 'thirdparty'] {
+		tree := git(v_root, 'rev-parse', 'HEAD:${dir}')
+		if tree.exit_code == 0 {
+			lines << '${dir} ${tree.output.trim_space()}'
+		} else {
+			// `v` isn't a git checkout
+			lines << '${dir} ${os.join_path(v_root, dir)}'
 		}
-		trees << 'vlib/${dir} ${tree.output.trim_space()}'
 	}
-	if trees.len > 0 {
-		lines << trees
-		return lines.join('\n')
-	}
-	// the compiler couldn't say what is compiled in, or `v` isn't a git
-	// checkout: fall back to the compiler's version and the whole of vlib
-	lines << 'v ${os.exec([v_exe, 'version']).output.trim_space()}'
-	vlib := git(v_root, 'rev-parse', 'HEAD:vlib')
-	if vlib.exit_code == 0 {
-		lines << 'vlib ${vlib.output.trim_space()}'
-	} else {
-		lines << 'vlib ${v_root}'
+	v_diff := git(v_root, 'diff', 'HEAD', '--', 'vlib', 'thirdparty')
+	if v_diff.exit_code == 0 && v_diff.output.trim_space() != '' {
+		lines << 'v-diff ${sha256.hexhash(v_diff.output)}'
 	}
 	return lines.join('\n')
 }
