@@ -1,0 +1,4 @@
+run1 graphify  turns 64, 252 s, $0.36, 63 tool calls {'Grep': 30, 'Read': 18, 'mcp__graphify__get_node': 6, 'mcp__graphify__get_body': 4, 'mcp__graphify__get_neighbors': 2, 'ToolSearch': 1, 'mcp__graphify__shortest_path': 1, 'Bash': 1}; MCP servers ['graphify'], mcp__ tools 6
+run2 baseline  turns 50, 192 s, $0.34, 49 tool calls {'Grep': 25, 'Read': 22, 'Bash': 2}; MCP servers none, mcp__ tools 0
+run3 baseline  turns 81, 295 s, $0.51, 80 tool calls {'Grep': 48, 'Read': 29, 'Bash': 3}; MCP servers none, mcp__ tools 0
+run4 graphify  turns 52, 209 s, $0.25, 51 tool calls {'Read': 15, 'Grep': 13, 'mcp__graphify__get_node': 12, 'Bash': 5, 'mcp__graphify__get_body': 2, 'ToolSearch': 1, 'mcp__graphify__query_graph': 1, 'mcp__graphify__shortest_path': 1, 'mcp__graphify__get_neighbors': 1}; MCP servers ['graphify'], mcp__ tools 6
