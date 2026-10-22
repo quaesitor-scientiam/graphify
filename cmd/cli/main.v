@@ -30,6 +30,9 @@ query options:
   --budget <n>   token budget for the result (default 2000)
   --dfs          walk depth-first instead of breadth-first
 
+path options:
+  --routes <n>   chains of calls to list (default 5, at most 50)
+
 merge-graphs options:
   --out <file>     output path (default ./merged-graph.json)
   --labels <list>  comma-separated namespace label per input graph, in order;
@@ -196,7 +199,11 @@ fn cmd_path(args []string) {
 	a := positional(args, 0) or { fail('path: needs two symbols') }
 	b := positional(args, 1) or { fail('path: needs two symbols') }
 	g := load(args)
-	text := g.path_between(a, b)
+	text := if routes := int_flag(args, '--routes') {
+		g.path_between_routes(a, b, routes)
+	} else {
+		g.path_between(a, b)
+	}
 	if text == '' {
 		println('no path between "${a}" and "${b}"')
 		return
@@ -398,7 +405,7 @@ fn positionals(args []string) []string {
 		a := args[i]
 		if a.starts_with('--') {
 			if a in ['--budget', '--graph', '--source-dir', '--out', '--store', '--labels', '--resolution',
-				'--restarts'] {
+				'--restarts', '--routes'] {
 				i++ // skip the flag's value
 			}
 			continue
