@@ -182,7 +182,13 @@ pub fn (g Graph) report() string {
 	b << '- root: `${g.root}`'
 	b << '- files: ${files.len}'
 	b << '- symbols: ${g.symbols.len}'
-	b << '- edges: ${edges.len}'
+	left_out := g.edges.len - edges.len
+	library_note := if left_out > 0 {
+		' (${left_out} more from library declarations, not counted)'
+	} else {
+		''
+	}
+	b << '- edges: ${edges.len}${library_note}'
 	if g.library.symbols.len > 0 {
 		mut roots := []string{}
 		for label, root in g.library.roots {

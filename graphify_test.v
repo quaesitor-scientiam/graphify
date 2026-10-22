@@ -9255,6 +9255,9 @@ pub fn unused() {}
 	// the report counts the project's edges, not the module's
 	project_calls := g.edges.filter(it.kind == .calls && !it.from.starts_with('vmodules.')).len
 	assert g.report().contains('- calls: ${project_calls}\n'), g.report()
+	// and the edges line says how many the library's declarations have that it leaves out
+	project_edges := g.edges.filter(!it.from.starts_with('vmodules.')).len
+	assert g.report().contains('- edges: ${project_edges} (${g.edges.len - project_edges} more from library declarations, not counted)\n'), g.report()
 }
 
 fn test_a_module_from_vmodules_updated_in_place_makes_the_graph_stale() {
