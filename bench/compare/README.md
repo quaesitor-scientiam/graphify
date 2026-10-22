@@ -7,21 +7,43 @@ at its source line.
 
 ## How to run it
 
-1. Hold vlang at the key's commit (417c85b1ec), or rebuild the key at another one.
-2. Start four read-only agents, two per tool, with the same prompt but for the
-   tools: "answer the questions in questions.md; you are scored against a complete
-   key, and each item you miss or get wrong counts against you; keep going until
-   every list is complete." One pair may use the graphify tools (and Grep/Read where
-   the graph can't answer), the other only Grep, Glob, Read and read-only Bash.
-3. Save each answer without its tool counts under a label that doesn't say which
-   tool it used.
-4. Have an agent grade the labelled answers against the key, blind to which tool made
-   which, checking at the source any item the key may lack.
-5. Take each agent's tool calls and time from its usage, and its tokens from its
-   transcript with `usage.py` (see Measures).
+`headless/run.sh` (macOS, Linux) or `headless/run.ps1` (Windows) runs a whole round
+as separate `claude -p` sessions, so every machine runs the same test:
 
-Two runs a tool, because one run is noisy: in earlier, single-run rounds grep took
-between 40 and 67 s on the same questions.
+```bash
+bench/compare/headless/run.sh /tmp/vbench-$(date +%F)
+```
+
+- It runs four sessions at once, two per tool, with the same prompt but for the
+  tools (`headless/prompt-*.md`):
+  - **graphify:** the graphify MCP server and the user's setup, as a normal session has.
+  - **baseline:** no MCP server (`--strict-mcp-config` with none) and none of the
+    user's settings (`--setting-sources project,local`), so no graphify hook or
+    `~/.claude/CLAUDE.md` reaches it. It checks each run's own start record, and
+    fails if a baseline run saw an MCP server.
+- Every run may use Grep, Glob, Read and read-only shell commands; a graphify run may
+  also use the graphify tools.
+- Then it has a blind grader grade the four answers. The grader is a baseline-style
+  session that sees only the labels run1 to run4 (`headless/prompt-grade.md`).
+- Settings default to `graphify.config.json` (`vlang_repo`, `store`): `VLANG`,
+  `GRAPHIFY_MCP`, `GRAPH`, `PROJECTS` and `MODEL` override them.
+- The output directory's path must not contain "graphify", since the runs see it.
+- The CLI must be logged in (`claude auth login`).
+
+It writes each run's transcript (`.jsonl`) and answer (`.md`), `mapping.txt` (runs
+1 and 4 are graphify), `runs.txt` (turns, time, cost, tool calls, MCP servers seen),
+`usage.txt` (`usage.py`) and `grade.md`. Copy the answers and those files into
+`results/<date>/` to keep a round.
+
+The key is keyed at vlang 417c85b1ec, with its changes at later commits at its end.
+At another commit, the grader re-keys at the source and reports any drift.
+
+Rounds before 2026-10-22 ran as subagents of one session: four read-only agents with
+the same prompt, graded by a fifth. A grep agent there still had the graphify tools
+loaded, the user's CLAUDE.md telling it to use them, and a hook suggesting graphify on
+each search. That made its baseline not quite one. Two runs a tool, because one run is
+noisy: in earlier, single-run rounds grep took between 40 and 67 s on the same
+questions.
 
 ## Measures
 
@@ -45,6 +67,76 @@ transcripts record only a few hundred per run, too few to be the real count, and
 they are small next to the input either way.
 
 ## Results
+
+### 2026-10-22, headless, graphify at 95db630, vlang at ffc38ada48
+
+69 items, re-keyed at ffc38ada48 (see `key.md`). The Q3 [openssl] routes are counted
+apart as extra. Files in `results/2026-10-22/`. The baseline runs saw no MCP server and
+no graphify tool; their start records show none.
+
+| Run | Items found | Wrong | Q3 extra | Tool calls | Turns | Time | Cost |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| graphify 1 | 69/69 | 0 | 10/10 | 39 | 40 | 138 s | $1.33 |
+| graphify 4 | 69/69 | 0 | 10/10 | 35 | 36 | 168 s | $1.34 |
+| baseline 2 | 69/69 | 0 | 10/10 | 62 | 63 | 198 s | $2.17 |
+| baseline 3 | 68/69 | 0 | 0/10 | 46 | 47 | 199 s | $1.76 |
+| **graphify, mean** | **69** | 0 | 10 | **37** | **38** | **153 s** | **$1.34** |
+| **baseline, mean** | **68.5** | 0 | 5 | **54** | **55** | **199 s** | **$1.97** |
+
+| Run | Final context | Cache writes | Cache reads, all turns | Weighted input |
+| --- | --- | --- | --- | --- |
+| graphify 1 | 112k | 87k | 1.94M | 303k |
+| graphify 4 | 107k | 82k | 2.10M | 312k |
+| baseline 2 | 152k | 126k | 3.56M | 514k |
+| baseline 3 | 123k | 98k | 3.09M | 432k |
+| **graphify, mean** | **110k** | 85k | **2.02M** | **308k** |
+| **baseline, mean** | **138k** | 112k | **3.33M** | **473k** |
+
+(Turns in the first table are the session's own count; `usage.py` counts the API
+responses by id: 25, 27, 38 and 39.)
+
+What it says:
+
+- Both are about as complete: 69 and 68.5 of 69, with no wrong items. The miss was
+  baseline 3's: Q3's route through `socks5_ssl_dial`.
+- graphify finished 23% sooner (153 s against 199 s), with 31% fewer tool calls, and
+  cost 35% less (weighted input 308k against 473k; $1.34 against $1.97).
+- The routes only other builds have are now graphify's to find. Both graphify runs
+  found all ten [openssl] routes, through the build conditions on declarations and
+  calls (#103, #108, #109, #113). The baseline runs found 10 and 0. On 2026-10-20 both
+  graphify runs found 3.
+- Both graphify runs gave four of those routes a wrong file for one step. They put
+  two calls in `backend_vschannel_d_cross.v`, a 13-line `-d cross` stub, instead of
+  `vschannel_pooled_transport_windows.c.v`. `shortest_path` had shown the stub's copy
+  of a function both files declare. Fixed in #118.
+- All four noticed that Q2's premise no longer holds at this commit (vlang/v#30945).
+- Against 2026-10-20 the gap is wider: 23% against 20% in time and 35% against 13% in
+  cost. Part of that may be the clean baseline and the headless harness, rather than
+  graphify itself.
+
+### 2026-10-22, headless, Haiku 5.5, same commits
+
+The same round with `MODEL=claude-haiku-5-5`, run as the end-to-end test of
+`headless/run.sh`, graded by Haiku too. Files in `results/2026-10-22-haiku/`.
+
+| Run | Items found | Wrong | Q3 extra | Tool calls | Time | Cost | Weighted input |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| graphify 1 | 68/69 | 0 | 10/10 | 63 | 252 s | $0.36 | 499k |
+| graphify 4 | 66/69 | 0 | 10/10 | 51 | 209 s | $0.25 | 365k |
+| baseline 2 | 61/69 | 0 | 3/10 | 49 | 192 s | $0.34 | 474k |
+| baseline 3 | 65/69 | 2 | 5/10 | 80 | 295 s | $0.51 | 816k |
+| **graphify, mean** | **67** | 0 | 10 | **57** | **231 s** | **$0.31** | **432k** |
+| **baseline, mean** | **63** | 1 | 4 | **64.5** | **244 s** | **$0.43** | **645k** |
+
+- With the smaller model, the completeness gap opens:
+  - graphify found 67 of 69 on average, against 63 for the baseline.
+  - The baseline gave 2 wrong items, graphify none.
+  - graphify found all ten [openssl] routes both times, against 3 and 5.
+- The baseline's misses were in Q3 (4 of 7 default routes, both runs) and Q4 (2 of 6
+  in one run). Those are the questions the graph is built for: routes, and callers of
+  a method whose name many types share.
+- Time and cost are closer than with Opus: 5% faster and 28% cheaper on average.
+  Haiku's grader is less thorough than Opus's, so read its counts as rougher.
 
 ### 2026-10-20, graphify at 3dd6f94 (#99), vlang at 417c85b1ec
 

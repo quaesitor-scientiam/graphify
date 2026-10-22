@@ -262,3 +262,31 @@ functions.
 11. `smtp.Client.reconnect`: net/smtp/smtp.v:127
 12. `openssl.SSLConn.dial`: net/openssl/ssl_connection.c.v:336
 13. `redis.dial_connection`: db/redis/dial.c.v:8
+
+## Changes at ffc38ada48
+
+Re-keyed by the grader of the 2026-10-22 round, at the source. 73 commits after
+417c85b1ec. The item count stays 69; to grade at ffc38ada48 or later, apply these.
+
+- **Q2: the premise no longer holds.** vlang/v#30945 ("os: set File.fd in
+  open_append", 0cf85b0310) made `open_append` return
+  `File{ cfile: file.cfile, fd: fileno(file.cfile), is_opened: true }`
+  (os/os.c.v:1262-1266, `fd` at :1264). So on Unix `fd` is the real descriptor.
+  - Points 1 to 3 still hold at the same lines.
+  - Point 4 is replaced: the function now returns a new File with
+    `fd: fileno(...)` (os/os.c.v:1262-1266). A full answer says the premise is false
+    and why.
+  - Point 5 still holds. Point 6, the consequence for stdin, no longer applies.
+  - os/os_fd_test.v:102 tests the fix.
+- **Q3: the same routes, with these lines moved.**
+  - net/http/transport.v moved: 655 → 742 (`h2_round_trip`), 668 → 755
+    (`tls_fresh_round_trip`), 670 → 757 (`dial_h1_tcp`), 704 → 791
+    (`net.dial_tcp`), 720 → 807 (`vschannel_fresh_round_trip`), 722 → 809
+    (`tls_fresh_round_trip_ssl`), 735 → 822 (`ssl_conn.dial`).
+  - net/http/transport_h2.v moved: 468 → 469, 483 → 484, 494 → 495.
+  - Every other line of the routes is unchanged.
+- **Q8:** item 9, `http.Transport.dial_h1_tcp`, moved to net/http/transport.v:791. No
+  new callers outside tests.
+- **Q1:** the 15 items are unchanged. One not-item moved: the free-function call in
+  `StreamListener.wait_for_accept` is now at net/unix/stream.c.v:346.
+- **Q4 to Q7:** unchanged.
