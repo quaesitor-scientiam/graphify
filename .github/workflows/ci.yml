@@ -10,7 +10,7 @@ on:
 # commit: the Windows bootstrap (makev.bat) otherwise clones vc's HEAD. Set and
 # emptied together with VLANG_PIN.
 env:
-  VLANG_PIN: 9ca360c4ffaafafff3f9fe2372142e1c3987824c
+  VLANG_PIN: 131170ed227f632ffd6be56224f520a935ce206e
   VC_PIN: b65e73247b644ab344ca851e7a4ff682bbee7303
 
 jobs:
