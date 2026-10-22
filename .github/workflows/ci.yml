@@ -6,9 +6,10 @@ on:
 
 # The vlang commit every job builds V from, when V's newest one is broken: empty
 # takes the newest. Set to one while V's newest crashes its own build, and emptied
-# again once a later commit builds.
+# again once a later commit builds. 5f7d4d0980 fails the Windows bootstrap of the vc
+# snapshot (`./vc/v_win.c:570212: error: assignment to void expression`); 22b23697e8 built.
 env:
-  VLANG_PIN: ''
+  VLANG_PIN: '22b23697e894c333f9c5be8c0c6caa7ed7cf9932'
 
 jobs:
   build-and-smoke-test:
