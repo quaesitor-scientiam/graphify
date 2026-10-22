@@ -10437,3 +10437,54 @@ fn r2() {
 	one := g.render_call_paths(g.count_call_paths('start', 'goal', 1))
 	assert one.ends_with('(1 more that only other builds have; the builds of all 2 such: \$if x ? && y ? (2))'), one
 }
+
+// A declaration that several build files declare under one id is shown in a route as
+// the copy its next call is made from: `vschannel_fresh_round_trip`'s calls are in
+// vschannel_pooled_transport_windows.c.v, not in the `-d cross` stub of it, which
+// the index happened to show, with call lines the stub doesn't have.
+fn test_a_route_shows_the_copy_of_a_declaration_its_call_is_made_from() {
+	root := write_tree('route_copy', {
+		'http/http.v':            'module http
+
+pub fn get() int {
+	return probe()
+}
+
+fn helper() int {
+	return 1
+}
+'
+		'http/stub_d_cross.v':    'module http
+
+fn probe() int {
+	return 0
+}
+'
+		'http/probe_windows.c.v': 'module http
+
+fn other() int {
+	return 2
+}
+
+fn probe() int {
+	x := other()
+	return helper() + x
+}
+'
+	})
+	defer {
+		os.rmdir_all(root) or {}
+	}
+	g := build_graph(Options{ root: root, with_calls: true })
+	probes := g.symbols.filter(it.name == 'probe')
+	assert probes.len == 2 && probes[0].id == probes[1].id, probes.map(it.id).str()
+	text := g.path_between('get', 'helper')
+	assert text.contains('  -> probe (http/probe_windows.c.v:7), called at line 4'), text
+	assert text.contains('  -> helper (http/http.v:7), called at line 9'), text
+	// with no call after it, a copy is shown as the index has it
+	assert g.copy_holding(probes, []int{}) == none
+	assert g.copy_holding(probes, [9]) or { Symbol{} }.file == 'http/probe_windows.c.v'
+	assert g.copy_holding(probes, [4]) or { Symbol{} }.file == 'http/stub_d_cross.v'
+	assert g.copy_holding(probes, [20]) == none
+	assert g.copy_holding(probes[..1], [4]) == none
+}
