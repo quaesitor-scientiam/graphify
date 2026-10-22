@@ -16,6 +16,10 @@
 // graph's node set, so it stays silent on markdown/JSON/other-language
 // files AND on branch-only or newly added .v files the (master) graph
 // does not yet cover.
+//
+// Fails open: any input or graph it cannot use gets `{}` (no reminder). The
+// reminder says the graph is available, so it is only ever sent when the
+// graph has loaded and has files in it.
 
 import os
 import json2
@@ -24,6 +28,10 @@ import graphify
 const session_start_context = 'GRAPHIFY GRAPH AVAILABLE. Required workflow for tasks that involve navigating or understanding V code: (1) Start with overview or query_graph to orient — do NOT open files first. (2) Use get_node to inspect a symbol and its relationships with file:line. (3) Use get_body to read ONE declaration by name — do NOT read the whole file. (4) Only use Read/Grep/Bash for things the graph cannot answer (running tests, editing files, reading non-V source, or files not yet indexed). Every result includes file:line so you can always drill in precisely. EXCEPTION: for docs-only or file-creation tasks that do not require understanding V code, the graph is optional — a directory listing plus memory is a fine first move.'
 
 const pretooluse_context = 'STOP: graphify graph available. Use query_graph/get_node/get_body instead of scanning files. get_body fetches one declaration by name; get_node shows all relationships with file:line. Only proceed with this file operation if the graph cannot answer the question.'
+
+// The last line of a complete sidecar. A sidecar written by a process that
+// was killed mid-write lacks it, so it is rebuilt instead of trusted.
+const sidecar_complete = '#complete'
 
 fn emit(event_name string, context string) string {
 	mut inner := map[string]json2.Any{}
@@ -51,7 +59,9 @@ fn to_rel(p string, root string) string {
 
 // graph_file_set returns the lowercased set of repo-relative file paths
 // that have nodes in the graph, cached in a sidecar next to graph.json and
-// rebuilt only when graph.json changes.
+// rebuilt only when graph.json changes. An empty or incomplete sidecar is
+// rebuilt even when its mtime is new enough, so a truncated write cannot
+// stay in use until the next graph update.
 fn graph_file_set(graph_path string) ?map[string]bool {
 	cache_path := graph_path + '.files'
 	graph_mtime := os.file_last_mod_unix(graph_path)
@@ -59,13 +69,18 @@ fn graph_file_set(graph_path string) ?map[string]bool {
 
 	mut set := map[string]bool{}
 	if fresh {
-		lines := os.read_lines(cache_path) or { return none }
-		for line in lines {
-			if line != '' {
-				set[line] = true
+		lines := os.read_lines(cache_path) or { []string{} }
+		if lines.len > 1 && lines.last() == sidecar_complete {
+			for line in lines[..lines.len - 1] {
+				if line != '' {
+					set[line] = true
+				}
+			}
+			if set.len > 0 {
+				return set
 			}
 		}
-		return set
+		set = map[string]bool{}
 	}
 
 	g := graphify.load_graph(graph_path) or { return none }
@@ -77,6 +92,7 @@ fn graph_file_set(graph_path string) ?map[string]bool {
 			out_lines << lower
 		}
 	}
+	out_lines << sidecar_complete
 	os.write_file(cache_path, out_lines.join('\n')) or {}
 	return set
 }
@@ -127,9 +143,18 @@ fn main() {
 		return
 	}
 
+	// The graph is loaded only where a reminder depends on it: SessionStart
+	// and Read need it, and a Grep/Glob needs it only when it would otherwise
+	// send a reminder. A graph that cannot be read, or has no files, answers
+	// nothing, so no reminder is sent: a reminder says the graph is available.
 	match evt {
 		'SessionStart' {
-			println(emit('SessionStart', session_start_context))
+			start_set := graph_file_set(graph_path) or { map[string]bool{} }
+			if start_set.len > 0 {
+				println(emit('SessionStart', session_start_context))
+			} else {
+				println('{}')
+			}
 		}
 		'PreToolUse' {
 			ti_any := data['tool_input'] or { json2.Any(map[string]json2.Any{}) }
@@ -138,12 +163,8 @@ fn main() {
 			file_path_any := ti['file_path'] or { json2.Any('') }
 			file_path := file_path_any.str()
 			if file_path != '' {
-				set := graph_file_set(graph_path) or { map[string]bool{} }
-				if set.len > 0 {
-					relevant = to_rel(file_path, proj).to_lower() in set
-				} else {
-					relevant = file_path.ends_with('.v')
-				}
+				file_set := graph_file_set(graph_path) or { map[string]bool{} }
+				relevant = file_set.len > 0 && to_rel(file_path, proj).to_lower() in file_set
 			} else {
 				// Each field is checked on its own. These used to be joined into one
 				// string and tested with ends_with('.v'), which only ever saw the
@@ -159,6 +180,10 @@ fn main() {
 						relevant = true
 						break
 					}
+				}
+				if relevant {
+					grep_set := graph_file_set(graph_path) or { map[string]bool{} }
+					relevant = grep_set.len > 0
 				}
 			}
 			if relevant {
