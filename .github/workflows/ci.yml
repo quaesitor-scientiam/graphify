@@ -6,9 +6,12 @@ on:
 
 # The vlang commit every job builds V from, when V's newest one is broken: empty
 # takes the newest. Set to one while V's newest crashes its own build, and emptied
-# again once a later commit builds.
+# again once a later commit builds. VC_PIN is the vc snapshot generated from that
+# commit: the Windows bootstrap (makev.bat) otherwise clones vc's HEAD. Set and
+# emptied together with VLANG_PIN.
 env:
-  VLANG_PIN: ''
+  VLANG_PIN: 9ca360c4ffaafafff3f9fe2372142e1c3987824c
+  VC_PIN: b65e73247b644ab344ca851e7a4ff682bbee7303
 
 jobs:
   build-and-smoke-test:
@@ -144,9 +147,22 @@ jobs:
         working-directory: ${{ runner.temp }}/v
         run: make && sudo ./v symlink
 
+      # makev.bat clones vc, V's C bootstrap snapshot, from its HEAD. The newest
+      # snapshot is generated from V's newest source, which TCC rejects on Windows
+      # (vlang/v #30991), so clone the one generated from VLANG_PIN instead. makev
+      # clones into a folder named vc, so the clone has to be named that.
+      - name: Fetch the vc snapshot for the pinned V (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          git clone -q --filter=blob:none https://github.com/vlang/vc "$env:RUNNER_TEMP\vc-pin\vc"
+          git -C "$env:RUNNER_TEMP\vc-pin\vc" checkout -q ${{ env.VC_PIN }}
+
       - name: Build V (Windows)
         if: runner.os == 'Windows'
         working-directory: ${{ runner.temp }}/v
+        env:
+          VC_GIT: ${{ runner.temp }}\vc-pin\vc
         run: ./makev.bat && ./v symlink
 
       - name: Run tests
