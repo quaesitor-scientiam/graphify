@@ -1148,19 +1148,42 @@ fn terms_build(terms []string) string {
 //   needs $if !windows
 pub fn (g Graph) render_call_path(ids []string) string {
 	idx := g.index()
+	// the lines of each step's call, in the file of the declaration it is made from
+	mut call_lines := [][]int{len: ids.len}
+	for i in 1 .. ids.len {
+		for e in idx.edges_of(ids[i - 1]) {
+			if e.kind == .calls && e.from == ids[i - 1] && e.to == ids[i] {
+				call_lines[i] = merge_lines(call_lines[i], e.lines)
+			}
+		}
+	}
+	// the declarations of the route's ids, in one pass over the graph
+	mut copies := map[string][]Symbol{}
+	for id in ids {
+		copies[id] = []Symbol{}
+	}
+	for s in g.all_symbols() {
+		if s.id in copies {
+			copies[s.id] << s
+		}
+	}
 	mut out := []string{}
 	for i, id in ids {
-		loc := if s := idx.symbol(id) { '${s.name} (${s.loc()})' } else { id }
+		// a declaration several build files declare is shown as the copy the next
+		// call is made from, whose file those lines are in
+		shown := if i + 1 < ids.len { g.copy_holding(copies[id], call_lines[i + 1]) } else { none }
+		loc := if s := shown {
+			'${s.name} (${s.loc()})'
+		} else if s := idx.symbol(id) {
+			'${s.name} (${s.loc()})'
+		} else {
+			id
+		}
 		if i == 0 {
 			out << loc + build_mark(idx.decl_build(id))
 			continue
 		}
-		mut lines := []int{}
-		for e in idx.edges_of(ids[i - 1]) {
-			if e.kind == .calls && e.from == ids[i - 1] && e.to == id {
-				lines = merge_lines(lines, e.lines)
-			}
-		}
+		lines := call_lines[i]
 		mark := build_mark(terms_build(idx.step_terms(ids[i - 1], id)))
 		out << '  -> ${loc}' + if lines.len > 0 { ', called${at_lines(lines)}' } else { '' } +
 			mark
@@ -1631,16 +1654,46 @@ pub fn (g Graph) get_body(node string) string {
 	return g.body_of(ids[0])
 }
 
+// copy_holding is the one of `copies`, the declarations several build files make
+// under one id (`net.http.h2_dial_probe_vschannel` in
+// vschannel_pooled_transport_windows.c.v and in a stub, backend_vschannel_d_cross.v),
+// whose body holds all of `lines`, as read from its source: the copy a call at those
+// lines is made from. none when there is one declaration, or no copy alone holds
+// them; the index's copy then stands.
+fn (g Graph) copy_holding(copies []Symbol, lines []int) ?Symbol {
+	if lines.len == 0 || copies.len < 2 {
+		return none
+	}
+	first, last := lines[0], lines.last()
+	mut holding := []Symbol{}
+	for c in copies {
+		if c.line >= first {
+			continue
+		}
+		path := g.source_path(c) or { continue }
+		src := os.read_file(path) or { continue }
+		text := src.replace('\r\n', '\n').split('\n')
+		if last <= decl_end(text, c, g.symbols_of(c.file)) {
+			holding << c
+		}
+	}
+	return if holding.len == 1 { holding[0] } else { none }
+}
+
+// source_path is the path declaration `s` is read from.
+fn (g Graph) source_path(s Symbol) ?string {
+	// a layered module from VMODULES is read where the library was (layer_graph)
+	if s.id in g.index().mods && s.file.starts_with(lib_vmodules_prefix) {
+		return g.library.path_of(s.file)
+	}
+	return os.join_path(g.source_root(s), s.file)
+}
+
 // body_of is the source of the declaration `id`.
 fn (g Graph) body_of(id string) string {
 	idx := g.index()
 	s := idx.symbol(id) or { return 'no symbol matches: ${id}' }
-	// a layered module from VMODULES is read where the library was (layer_graph)
-	path := if s.id in idx.mods && s.file.starts_with(lib_vmodules_prefix) {
-		g.library.path_of(s.file) or { return 'cannot read ${s.file}: no library root' }
-	} else {
-		os.join_path(g.source_root(s), s.file)
-	}
+	path := g.source_path(s) or { return 'cannot read ${s.file}: no library root' }
 	src := os.read_file(path) or { return 'cannot read ${s.file}: ${err}' }
 	// a CRLF file (a Windows checkout with core.autocrlf) would otherwise
 	// leave a `\r` on every line, and the closing-brace checks below would
