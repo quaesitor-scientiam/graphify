@@ -20,7 +20,8 @@
 #
 # Runs 1 and 4 use graphify, 2 and 3 are the baseline (mapping.txt); the grader is
 # told neither. Everything lands in <out-dir>: each run's transcript (.jsonl) and
-# answer (.md), times.txt, runs.txt, usage.txt and grade.md.
+# answer (.md, the reply in which its agent first stopped: see answer.py), times.txt,
+# runs.txt, usage.txt and grade.md.
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -91,7 +92,10 @@ run run1 graphify & run run2 baseline & run run3 baseline & run run4 graphify &
 wait
 cat "$out/times.txt"
 
-# each run's answer, tools and cost, and the baseline's isolation, from its transcript
+# each run's answer: the reply in which its agent first stopped, not its last reply
+for r in run1 run2 run3 run4; do python3 "$compare/answer.py" "$out/$r.jsonl" "$out/$r.md"; done
+
+# each run's tools and cost, and the baseline's isolation, from its transcript
 python3 - "$out" <<'EOF'
 import collections, json, os, sys
 out = sys.argv[1]
@@ -117,7 +121,6 @@ with open(os.path.join(out, 'runs.txt'), 'w') as f:
         servers = [s.get('name') for s in (init or {}).get('mcp_servers', [])]
         if kinds[run] == 'baseline' and (mcp or servers or any(t.startswith('mcp__') for t in tools)):
             bad = True
-        open(os.path.join(out, run + '.md'), 'w').write((res or {}).get('result') or '')
         line = (f"{run} {kinds[run]:9} turns {(res or {}).get('num_turns')}, "
                 f"{((res or {}).get('duration_ms') or 0) / 1000:.0f} s, ${(res or {}).get('total_cost_usd') or 0:.2f}, "
                 f"{sum(tools.values())} tool calls {dict(tools.most_common())}; "
