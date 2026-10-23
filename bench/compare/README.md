@@ -68,6 +68,51 @@ they are small next to the input either way.
 
 ## Results
 
+### 2026-10-22, headless, on Windows, graphify at 612193e, vlang at ffc38ada48
+
+The Opus round on Windows, with `headless/run.ps1`. graphify at 612193e has the same
+code as 1672ca7 (#118): #119 changed only the benchmark. Files in
+`results/2026-10-22-windows/`. The baseline runs saw no MCP server and no graphify tool.
+
+| Run | Items found | Wrong | Q3 extra | Tool calls | Turns | Time | Cost |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| graphify 1 | 69/69 | 0 | 10/10 | 45 | 48 | 226 s | $2.13 |
+| graphify 4 | 67/69 | 0 | 10/10 | 41 | 43 | 166 s | $1.91 |
+| baseline 2 | 67/69 | 0 | 10/10 | 78 | 79 | 333 s | $2.75 |
+| baseline 3 | 68/69 | 0 | 5/10 | 52 | 53 | 226 s | $2.19 |
+| **graphify, mean** | **68** | 0 | 10 | **43** | **45.5** | **196 s** | **$2.02** |
+| **baseline, mean** | **67.5** | 0 | 7.5 | **65** | **66** | **280 s** | **$2.47** |
+
+| Run | Final context | Cache writes | Cache reads, all turns | Weighted input |
+| --- | --- | --- | --- | --- |
+| graphify 1 | 140k | 140k | 3.35M | 510k |
+| graphify 4 | 125k | 125k | 2.90M | 446k |
+| baseline 2 | 163k | 134k | 5.55M | 723k |
+| baseline 3 | 153k | 124k | 4.14M | 569k |
+| **graphify, mean** | **133k** | 133k | **3.12M** | **478k** |
+| **baseline, mean** | **158k** | 129k | **4.85M** | **646k** |
+
+What it says:
+
+- Completeness is level: 68 and 67.5 of 69, no wrong items. graphify 4 missed two Q4
+  calls (veb/veb_livereload.v:144 and :166). Baseline 2 missed Q2's points 1 and 3, and
+  baseline 3 missed point 1. Of the Q3 extras, baseline 3 left out the five [windows]
+  [openssl] routes.
+- graphify finished 30% sooner (196 s against 280 s), with 34% fewer tool calls, and cost
+  18% less ($2.02 against $2.47; weighted input 26% less).
+- Both sides cost more than in the `run.sh` round below, at the same commits: the
+  baseline $2.47 against $2.03, graphify $2.02 against $1.45. This round doesn't show why.
+- The graphify answers had to be recovered for grading. A graphify run has the user's
+  setup, and here that includes a global Stop hook that asks for a closing review. In both
+  graphify runs the agent added that review in a message after its answer, and the
+  harness keeps only the last message, so the first grade saw only the reviews and scored
+  them 3 and 2 of 69. `run1.md` and `run4.md` here are the answers taken from the
+  transcripts (line 201 of run1's, line 186 of run4's; as in the other rounds, the
+  transcripts aren't kept here), and `grade.md` is a second grade of all four by a fresh
+  grader with the same prompt. In run 1 the agent also repeated its answer, and a safety
+  classifier cut that repeat off.
+- The hook's extra turns are in graphify's turns and cost.
+
 ### 2026-10-22, headless, graphify at 1672ca7 (#118), vlang at ffc38ada48
 
 The Opus round again, with `headless/run.sh` as committed, after #118. Files in
@@ -136,7 +181,7 @@ What it says:
 - Both are about as complete: 69 and 68.5 of 69, with no wrong items. The miss was
   baseline 3's: Q3's route through `socks5_ssl_dial`.
 - graphify finished 23% sooner (153 s against 199 s), with 31% fewer tool calls, and
-  cost 35% less (weighted input 308k against 473k; $1.34 against $1.97).
+  cost 32% less ($1.34 against $1.97; weighted input 35% less, 308k against 473k).
 - The routes only other builds have are now graphify's to find. Both graphify runs
   found all ten [openssl] routes, through the build conditions on declarations and
   calls (#103, #108, #109, #113). The baseline runs found 10 and 0. On 2026-10-20 both
@@ -147,8 +192,8 @@ What it says:
   of a function both files declare. Fixed in #118, as the next round shows.
 - All four noticed that Q2's premise no longer holds at this commit (vlang/v#30945).
 - Against 2026-10-20 the gap is wider: 23% against 20% in time and 35% against 13% in
-  cost. Part of that may be the clean baseline and the headless harness, rather than
-  graphify itself.
+  weighted input. Part of that may be the clean baseline and the headless harness, rather
+  than graphify itself.
 
 ### 2026-10-22, headless, Haiku 5.5, same commits
 

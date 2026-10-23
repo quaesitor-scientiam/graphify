@@ -1,0 +1,4 @@
+run1 graphify 228 s
+run2 baseline 335 s
+run3 baseline 227 s
+run4 graphify 168 s
