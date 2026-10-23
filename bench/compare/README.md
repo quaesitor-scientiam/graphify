@@ -32,7 +32,11 @@ bench/compare/headless/run.sh /tmp/vbench-$(date +%F)
 
 It writes each run's transcript (`.jsonl`) and answer (`.md`), `mapping.txt` (runs
 1 and 4 are graphify), `runs.txt` (turns, time, cost, tool calls, MCP servers seen),
-`usage.txt` (`usage.py`) and `grade.md`. Copy the answers and those files into
+`usage.txt` (`usage.py`) and `grade.md`. A run's answer is the reply in which its agent
+first stopped (`answer.py`), its answer to the prompt. When a hook or a classifier
+answers that stop with more input, the agent replies again, and the transcript's own
+result holds only its last reply; those later replies stay in the transcript and aren't
+graded. `python3 answer_test.py` checks this. Copy the answers and those files into
 `results/<date>/` to keep a round.
 
 The key is keyed at vlang 417c85b1ec, with its changes at later commits at its end.
@@ -105,8 +109,8 @@ What it says:
 - The graphify answers had to be recovered for grading. A graphify run has the user's
   setup, and here that includes a global Stop hook that asks for a closing review. In both
   graphify runs the agent added that review in a message after its answer, and the
-  harness keeps only the last message, so the first grade saw only the reviews and scored
-  them 3 and 2 of 69. `run1.md` and `run4.md` here are the answers taken from the
+  harness then kept only the last message, so the first grade saw only the reviews and
+  scored them 3 and 2 of 69. `run1.md` and `run4.md` here are the answers taken from the
   transcripts (line 201 of run1's, line 186 of run4's; as in the other rounds, the
   transcripts aren't kept here), and `grade.md` is a second grade of all four by a fresh
   grader with the same prompt. In run 1 the agent also repeated its answer, and a safety

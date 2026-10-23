@@ -79,7 +79,13 @@ $times = $jobs | Wait-Job | Receive-Job
 $times | Set-Content (Join-Path $Out 'times.txt')
 $times
 
-# each run's answer, tools and cost, and the baseline's isolation, from its transcript
+# each run's answer: the reply in which its agent first stopped, not its last reply
+foreach ($r in 'run1', 'run2', 'run3', 'run4') {
+	python (Join-Path $compare 'answer.py') (Join-Path $Out "$r.jsonl") (Join-Path $Out "$r.md")
+	if ($LASTEXITCODE) { throw "run.ps1: answer.py failed on $r" }
+}
+
+# each run's tools and cost, and the baseline's isolation, from its transcript
 $kinds = @{ run1 = 'graphify'; run2 = 'baseline'; run3 = 'baseline'; run4 = 'graphify' }
 $bad = $false
 $lines = foreach ($r in 'run1', 'run2', 'run3', 'run4') {
@@ -95,7 +101,6 @@ $lines = foreach ($r in 'run1', 'run2', 'run3', 'run4') {
 	$mcp = @($init.tools | Where-Object { $_ -like 'mcp__*' })
 	$servers = @($init.mcp_servers | ForEach-Object { $_.name })
 	if ($kinds[$r] -eq 'baseline' -and ($mcp.Count -or $servers.Count -or ($tools_used.Keys | Where-Object { $_ -like 'mcp__*' }))) { $bad = $true }
-	"$($res.result)" | Set-Content -Encoding utf8 (Join-Path $Out "$r.md")
 	$calls = ($tools_used.Values | Measure-Object -Sum).Sum
 	"$r $($kinds[$r]) turns $($res.num_turns), $([int]($res.duration_ms / 1000)) s, `$$([math]::Round($res.total_cost_usd, 2)), $calls tool calls; MCP servers $($servers -join ',' ), mcp__ tools $($mcp.Count)"
 }
