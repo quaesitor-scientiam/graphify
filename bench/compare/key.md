@@ -286,6 +286,7 @@ Re-keyed by the grader of the 2026-10-22 round, at the source. 73 commits after
     (`tls_fresh_round_trip_ssl`), 735 → 822 (`ssl_conn.dial`).
   - net/http/transport_h2.v moved: 468 → 469, 483 → 484, 494 → 495.
   - Every other line of the routes is unchanged.
+  - The not-item `Transport.h3_round_trip` is now called at net/http/transport.v:723, not 636.
 - **Q8:** item 9, `http.Transport.dial_h1_tcp`, moved to net/http/transport.v:791. No
   new callers outside tests.
 - **Q1:** the 15 items are unchanged. One not-item moved: the free-function call in
