@@ -276,7 +276,8 @@ Re-keyed by the grader of the 2026-10-22 round, at the source. 73 commits after
   - Point 4 is replaced: the function now returns a new File with
     `fd: fileno(...)` (os/os.c.v:1262-1266). A full answer says the premise is false
     and why.
-  - Point 5 still holds. Point 6, the consequence for stdin, no longer applies.
+  - Point 5's lines still hold, but no longer as a contrast: `open_append` now sets
+    `fd` as `open` and `create` do. Point 6, the consequence for stdin, no longer applies.
   - os/os_fd_test.v:102 tests the fix.
 - **Q3: the same routes, with these lines moved.**
   - net/http/transport.v moved: 655 → 742 (`h2_round_trip`), 668 → 755
@@ -290,3 +291,6 @@ Re-keyed by the grader of the 2026-10-22 round, at the source. 73 commits after
 - **Q1:** the 15 items are unchanged. One not-item moved: the free-function call in
   `StreamListener.wait_for_accept` is now at net/unix/stream.c.v:346.
 - **Q4 to Q7:** unchanged.
+- **Q6, in the key itself:** `s.on_stopped(mut s)` at net/http/server.v:142 is in
+  `Server.stop`, not in `listen_and_serve`, so it isn't one of Q6's not-items. It
+  changes no score.

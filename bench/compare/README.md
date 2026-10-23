@@ -68,6 +68,42 @@ they are small next to the input either way.
 
 ## Results
 
+### 2026-10-22, headless, graphify at 1672ca7 (#118), vlang at ffc38ada48
+
+The Opus round again, with `headless/run.sh` as committed, after #118. Files in
+`results/2026-10-22-r3/`. The baseline runs saw no MCP server and no graphify tool.
+
+| Run | Items found | Wrong | Q3 extra | Tool calls | Turns | Time | Cost |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| graphify 1 | 69/69 | 0 | 10/10 | 49 | 50 | 156 s | $1.52 |
+| graphify 4 | 68/69 | 0 | 10/10 | 33 | 34 | 158 s | $1.38 |
+| baseline 2 | 69/69 | 0 | 10/10 | 50 | 51 | 251 s | $2.14 |
+| baseline 3 | 69/69 | 0 | 10/10 | 58 | 59 | 230 s | $1.91 |
+| **graphify, mean** | **68.5** | 0 | 10 | **41** | **42** | **157 s** | **$1.45** |
+| **baseline, mean** | **69** | 0 | 10 | **54** | **55** | **241 s** | **$2.03** |
+
+| Run | Final context | Cache writes | Cache reads, all turns | Weighted input |
+| --- | --- | --- | --- | --- |
+| graphify 1 | 116k | 91k | 2.42M | 356k |
+| graphify 4 | 110k | 85k | 2.21M | 327k |
+| baseline 2 | 151k | 126k | 3.71M | 528k |
+| baseline 3 | 128k | 102k | 3.30M | 458k |
+| **graphify, mean** | **113k** | 88k | **2.32M** | **342k** |
+| **baseline, mean** | **140k** | 114k | **3.50M** | **493k** |
+
+What it says:
+
+- #118 holds. Neither graphify run named `backend_vschannel_d_cross.v`. The four
+  VSChannel steps now cite `vschannel_pooled_transport_windows.c.v:270` and `:226`.
+- Completeness is level: 68.5 and 69 of 69, no wrong items, every run with all ten
+  [openssl] routes. graphify 4's miss is a strict one: Q2's point 1, `File{}` at
+  os/os.c.v:1246, described but not cited.
+- graphify finished 35% sooner (157 s against 241 s) and cost 29% less ($1.45 against
+  $2.03; weighted input 31% less).
+- The baseline did better on Q3 than in the first round: all ten [openssl] routes
+  twice, against 10 and 0. One round of two runs a side is noisy, so compare rounds
+  by their means, and over several rounds.
+
 ### 2026-10-22, headless, graphify at 95db630, vlang at ffc38ada48
 
 69 items, re-keyed at ffc38ada48 (see `key.md`). The Q3 [openssl] routes are counted
@@ -108,7 +144,7 @@ What it says:
 - Both graphify runs gave four of those routes a wrong file for one step. They put
   two calls in `backend_vschannel_d_cross.v`, a 13-line `-d cross` stub, instead of
   `vschannel_pooled_transport_windows.c.v`. `shortest_path` had shown the stub's copy
-  of a function both files declare. Fixed in #118.
+  of a function both files declare. Fixed in #118, as the next round shows.
 - All four noticed that Q2's premise no longer holds at this commit (vlang/v#30945).
 - Against 2026-10-20 the gap is wider: 23% against 20% in time and 35% against 13% in
   cost. Part of that may be the clean baseline and the headless harness, rather than
