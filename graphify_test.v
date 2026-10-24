@@ -9192,6 +9192,32 @@ fn test_the_layer_note_says_when_the_project_read_another_vlib() {
 	assert note('/elsewhere', 'aaaa', 'aaaa').contains('read vlib from /elsewhere')
 }
 
+fn test_a_project_is_layered_on_the_graph_of_the_vlib_it_read() {
+	vroot := write_tree('base_for_vroot', {
+		'vlib/a.v': ''
+	})
+	esc := vroot.replace('\\', '\\\\')
+	store := write_tree('base_for', {
+		'proj/graph.json':      '{}'
+		'proj/manifest.json':   '{"root": "/p", "library": [{"label": "vlib", "root": "${esc}"}]}'
+		'vlang/graph.json':     '{}'
+		'vlang/manifest.json':  '{"root": "${esc}", "library": [{"label": "vlib", "root": "${esc}"}]}'
+		'alone/graph.json':     '{}'
+		'alone/manifest.json':  '{"root": "/q"}'
+		'astray/graph.json':    '{}'
+		'astray/manifest.json': '{"root": "/r", "library": [{"label": "vlib", "root": "/elsewhere"}]}'
+	})
+	graph := fn [store] (name string) string {
+		return os.join_path(store, name, 'graph.json')
+	}
+	assert base_for(store, graph('proj')) or { '' } == graph('vlang')
+	// the V tree's own graph is the base, on nothing; a project that read no vlib, or
+	// one the store has no graph of, is served alone
+	assert base_for(store, graph('vlang')) == none
+	assert base_for(store, graph('alone')) == none
+	assert base_for(store, graph('astray')) == none
+}
+
 fn test_a_cached_index_answers_as_a_built_one() {
 	project, base := layer_fixture()
 	plain := layer_graph(project, base)
@@ -9507,6 +9533,43 @@ fn test_a_worktree_store_is_seeded_refreshed_and_pruned() {
 	os.mkdir_all(partial) or { panic(err) }
 	prune_worktree_stores(stores)
 	assert os.is_dir(store) && os.is_dir(partial) && !os.exists(gone)
+}
+
+fn test_a_worktree_store_is_current_until_its_worktree_changes() {
+	tree := os.real_path(write_tree('worktree_current', {
+		'proj/a.v': 'module main\n'
+	}))
+	defer {
+		os.rmdir_all(tree) or {}
+	}
+	proj := os.join_path(tree, 'proj')
+	os.exec(['git', '-C', proj, 'init', '-q'])
+	store := worktree_store(os.join_path(tree, 'stores'), proj)
+	found := WorktreeGraph{
+		graph: os.join_path(tree, 'checkout', 'graph.json')
+		root:  proj
+	}
+	// a failed extract saves no state, so the next command tries again
+	mut failed := false
+	extract_worktree_store(store, found, os.join_path(tree, 'no-graphify')) or { failed = true }
+	assert failed && !os.exists(os.join_path(store, worktree_state_file))
+	assert !worktree_store_current(store, proj)
+	os.write_file(os.join_path(store, 'graph.json'), '{}') or { panic(err) }
+	assert !worktree_store_current(store, proj)
+	os.write_file(os.join_path(store, worktree_state_file), worktree_state(proj)) or { panic(err) }
+	assert worktree_store_current(store, proj)
+	os.write_file(os.join_path(proj, 'a.v'), 'module main\n\nfn f() {}\n') or { panic(err) }
+	assert !worktree_store_current(store, proj)
+}
+
+fn test_a_hint_names_the_command_of_the_front_end() {
+	mut g := graph_of({
+		'a.v': 'module main\n\nfn f() {}\n'
+	})
+	assert g.explain('f').contains('(use `get_body f` to read its source)')
+	g.cli = true
+	assert g.explain('f').contains('(use `graphify body f` to read its source)')
+	assert g.command('get_node') == 'graphify explain'
 }
 
 fn test_a_name_with_several_declarations_is_each_of_them() {

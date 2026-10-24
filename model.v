@@ -180,6 +180,24 @@ pub mut:
 	// index_cache is the index cache_index built, which index() returns instead of
 	// building it again; nil until then. Not in graph.json.
 	index_cache &Index = unsafe { nil } @[json: '-']
+	// cli is whether the graph answers the command line rather than the MCP tools,
+	// so that a hint names the command to run (Graph.command). Not in graph.json.
+	cli bool @[json: '-']
+}
+
+// command is how a hint names the MCP tool `tool`: by that name, or, for a graph
+// that answers the command line (Graph.cli), as the command that does the same.
+pub fn (g Graph) command(tool string) string {
+	if !g.cli {
+		return tool
+	}
+	return match tool {
+		'get_node' { 'graphify explain' }
+		'get_body' { 'graphify body' }
+		'query_graph' { 'graphify query' }
+		'shortest_path' { 'graphify path' }
+		else { tool }
+	}
 }
 
 // Base is the graph a layered graph is on (see layer_graph): `under`, the V tree's,

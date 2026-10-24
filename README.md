@@ -424,7 +424,22 @@ cd my-project ; graphify extract .      # -> S:\graph_data\my-project\graph.json
 graphify overview                        # resolves S:\graph_data\my-project\graph.json
 ```
 
-Resolution order: `--graph` > `GRAPHIFY_GRAPH` > `GRAPHIFY_STORE`/<cwd-name> > `./graphify-out`.
+With a store, a query answers as the MCP server does, so it needs no AI to be
+as complete:
+
+- **Any directory of a project.** The store's graph is the one whose root holds
+  the working directory, the deepest such root, found by its `manifest.json`.
+  Before, it was `<store>/<cwd-name>`, which is still the fallback.
+- **The vlib under it.** A project graph is layered on the store's graph of the
+  V tree whose vlib it read, so `explain`, `path` and `query` carry on into vlib.
+  For a graph given with `--graph`, `--base <graph.json>` layers it on that graph.
+- **Worktrees.** In another git worktree of a project, or of the V tree, the
+  query answers from the worktree's own graph. It is extracted into the
+  worktree's store, the one the MCP server uses, and extracted again first
+  when the worktree has changed since.
+
+Resolution order: `--graph` > `GRAPHIFY_GRAPH` > `GRAPHIFY_STORE` (the project
+holding the cwd, else `<store>/<cwd-name>`) > `./graphify-out`.
 
 `extract` writes a Graphify-style bundle to `graphify-out/`:
 

@@ -101,6 +101,36 @@ pub fn worktree_state(worktree string) string {
 	return parts.join('\n')
 }
 
+// worktree_state_file is the file in a worktree's store that keeps the worktree_state
+// at which extract_worktree_store last extracted the worktree's graph.
+const worktree_state_file = 'worktree-state'
+
+// worktree_store_current reports whether the graph in the worktree's `store` was
+// extracted by extract_worktree_store at the worktree's state now, so that the
+// worktree has not changed since.
+pub fn worktree_store_current(store string, worktree string) bool {
+	if !os.exists(os.join_path(store, 'graph.json')) {
+		return false
+	}
+	saved := os.read_file(os.join_path(store, worktree_state_file)) or { return false }
+	return saved == worktree_state(worktree)
+}
+
+// extract_worktree_store extracts the graph of the worktree `found` names into
+// `store` with the graphify at `cli`, seeded with the checkout's cache
+// (seed_worktree_store), and saves the worktree's state it was extracted at.
+pub fn extract_worktree_store(store string, found WorktreeGraph, cli string) ! {
+	seed_worktree_store(store, found.graph)!
+	// taken first, so that a change made while the extract runs is extracted after it
+	state := worktree_state(found.root)
+	res := os.exec([cli, 'extract', found.root, '--out', store])
+	if res.exit_code != 0 {
+		lines := res.output.trim_space().split_into_lines()
+		return error(if lines.len > 0 { lines.last() } else { 'exit code ${res.exit_code}' })
+	}
+	os.write_file(os.join_path(store, worktree_state_file), state)!
+}
+
 // prune_worktree_stores removes each store under `stores` whose worktree is gone,
 // as its manifest names it: a worktree is removed when its branch is done, and its
 // store is a copy of a project's graph and cache.

@@ -49,6 +49,11 @@ export options:
 
 common options:
   --graph <file>   graph.json to read (default ./graphify-out/graph.json)
+  --store <dir>    central store of graphs (or GRAPHIFY_STORE): read the graph of
+                   the project the working directory is in, layered on the store\'s
+                   graph of the vlib it read; in another git worktree of it, the
+                   worktree\'s own graph, extracted again when the worktree changed
+  --base <file>    graph.json to layer the graph on, for calls into vlib
 '
 
 fn main() {
@@ -357,27 +362,33 @@ fn resolve_out(args []string, path string) string {
 	return graphify.out_dir_name
 }
 
-// load reads the persisted graph (or rebuilds from cwd if it is missing).
+// load reads the persisted graph (or rebuilds from cwd if it is missing), as the
+// MCP server serves it: with a central store, the graph of the project whose root
+// holds the working directory, layered on the store's graph of the vlib it read; in
+// another git worktree of it, the worktree's own graph, extracted again when the
+// worktree has changed. `--base <file>` layers the graph on that graph instead.
 // `--source-dir <dir>` overrides the root the graph was extracted from, so a
 // graph shared from another machine/OS resolves `body` against a local checkout.
 fn load(args []string) graphify.Graph {
-	file := str_flag(args, '--graph') or {
-		env := os.getenv('GRAPHIFY_GRAPH')
-		store := store_dir(args)
-		if env != '' {
-			env
-		} else if store != '' {
-			// central store: <store>/<current-project>/graph.json
-			os.join_path(store, os.base(os.getwd()), 'graph.json')
-		} else {
-			os.join_path(graphify.out_dir_name, 'graph.json')
+	store := store_dir(args)
+	mut base_file := str_flag(args, '--base') or { '' }
+	mut file := str_flag(args, '--graph') or { os.getenv('GRAPHIFY_GRAPH') }
+	if file == '' && store != '' {
+		found, under := store_graph(store)
+		file = found
+		if base_file == '' {
+			base_file = under
 		}
+	} else if file == '' {
+		file = os.join_path(graphify.out_dir_name, 'graph.json')
 	}
 	mut g := if os.exists(file) {
 		graphify.load_graph(file) or { fail('cannot read ${file}: ${err}') }
 	} else {
 		eprintln('note: ${file} not found, building graph from "." (run `graphify extract` to persist)')
-		return graphify.build_graph(graphify.Options{ root: '.' })
+		mut built := graphify.build_graph(graphify.Options{ root: '.' })
+		built.cli = true
+		return built
 	}
 	mut shared := false
 	if sd := str_flag(args, '--source-dir') {
@@ -386,13 +397,58 @@ fn load(args []string) graphify.Graph {
 	}
 	// a graph shared from another machine was built by another graphify, so
 	// only its commit is worth comparing
-	note := graphify.stale_note(file, g.root, if shared { '' } else { os.executable() })
+	cli := if shared { '' } else { os.executable() }
+	mut notes := []string{}
+	note := graphify.stale_note(file, g.root, cli)
 	if note != '' {
-		eprintln('note: ${note}')
+		notes << note
 	}
+	if base_file != '' {
+		mut base := graphify.load_graph(base_file) or { fail('cannot read ${base_file}: ${err}') }
+		base.cache_index()
+		g = graphify.layer_graph(g, base)
+		l := graphify.layer_note(file, base_file)
+		if l != '' {
+			notes << l
+		}
+		n := graphify.stale_note(base_file, base.root, cli)
+		if n != '' {
+			notes << 'the vlib under it: ${n}'
+		}
+	}
+	for n in notes {
+		eprintln('note: ${n}')
+	}
+	g.cli = true
 	// built once: a command looks things up in it many times, and none changes the graph
 	g.cache_index()
 	return g
+}
+
+// store_graph is the graph.json in the central `store` to answer from in the working
+// directory, and the graph.json to layer it on, or '': the project graph whose root
+// holds the working directory, on the graph of the vlib it read (graphify.base_for);
+// in another git worktree of its repository, the worktree's own graph in its worktree
+// store, extracted first when the worktree has changed since. Without a project graph
+// there, <store>/<directory name>/graph.json.
+fn store_graph(store string) (string, string) {
+	dir := os.getwd()
+	file := graphify.project_for(store, dir, '') or {
+		return os.join_path(store, os.base(dir), 'graph.json'), ''
+	}
+	base := graphify.base_for(store, file) or { '' }
+	found := graphify.worktree_graph('', dir, file, '', '') or { return file, base }
+	stores := graphify.worktree_stores()
+	graphify.prune_worktree_stores(stores)
+	wt := graphify.worktree_store(stores, found.root)
+	if !graphify.worktree_store_current(wt, found.root) {
+		eprintln('note: extracting the worktree ${found.root}...')
+		graphify.extract_worktree_store(wt, found, os.executable()) or {
+			eprintln('note: cannot extract the worktree ${found.root} (${err}), so this is the graph of the checkout, not of this branch')
+			return file, base
+		}
+	}
+	return os.join_path(wt, 'graph.json'), base
 }
 
 // --- tiny arg helpers ---
@@ -404,7 +460,7 @@ fn positionals(args []string) []string {
 	for i := 0; i < args.len; i++ {
 		a := args[i]
 		if a.starts_with('--') {
-			if a in ['--budget', '--graph', '--source-dir', '--out', '--store', '--labels', '--resolution',
+			if a in ['--budget', '--graph', '--base', '--source-dir', '--out', '--store', '--labels', '--resolution',
 				'--restarts', '--routes'] {
 				i++ // skip the flag's value
 			}
