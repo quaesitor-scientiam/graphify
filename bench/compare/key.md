@@ -295,3 +295,29 @@ Re-keyed by the grader of the 2026-10-22 round, at the source. 73 commits after
 - **Q6, in the key itself:** `s.on_stopped(mut s)` at net/http/server.v:142 is in
   `Server.stop`, not in `listen_and_serve`, so it isn't one of Q6's not-items. It
   changes no score.
+
+## Changes at c4e254fab1
+
+Re-keyed by the grader of the 2026-10-23 Windows round, and each line confirmed at the
+source. 23 commits after ffc38ada48. The items are the same 69; only lines moved. To
+grade at c4e254fab1 or later, apply these on top of the changes at ffc38ada48.
+
+- **Q1:** items 7, 8 and 9 moved, in the same functions: net/mbedtls/ssl_connection.c.v
+  443 → 445 (`do_handshake_loop`), 916 → 902 (`socket_read_into_ptr`), 997 → 983
+  (`write_ptr`). Two not-items moved: the commented-out call, 903 → 889, and mbedtls's
+  `wait_for_read` declaration, 1121 → 1107.
+- **Q3: the same routes, with these lines moved.**
+  - net/http/request.v: 295 → 307 (`method_and_url_to_response`), 387 → 402
+    (`round_trip`), 400 → 415 (`ssl_do`), 411 → 426 (`Request.http_do`), 421 → 436
+    (`HttpProxy.http_do`), 531 → 546 (`net.dial_tcp`).
+  - net/http/transport.v, from its lines at ffc38ada48: 791 → 792 (`net.dial_tcp`),
+    807 → 808 (`vschannel_fresh_round_trip`), 809 → 810 (`tls_fresh_round_trip_ssl`),
+    822 → 823 (`ssl_conn.dial`). 742, 755 and 757 have not moved.
+  - `mbedtls.SSLConn.dial`, in the build note and the not-items, moved from
+    net/mbedtls/ssl_connection.c.v:827 to :821.
+  - The not-item `req.on_redirect(...)` moved to net/http/request.v:338.
+  - Every other line of the routes is unchanged.
+- **Q7:** net/http/request.v 293 → 305, 314 → 329, 319 → 334.
+- **Q8:** item 7, `http.Request.http_do`, moved to net/http/request.v:546, and item 9,
+  `http.Transport.dial_h1_tcp`, to net/http/transport.v:792. No new callers outside tests.
+- **Q2, Q4, Q5, Q6:** unchanged since ffc38ada48.

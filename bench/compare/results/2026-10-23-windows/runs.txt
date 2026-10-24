@@ -1,0 +1,4 @@
+run1 graphify turns 40, 186 s, $1.56, 39 tool calls; MCP servers graphify, mcp__ tools 6
+run2 baseline turns 48, 271 s, $2.2, 47 tool calls; MCP servers , mcp__ tools 0
+run3 baseline turns 55, 205 s, $1.98, 54 tool calls; MCP servers , mcp__ tools 0
+run4 graphify turns 41, 163 s, $1.53, 40 tool calls; MCP servers graphify, mcp__ tools 6
