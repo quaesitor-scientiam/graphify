@@ -361,9 +361,18 @@ fn build_stamp(graphify_root string, v_exe string) !string {
 
 // build_one builds one binary next to its final name and then swaps it in,
 // so a running copy (the MCP server, on Windows) never blocks the build.
-fn build_one(log_path string, v_exe string, out string, args []string) ! {
+// `prod` (-prod: optimised, link-time) is for the CLI only. It takes 2 min to build
+// where a plain build takes 8 s, but the CLI is what extracts and answers queries:
+// a plain CLI extracts vlang in about 80 s against 25-50 s, and answers 4x slower.
+// The MCP server takes 3 min 14 s with -prod and 29 s without, and the hook 36 s and
+// 6 s; each answers about as fast either way (a lookup 0.05 s against 0.02 s, a hook
+// call 0.04 s against 0.03 s).
+fn build_one(log_path string, v_exe string, out string, prod bool, args []string) ! {
 	tmp := out + '.new' + $if windows { '.exe' } $else { '' }
-	mut cmd := [v_exe, '-prod', '-o', tmp]
+	mut cmd := [v_exe, '-o', tmp]
+	if prod {
+		cmd.insert(1, '-prod')
+	}
 	cmd << args
 	res := os.exec(cmd)
 	if res.exit_code != 0 {
@@ -429,20 +438,20 @@ fn rebuild_if_stale(log_path string, root string, exe string) !bool {
 	os.chdir(root)!
 	ext := $if windows { '.exe' } $else { '' }
 	// the CLI is what extracts; without it there is nothing to run
-	build_one(log_path, v_exe, exe, ['cmd/cli'])!
+	build_one(log_path, v_exe, exe, true, ['cmd/cli'])!
 	// the others only serve the graph: a failure is logged, the extract goes
 	// ahead, and the stamp stays old so the next run tries them again
 	mut all_built := true
 	mcp := os.join_path(root, 'bin', 'graphify-mcp' + ext)
 	if os.exists(mcp) {
-		build_one(log_path, v_exe, mcp, ['cmd/mcp']) or {
+		build_one(log_path, v_exe, mcp, false, ['cmd/mcp']) or {
 			log_line(log_path, 'WARNING: ${err}')
 			all_built = false
 		}
 	}
 	hook := os.join_path(root, 'bin', 'graphify-hook' + ext)
 	if os.exists(hook) {
-		build_one(log_path, v_exe, hook, ['build', 'cmd/hooks/graphify_hook.vsh']) or {
+		build_one(log_path, v_exe, hook, false, ['build', 'cmd/hooks/graphify_hook.vsh']) or {
 			log_line(log_path, 'WARNING: ${err}')
 			all_built = false
 		}
@@ -451,7 +460,7 @@ fn rebuild_if_stale(log_path string, root string, exe string) !bool {
 	// swap in build_one allows
 	updater := os.join_path(root, 'bin', 'update-vlang-graph' + ext)
 	if os.exists(updater) {
-		build_one(log_path, v_exe, updater, ['build', 'bin/update-vlang-graph.vsh']) or {
+		build_one(log_path, v_exe, updater, false, ['build', 'bin/update-vlang-graph.vsh']) or {
 			log_line(log_path, 'WARNING: ${err}')
 			all_built = false
 		}
