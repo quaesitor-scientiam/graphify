@@ -84,29 +84,39 @@ pub fn seed_worktree_store(store string, graph string) ! {
 // changes it as well.
 pub fn worktree_state(worktree string) string {
 	mut parts := [git_out(worktree, 'rev-parse', 'HEAD')]
-	// a line's first column is a space for a file changed but not staged, so the
-	// output is not trimmed
-	status := os.exec(['git', '-C', worktree, 'status', '--porcelain', '-uall', '--', '*.v', '*.vsh']).output
-	for line in status.split_into_lines() {
-		if line.len < 4 {
+	// -z, as git otherwise quotes a path with a space or a non-ASCII letter in it,
+	// which is then no file to look at. An entry's first column is a space for a
+	// file changed but not staged, so the output is not trimmed.
+	status := os.exec(['git', '-C', worktree, 'status', '--porcelain', '-z', '-uall', '--',
+		'*.v', '*.vsh']).output
+	entries := status.split('\0')
+	mut i := 0
+	for i < entries.len {
+		entry := entries[i]
+		i++
+		if entry.len < 4 {
 			continue
 		}
-		path := os.join_path(worktree, line[3..].all_after(' -> '))
+		// a renamed or copied file's entry is followed by the path it came from
+		if entry[0] in [`R`, `C`] {
+			i++
+		}
+		path := os.join_path(worktree, entry[3..])
 		parts << if os.is_file(path) {
-			'${line}:${os.file_size(path)}:${os.file_last_mod_unix(path)}'
+			'${entry}:${os.file_size(path)}:${os.file_last_mod_unix(path)}'
 		} else {
-			line
+			entry
 		}
 	}
 	return parts.join('\n')
 }
 
 // worktree_state_file is the file in a worktree's store that keeps the worktree_state
-// at which extract_worktree_store last extracted the worktree's graph.
+// at which extract_worktree_at last extracted the worktree's graph.
 const worktree_state_file = 'worktree-state'
 
 // worktree_store_current reports whether the graph in the worktree's `store` was
-// extracted by extract_worktree_store at the worktree's state now, so that the
+// extracted by extract_worktree_at at the worktree's state now, so that the
 // worktree has not changed since.
 pub fn worktree_store_current(store string, worktree string) bool {
 	if !os.exists(os.join_path(store, 'graph.json')) {
@@ -122,13 +132,23 @@ pub fn worktree_store_current(store string, worktree string) bool {
 pub fn extract_worktree_store(store string, found WorktreeGraph, cli string) ! {
 	seed_worktree_store(store, found.graph)!
 	// taken first, so that a change made while the extract runs is extracted after it
-	state := worktree_state(found.root)
-	res := os.exec([cli, 'extract', found.root, '--out', store])
+	extract_worktree_at(store, found.root, cli, worktree_state(found.root))!
+}
+
+// extract_worktree_at extracts the graph of the worktree rooted at `root` into its
+// `store` with the graphify at `cli`, and saves `state`, the worktree_state taken
+// before it started, as the state the graph is of. The command line and the MCP
+// server both extract into the store, so each saves the state of what it extracted,
+// and the state saved before goes first: the graph may change under it.
+pub fn extract_worktree_at(store string, root string, cli string, state string) ! {
+	state_file := os.join_path(store, worktree_state_file)
+	os.rm(state_file) or {}
+	res := os.exec([cli, 'extract', root, '--out', store])
 	if res.exit_code != 0 {
 		lines := res.output.trim_space().split_into_lines()
 		return error(if lines.len > 0 { lines.last() } else { 'exit code ${res.exit_code}' })
 	}
-	os.write_file(os.join_path(store, worktree_state_file), state)!
+	os.write_file(state_file, state)!
 }
 
 // prune_worktree_stores removes each store under `stores` whose worktree is gone,

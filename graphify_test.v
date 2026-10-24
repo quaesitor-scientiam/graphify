@@ -9560,6 +9560,34 @@ fn test_a_worktree_store_is_current_until_its_worktree_changes() {
 	assert worktree_store_current(store, proj)
 	os.write_file(os.join_path(proj, 'a.v'), 'module main\n\nfn f() {}\n') or { panic(err) }
 	assert !worktree_store_current(store, proj)
+	// the MCP server extracts into the same store: an extract drops the state saved
+	// before it, which its graph may no longer be of
+	os.write_file(os.join_path(store, worktree_state_file), worktree_state(proj)) or { panic(err) }
+	failed = false
+	extract_worktree_at(store, proj, os.join_path(tree, 'no-graphify'), worktree_state(proj)) or {
+		failed = true
+	}
+	assert failed && !worktree_store_current(store, proj)
+}
+
+fn test_a_worktree_changes_with_a_file_git_quotes_the_name_of() {
+	// git quotes a path with a space or a non-ASCII letter, and a second edit of it
+	// went unseen
+	tree := os.real_path(write_tree('worktree_quoted', {
+		'proj/a.v': 'module main\n'
+	}))
+	defer {
+		os.rmdir_all(tree) or {}
+	}
+	proj := os.join_path(tree, 'proj')
+	os.exec(['git', '-C', proj, 'init', '-q'])
+	for name in ['my file.v', 'é.v'] {
+		path := os.join_path(proj, name)
+		os.write_file(path, 'module main\n\nfn first() {}\n') or { panic(err) }
+		before := worktree_state(proj)
+		os.write_file(path, 'module main\n\nfn first() {}\n\nfn second() {}\n') or { panic(err) }
+		assert worktree_state(proj) != before, name
+	}
 }
 
 fn test_a_hint_names_the_command_of_the_front_end() {

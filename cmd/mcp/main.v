@@ -472,7 +472,7 @@ fn notes(graph_path string, project_path string, served Served, cli string) stri
 	if n != '' {
 		out << if served.layered { 'the vlib under it: ${n}' } else { n }
 	}
-	return out.join(' ')
+	return sentences(out)
 }
 
 // call_tool runs one tool and returns its text, and whether it is a tool error the
@@ -677,19 +677,18 @@ fn (mut wt Worktree) extract() {
 	wt.state_at = time.now().unix()
 	wt.running = true
 	eprintln('graphify-mcp: extracting the worktree ${wt.root}')
-	spawn extract_worktree(wt.cli, wt.root, os.dir(wt.path), wt.done)
+	spawn extract_worktree(wt.cli, wt.root, os.dir(wt.path), wt.state, wt.done)
 }
 
-// extract_worktree runs `graphify extract` on the worktree into `store`, and sends
-// '' when it published the graph, or what went wrong.
-fn extract_worktree(cli string, root string, store string, done chan string) {
-	res := os.exec([cli, 'extract', root, '--out', store])
-	done <- if res.exit_code == 0 {
-		''
-	} else {
-		lines := res.output.trim_space().split_into_lines()
-		if lines.len > 0 { lines.last() } else { 'exit code ${res.exit_code}' }
+// extract_worktree runs `graphify extract` on the worktree into `store`, saving
+// `state` with it for the command line (graphify.extract_worktree_at), and sends ''
+// when it published the graph, or what went wrong.
+fn extract_worktree(cli string, root string, store string, state string, done chan string) {
+	graphify.extract_worktree_at(store, root, cli, state) or {
+		done <- err.msg()
+		return
 	}
+	done <- ''
 }
 
 // poll takes the outcome of the extract running, when it is done, and reports
@@ -752,13 +751,19 @@ fn (wt Worktree) note() string {
 
 // join_notes joins the notes that are set.
 fn join_notes(a string, b string) string {
-	return if a == '' {
-		b
-	} else if b == '' {
-		a
-	} else {
-		'${a} ${b}'
+	return sentences([a, b])
+}
+
+// sentences joins the notes that are set, each ended as a sentence, so that one
+// does not run on into the next.
+fn sentences(notes []string) string {
+	mut out := []string{}
+	for n in notes {
+		if n != '' {
+			out << if n.ends_with('.') { n } else { '${n}.' }
+		}
 	}
+	return out.join(' ')
 }
 
 // roots_notifications are the client's notifications after which it is asked for
