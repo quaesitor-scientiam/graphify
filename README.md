@@ -730,6 +730,13 @@ Windows task runs is rebuilt along with the other binaries, and the
 `.<name>.v3cc.*` directories V's compiler leaves in `bin/` are removed once
 they're an hour old.
 
+One run goes at a time. A run holds `update.lock` in the store while it works,
+and a run that starts meanwhile, such as the scheduled task while one started by
+hand is still building, logs `another update is running (pid …, since …)` and
+stops, rather than building and extracting the same again. A lock over an hour
+old was left by a run that died, and the next run takes it over; to clear one
+sooner, delete the directory.
+
 `-Commit` lets two machines extract exactly the same source: it fetches and
 fast-forwards the repo to that commit, and refuses to move it back or off its
 branch. Logs to `<store>/update.log`.
