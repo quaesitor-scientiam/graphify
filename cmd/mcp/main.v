@@ -30,6 +30,7 @@ module main
 import os
 import net.unix
 import net.urllib
+import sync
 import time
 import x.json2
 import mcp
@@ -75,6 +76,9 @@ mut:
 	note          string
 	note_at       i64
 	used_at       i64
+	// the daemon's lock its tool calls run under, let go of while one waits for the
+	// worktree's extract (wait_extract); nil without a daemon
+	held &sync.Mutex = unsafe { nil }
 }
 
 // BaseCache holds the base graphs read, each indexed once, by the graph.json it was
@@ -334,11 +338,34 @@ fn (mut app App) answer(name string, arguments string) (string, bool) {
 	// what was looked up may be what changed in the worktree, which is being extracted
 	// again: the command line extracts before it answers, so wait for the extract, a
 	// while, and look in the graph it publishes. A function just written was not found.
-	if !is_error && app.wt.running && missed(name, text) && app.wt.wait(extract_wait) {
+	if !is_error && app.wt.running && missed(name, text) && app.wait_extract(extract_wait) {
 		app.refresh()
 		text, is_error = tool_text(name, args, app.served)
 	}
 	return with_note(text, is_error, join_notes(app.wt.note(), app.note))
+}
+
+// wait_extract waits up to `timeout` for the worktree's extract to finish, and
+// reports whether it did. Its outcome stays in `done` for poll to take, as refresh
+// does. The daemon's lock is let go of between looks, so that the other sessions'
+// tool calls are answered meanwhile, and one in this directory may take the outcome
+// first: the extract is then done as well.
+fn (mut app App) wait_extract(timeout time.Duration) bool {
+	deadline := time.now().add(timeout)
+	for app.wt.running && app.wt.done.len == 0 {
+		if time.now() >= deadline {
+			return false
+		}
+		if isnil(app.held) {
+			time.sleep(100 * time.millisecond)
+		} else {
+			mut held := app.held
+			held.unlock()
+			time.sleep(100 * time.millisecond)
+			held.lock()
+		}
+	}
+	return true
 }
 
 // extract_wait bounds how long a lookup that found nothing waits for the worktree's
@@ -744,19 +771,6 @@ fn (mut wt Worktree) poll() bool {
 	came := !wt.ready
 	wt.ready = true
 	return came
-}
-
-// wait waits up to `timeout` for the extract running to finish, and reports whether
-// it did. Its outcome stays in `done` for poll to take, as refresh does.
-fn (wt Worktree) wait(timeout time.Duration) bool {
-	deadline := time.now().add(timeout)
-	for wt.done.len == 0 {
-		if time.now() >= deadline {
-			return false
-		}
-		time.sleep(100 * time.millisecond)
-	}
-	return true
 }
 
 // refresh extracts the worktree again when it has changed since the last extract

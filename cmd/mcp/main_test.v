@@ -1,6 +1,7 @@
 module main
 
 import os
+import sync
 import time
 import net.unix
 import x.json2
@@ -399,13 +400,41 @@ fn test_a_lookup_that_finds_nothing_is_told_from_an_answer() {
 }
 
 fn test_a_lookup_waits_for_the_extract_running_and_leaves_its_outcome() {
-	mut wt := Worktree{
-		done: chan string{cap: 1}
+	mut app := &App{
+		wt: Worktree{
+			done: chan string{cap: 1}
+		}
 	}
-	wt.running = true
-	assert !wt.wait(50 * time.millisecond)
-	wt.done <- ''
-	assert wt.wait(50 * time.millisecond)
+	app.wt.running = true
+	assert !app.wait_extract(50 * time.millisecond)
+	app.wt.done <- ''
+	assert app.wait_extract(50 * time.millisecond)
 	// poll still takes it, so that refresh serves the graph it published
-	assert wt.poll() && !wt.running
+	assert app.wt.poll() && !app.wt.running
+	// one taken by another call while this one waited is done as well
+	app.wt.running = false
+	assert app.wait_extract(50 * time.millisecond)
+}
+
+fn test_a_lookup_waiting_for_the_extract_lets_the_daemon_answer_other_sessions() {
+	mut mu := sync.new_mutex()
+	mut app := &App{
+		wt:   Worktree{
+			done: chan string{cap: 1}
+		}
+		held: mu
+	}
+	app.wt.running = true
+	// another session's tool call, which takes the daemon's lock and ends the extract
+	mu.lock()
+	other := spawn fn [mut mu, app] () {
+		mu.lock()
+		app.wt.done <- ''
+		mu.unlock()
+	}()
+	started := time.now()
+	assert app.wait_extract(5 * time.second)
+	assert time.since(started) < 2 * time.second
+	mu.unlock()
+	other.wait()
 }
