@@ -370,14 +370,14 @@ fn test_shortest_path_lists_as_many_routes_as_it_is_asked_for() {
 		'a': json2.Any('start')
 		'b': json2.Any('goal')
 	}
-	text, is_error := call_tool('shortest_path', args, served, '')
+	text, is_error := tool_text('shortest_path', args, served)
 	assert !is_error
 	assert text.contains('5. start') && !text.contains('6. start'), text
 	args['routes'] = json2.Any(7)
-	all, _ := call_tool('shortest_path', args, served, '')
+	all, _ := tool_text('shortest_path', args, served)
 	assert all.contains('7. start') && !all.contains('the 5 shortest'), all
 	args['routes'] = json2.Any(0)
-	one, _ := call_tool('shortest_path', args, served, '')
+	one, _ := tool_text('shortest_path', args, served)
 	assert one.contains('the 1 shortest') && !one.contains('2. start'), one
 }
 
@@ -386,4 +386,26 @@ fn test_notes_are_joined_as_sentences() {
 	assert join_notes('it is being extracted again', 'the project: out of date.') == 'it is being extracted again. The project: out of date.'
 	assert join_notes('', 'out of date.') == 'out of date.'
 	assert sentences(['a', '', 'b.']) == 'a. B.'
+}
+
+fn test_a_lookup_that_finds_nothing_is_told_from_an_answer() {
+	assert missed('get_node', 'no symbol matches: f')
+	assert missed('get_body', 'no symbol matches: f')
+	assert missed('query_graph', 'no symbols match: f')
+	assert missed('get_neighbors', no_neighbors)
+	assert missed('shortest_path', no_path)
+	assert !missed('get_node', 'fn f  (a.v:3)')
+	assert !missed('overview', 'no symbol matches: f')
+}
+
+fn test_a_lookup_waits_for_the_extract_running_and_leaves_its_outcome() {
+	mut wt := Worktree{
+		done: chan string{cap: 1}
+	}
+	wt.running = true
+	assert !wt.wait(50 * time.millisecond)
+	wt.done <- ''
+	assert wt.wait(50 * time.millisecond)
+	// poll still takes it, so that refresh serves the graph it published
+	assert wt.poll() && !wt.running
 }

@@ -810,9 +810,13 @@ pub:
 // count_call_paths is call_paths with how many routes there are in all, by the same
 // rules: it goes on past `max`, counting.
 pub fn (g Graph) count_call_paths(a string, b string, max int) CallRoutes {
+	return g.call_routes(g.resolve_one(a), g.resolve_one(b), max)
+}
+
+// call_routes is count_call_paths from the declaration `start` to the declaration
+// `goal`, by their ids.
+fn (g Graph) call_routes(start string, goal string, max int) CallRoutes {
 	idx := g.index()
-	start := g.resolve_one(a)
-	goal := g.resolve_one(b)
 	if start == '' || goal == '' || max <= 0 {
 		return CallRoutes{}
 	}
@@ -1218,14 +1222,29 @@ pub fn (g Graph) path_between_routes(a string, b string, routes int) string {
 	} else {
 		routes
 	}
-	forward := g.count_call_paths(a, b, max)
-	if forward.paths.len > 0 {
-		return g.render_call_paths(forward)
+	// a name with several declarations is each of them, as get_node takes it: the
+	// chains are of the first two that calls link. Only the first was tried, which for
+	// `real_path` was V3File's field, and the call of os.real_path was not found.
+	starts, a_count := g.path_ends(a)
+	goals, b_count := g.path_ends(b)
+	ends := ends_note(a, a_count, b, b_count)
+	for start in starts {
+		for goal in goals {
+			forward := g.call_routes(start, goal, max)
+			if forward.paths.len > 0 {
+				return ends + g.render_call_paths(forward)
+			}
+		}
 	}
-	back := g.count_call_paths(b, a, max)
-	if back.paths.len > 0 {
-		return "(`${a}` doesn't reach `${b}` by calls, but `${b}` reaches `${a}`:)\n" +
-			g.render_call_paths(back)
+	for start in starts {
+		for goal in goals {
+			back := g.call_routes(goal, start, max)
+			if back.paths.len > 0 {
+				return ends +
+					"(`${a}` doesn't reach `${b}` by calls, but `${b}` reaches `${a}`:)\n" +
+					g.render_call_paths(back)
+			}
+		}
 	}
 	any := g.shortest_path(a, b)
 	if any.len > 0 {
@@ -1237,6 +1256,46 @@ pub fn (g Graph) path_between_routes(a string, b string, routes int) string {
 
 // the most chains of calls path_between shows
 const max_call_paths = 5
+
+// the most declarations of a name path_between tries chains of calls from or to
+const max_path_ends = 4
+
+// path_ends is the declarations `query` names that path_between tries chains of calls
+// from or to: the functions and methods first, as they make and take the calls, then
+// the rest, such as a function-typed field a call goes through; at most max_path_ends.
+// And how many declarations it names in all.
+fn (g Graph) path_ends(query string) ([]string, int) {
+	idx := g.index()
+	mut calling := []string{}
+	mut rest := []string{}
+	all := g.resolve_all(query)
+	for id in all {
+		s := idx.symbol(id) or { idx.lib_by_id[id] or { Symbol{} } }
+		if s.kind in [.function, .method] {
+			calling << id
+		} else {
+			rest << id
+		}
+	}
+	calling << rest
+	return calling#[..max_path_ends], all.len
+}
+
+// ends_note says which ends of a path were names of several declarations, before the
+// chains of calls between the ones that calls link; '' when neither was.
+fn ends_note(a string, starts int, b string, goals int) string {
+	mut several := []string{}
+	if starts > 1 {
+		several << '`${a}` names ${starts} declarations'
+	}
+	if goals > 1 {
+		several << '`${b}` names ${goals} declarations'
+	}
+	if several.len == 0 {
+		return ''
+	}
+	return '(${several.join(' and ')}; the chains below are of the ones that calls link:)\n'
+}
 
 // the most chains of calls path_between_routes will show
 const max_listed_call_paths = 50

@@ -10016,6 +10016,31 @@ fn test_a_route_ten_calls_longer_than_the_shortest_is_a_route_and_one_eleven_lon
 
 // `routes` is how many chains of calls are listed: all of them when there are no more
 // than that, and never more than 50, nor fewer than 1.
+fn test_a_path_to_a_name_of_several_declarations_is_to_the_one_calls_reach() {
+	// path took the first declaration of a name, a field for `real_path`, and found no
+	// chain of calls to os.real_path, which get_node listed among them
+	g := graph_of({
+		'a.v': 'module main
+
+struct File {
+	real_path string
+}
+
+fn real_path() {}
+
+fn start() {
+	real_path()
+}
+'
+	})
+	assert g.resolve_one('real_path') == 'main.File.real_path'
+	out := g.path_between('start', 'real_path')
+	assert out.starts_with('(`real_path` names 2 declarations; the chains below are of the ones that calls link:)'), out
+	assert out.contains('-> real_path (a.v:7)'), out
+	// one declaration each is as before, with no note
+	assert !g.path_between('start', 'main.real_path').contains('names'), g.path_between('start', 'main.real_path')
+}
+
 fn test_a_path_lists_as_many_routes_as_asked_for_up_to_fifty() {
 	mut src := 'module m\n\npub fn goal() {}\n\npub fn start() {\n'
 	for i in 0 .. 60 {
