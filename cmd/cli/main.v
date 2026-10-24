@@ -55,6 +55,12 @@ common options:
                    graph of the vlib it read; in another git worktree of it, the
                    worktree\'s own graph, extracted again when the worktree changed
   --base <file>    graph.json to layer the graph on, for calls into vlib
+  --source-dir <dir>
+                   checkout to read sources from (or GRAPHIFY_SOURCE_DIR), for a
+                   graph extracted on another machine
+
+A lookup that finds nothing (query, path, explain, body, neighbors) says so on
+stderr and exits 1.
 '
 
 fn main() {
@@ -65,6 +71,7 @@ fn main() {
 	}
 	cmd := args[0]
 	rest := args[1..]
+	check_values(rest)
 	match cmd {
 		'extract' {
 			cmd_extract(rest)
@@ -201,7 +208,8 @@ fn cmd_query(args []string) {
 	budget := int_flag(args, '--budget') or { 2000 }
 	dfs := '--dfs' in args
 	g := load(args)
-	println(g.query(text, budget, dfs))
+	out := g.query(text, budget, dfs)
+	answer(out, out.starts_with('no symbols match: '))
 }
 
 fn cmd_path(args []string) {
@@ -213,11 +221,7 @@ fn cmd_path(args []string) {
 	} else {
 		g.path_between(a, b)
 	}
-	if text == '' {
-		println('no path between "${a}" and "${b}"')
-		return
-	}
-	println(text)
+	answer(if text == '' { 'no path between "${a}" and "${b}"' } else { text }, text == '')
 }
 
 fn cmd_overview(args []string) {
@@ -231,24 +235,35 @@ fn cmd_overview(args []string) {
 fn cmd_explain(args []string) {
 	node := positional(args, 0) or { fail('explain: needs a symbol') }
 	g := load(args)
-	println(g.explain(node))
+	out := g.explain(node)
+	answer(out, out.starts_with(no_match))
 }
 
 fn cmd_neighbors(args []string) {
 	node := positional(args, 0) or { fail('neighbors: needs a symbol') }
 	g := load(args)
 	names := g.neighbor_names(node)
-	if names.len == 0 {
-		println('no neighbors of "${node}", or no such symbol')
-		return
-	}
-	println(names.join('\n'))
+	answer(if names.len == 0 { 'no neighbors of "${node}", or no such symbol' } else { names.join('\n') },
+		names.len == 0)
 }
 
 fn cmd_body(args []string) {
 	node := positional(args, 0) or { fail('body: needs a symbol') }
 	g := load(args)
-	println(g.get_body(node))
+	out := g.get_body(node)
+	answer(out, out.starts_with(no_match))
+}
+
+// no_match begins what explain and body answer for a symbol there is none of.
+const no_match = 'no symbol matches: '
+
+// answer prints what a lookup found; for one that found nothing, it says so on
+// stderr and exits 1, so that a script can tell.
+fn answer(text string, missed bool) {
+	if missed {
+		fail(text)
+	}
+	println(text)
 }
 
 fn cmd_skeleton(args []string) {
@@ -381,12 +396,13 @@ fn resolve_out(args []string, path string) string {
 }
 
 // load reads the persisted graph (or builds one from cwd when the default
-// ./graphify-out/graph.json is missing), as the MCP server serves it: with a central store, the graph of the project whose root
-// holds the working directory, layered on the store's graph of the vlib it read; in
-// another git worktree of it, the worktree's own graph, extracted again when the
-// worktree has changed. `--base <file>` layers the graph on that graph instead.
-// `--source-dir <dir>` overrides the root the graph was extracted from, so a
-// graph shared from another machine/OS resolves `body` against a local checkout.
+// ./graphify-out/graph.json is missing), as the MCP server serves it: with a central
+// store, the graph of the project whose root holds the working directory, layered on
+// the store's graph of the vlib it read; in another git worktree of it, the
+// worktree's own graph, extracted again when the worktree has changed. `--base
+// <file>` layers the graph on that graph instead. `--source-dir <dir>` (or
+// GRAPHIFY_SOURCE_DIR) overrides the root the graph was extracted from, so a graph
+// shared from another machine/OS resolves `body` against a local checkout.
 fn load(args []string) graphify.Graph {
 	store := store_dir(args)
 	mut base_file := str_flag(args, '--base') or { '' }
@@ -395,8 +411,11 @@ fn load(args []string) graphify.Graph {
 	// one looked up in a store, is the one asked for, and "." may be no project at all
 	named := file != '' || store != ''
 	from_store := file == '' && store != ''
+	source_dir := str_flag(args, '--source-dir') or { os.getenv('GRAPHIFY_SOURCE_DIR') }
 	if from_store {
-		found, under := store_graph(store)
+		// a graph shared from another machine has no worktree here, as the MCP
+		// server takes it
+		found, under := store_graph(store, source_dir == '')
 		file = found
 		if base_file == '' {
 			base_file = under
@@ -404,7 +423,8 @@ fn load(args []string) graphify.Graph {
 	} else if file == '' {
 		file = os.join_path(graphify.out_dir_name, 'graph.json')
 	}
-	mut g := if os.exists(file) {
+	built := !os.exists(file)
+	mut g := if !built {
 		graphify.load_graph(file) or { fail('cannot read ${file}: ${err}') }
 	} else if from_store {
 		fail('no graph in ${store} is of a project that holds ${os.getwd()}: run `graphify extract <project> --store ${store}` first')
@@ -412,20 +432,18 @@ fn load(args []string) graphify.Graph {
 		fail('${file} not found: run `graphify extract` on the project first')
 	} else {
 		eprintln('note: ${file} not found, building graph from "." (run `graphify extract` to persist)')
-		mut built := graphify.build_graph(graphify.Options{ root: '.' })
-		built.cli = true
-		return built
+		graphify.build_graph(graphify.Options{ root: '.' })
 	}
-	mut shared := false
-	if sd := str_flag(args, '--source-dir') {
-		g.root = sd
-		shared = true
+	shared := source_dir != ''
+	if shared {
+		g.root = source_dir
 	}
 	// a graph shared from another machine was built by another graphify, so
 	// only its commit is worth comparing
 	cli := if shared { '' } else { os.executable() }
 	mut notes := []string{}
-	note := graphify.stale_note(file, g.root, cli)
+	// a graph just built is of the files as they are
+	note := if built { '' } else { graphify.stale_note(file, g.root, cli) }
 	if note != '' {
 		notes << note
 	}
@@ -456,11 +474,12 @@ fn load(args []string) graphify.Graph {
 // holds the working directory, on the graph of the vlib it read (graphify.base_for);
 // in another git worktree of a graph's repository, wherever the worktree is, the
 // worktree's own graph in its worktree store, extracted first when the worktree has
-// changed since. '' when no graph in the store is of the working directory.
-fn store_graph(store string) (string, string) {
+// changed since, unless `worktrees` is false. '' when no graph in the store is of the
+// working directory.
+fn store_graph(store string, worktrees bool) (string, string) {
 	dir := os.getwd()
 	project := graphify.project_for(store, dir, '') or { '' }
-	found := graphify.worktree_graph(store, dir, project, '', '') or {
+	found := graphify.worktree_graph(store, if worktrees { dir } else { '' }, project, '', '') or {
 		return project, if project == '' { '' } else { graphify.base_for(store, project) or { '' } }
 	}
 	base := graphify.base_for(store, found.graph) or { '' }
@@ -496,6 +515,20 @@ fn extracted_for(store string, root string) bool {
 
 // --- tiny arg helpers ---
 
+// value_flags are the flags followed by a value.
+const value_flags = ['--budget', '--graph', '--base', '--source-dir', '--out', '--store', '--labels',
+	'--resolution', '--restarts', '--routes']
+
+// check_values fails on a flag of value_flags with no value after it, which would
+// otherwise go unread: `overview --store` read no store.
+fn check_values(args []string) {
+	for i, a in args {
+		if a in value_flags && (i + 1 == args.len || args[i + 1].starts_with('--')) {
+			fail('${a} needs a value')
+		}
+	}
+}
+
 // positionals returns every arg that is not a recognized flag or that
 // flag's value, in order.
 fn positionals(args []string) []string {
@@ -503,8 +536,7 @@ fn positionals(args []string) []string {
 	for i := 0; i < args.len; i++ {
 		a := args[i]
 		if a.starts_with('--') {
-			if a in ['--budget', '--graph', '--base', '--source-dir', '--out', '--store', '--labels', '--resolution',
-				'--restarts', '--routes'] {
+			if a in value_flags {
 				i++ // skip the flag's value
 			}
 			continue
