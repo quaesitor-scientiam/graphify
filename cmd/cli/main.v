@@ -15,6 +15,7 @@ usage:
   graphify path    <A> <B>                 shortest path between two symbols
   graphify explain <symbol>                summarize a symbol and its relationships
   graphify body    <symbol>                print only that declaration body
+  graphify neighbors <symbol>              list the symbols directly linked to it
   graphify skeleton <path>                 print a body-less skeleton of <path>
   graphify merge-graphs <a.json> <b.json> [more.json...] [--out F] [--labels a,b,...]
                                             combine graphs into one, namespaced by label
@@ -82,6 +83,9 @@ fn main() {
 		}
 		'body' {
 			cmd_body(rest)
+		}
+		'neighbors' {
+			cmd_neighbors(rest)
 		}
 		'skeleton' {
 			cmd_skeleton(rest)
@@ -219,12 +223,26 @@ fn cmd_path(args []string) {
 fn cmd_overview(args []string) {
 	g := load(args)
 	println(g.report())
+	if !isnil(g.base.under) {
+		println('(layered on the vlib of ${g.base.root}: ${g.index().base_count} more symbols, which the other commands reach)')
+	}
 }
 
 fn cmd_explain(args []string) {
 	node := positional(args, 0) or { fail('explain: needs a symbol') }
 	g := load(args)
 	println(g.explain(node))
+}
+
+fn cmd_neighbors(args []string) {
+	node := positional(args, 0) or { fail('neighbors: needs a symbol') }
+	g := load(args)
+	names := g.neighbor_names(node)
+	if names.len == 0 {
+		println('no neighbors of "${node}", or no such symbol')
+		return
+	}
+	println(names.join('\n'))
 }
 
 fn cmd_body(args []string) {
@@ -362,8 +380,8 @@ fn resolve_out(args []string, path string) string {
 	return graphify.out_dir_name
 }
 
-// load reads the persisted graph (or rebuilds from cwd if it is missing), as the
-// MCP server serves it: with a central store, the graph of the project whose root
+// load reads the persisted graph (or builds one from cwd when the default
+// ./graphify-out/graph.json is missing), as the MCP server serves it: with a central store, the graph of the project whose root
 // holds the working directory, layered on the store's graph of the vlib it read; in
 // another git worktree of it, the worktree's own graph, extracted again when the
 // worktree has changed. `--base <file>` layers the graph on that graph instead.
@@ -373,7 +391,11 @@ fn load(args []string) graphify.Graph {
 	store := store_dir(args)
 	mut base_file := str_flag(args, '--base') or { '' }
 	mut file := str_flag(args, '--graph') or { os.getenv('GRAPHIFY_GRAPH') }
-	if file == '' && store != '' {
+	// only the default graph is built from "." when it is missing: a graph named, or
+	// one looked up in a store, is the one asked for, and "." may be no project at all
+	named := file != '' || store != ''
+	from_store := file == '' && store != ''
+	if from_store {
 		found, under := store_graph(store)
 		file = found
 		if base_file == '' {
@@ -384,6 +406,10 @@ fn load(args []string) graphify.Graph {
 	}
 	mut g := if os.exists(file) {
 		graphify.load_graph(file) or { fail('cannot read ${file}: ${err}') }
+	} else if from_store {
+		fail('no graph in ${store} is of a project that holds ${os.getwd()}: run `graphify extract <project> --store ${store}` first')
+	} else if named {
+		fail('${file} not found: run `graphify extract` on the project first')
 	} else {
 		eprintln('note: ${file} not found, building graph from "." (run `graphify extract` to persist)')
 		mut built := graphify.build_graph(graphify.Options{ root: '.' })
