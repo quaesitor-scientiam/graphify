@@ -39,6 +39,11 @@
 // or isn't on a branch, and a failed pull only logs a warning. A prebuilt
 // bin/update-vlang-graph(.exe) beside it, which the Windows task runs, is
 // rebuilt with the rest.
+//
+// One run goes at a time: a run holds a lock in the store (update.lock), and one
+// that starts while it is held, such as the scheduled task while a run by hand is
+// building, logs that and stops. A lock over an hour old was left by a run that
+// died, and is taken over (acquire_lock).
 
 import os
 import time
@@ -82,6 +87,14 @@ mut:
 
 const stamp_name = '.build-stamp'
 
+// the lock a run holds while it pulls, builds and extracts: a directory in the
+// store, which only one process can create (acquire_lock)
+const lock_name = 'update.lock'
+
+// how old a lock is, in seconds, when it is taken for one left by a run that
+// died; a whole run takes about 10 minutes
+const lock_stale_after = i64(3600)
+
 fn log_line(log_path string, msg string) {
 	line := '${time.now().format_ss()}  ${msg}'
 	println(line)
@@ -101,7 +114,76 @@ fn log_output(log_path string, out string) {
 fn fail(log_path string, msg string) {
 	log_line(log_path, 'ERROR: ${msg}')
 	log_line(log_path, '--- done ---')
+	// the lock is beside the log, in the store
+	release_lock(os.join_path(os.dir(log_path), lock_name))
 	exit(1)
+}
+
+// acquire_lock takes the lock `lock_dir` for this run: true when it holds it, false
+// when another run does, which it logs. Without it, the scheduled task that starts
+// while a run by hand is building builds and extracts the same again. A lock older
+// than lock_stale_after was left by a run that died, and is taken over. When no lock
+// can be made at all, the run goes on without one.
+fn acquire_lock(log_path string, lock_dir string) bool {
+	if take_lock(lock_dir) {
+		return true
+	}
+	if !os.is_dir(lock_dir) {
+		log_line(log_path, 'WARNING: cannot create ${lock_dir}; running without a lock')
+		return true
+	}
+	who := (os.read_file(os.join_path(lock_dir, 'owner')) or { 'an unknown run' }).trim_space()
+	since := os.file_last_mod_unix(lock_dir)
+	age := time.now().unix() - since
+	if age < lock_stale_after {
+		log_line(log_path, 'another update is running (${who}, since ${time.unix(since).local().format_ss()}); not starting a second one. If none is, delete ${lock_dir}.')
+		return false
+	}
+	// move it aside, which only one run can do, and take its place
+	aside := '${lock_dir}.stale-${time.now().unix_milli()}'
+	os.rename(lock_dir, aside) or {
+		log_line(log_path, 'another update took over a stale lock first; not starting a second one')
+		return false
+	}
+	// another run may have taken it over between the look and the move, and what
+	// moved is that run's new lock: put it back
+	if os.file_last_mod_unix(aside) != since {
+		os.rename(aside, lock_dir) or {}
+		log_line(log_path, 'another update took over a stale lock first; not starting a second one')
+		return false
+	}
+	os.rmdir_all(aside) or {}
+	log_line(log_path, 'taking over a lock left ${age / 60} min ago (${who})')
+	if !take_lock(lock_dir) {
+		log_line(log_path, 'another update took the lock first; not starting a second one')
+		return false
+	}
+	return true
+}
+
+// take_lock creates the lock `lock_dir`, noting this run in it (lock_owner): false
+// when it can't, most often because another run holds it. A lock it can't note its
+// owner in goes again, as release_lock couldn't tell it was this run's.
+fn take_lock(lock_dir string) bool {
+	os.mkdir(lock_dir) or { return false }
+	os.write_file(os.join_path(lock_dir, 'owner'), lock_owner()) or {
+		os.rmdir_all(lock_dir) or {}
+		return false
+	}
+	return true
+}
+
+// release_lock removes the lock `lock_dir` if this run holds it: a run that went on
+// past lock_stale_after may have lost it to another.
+fn release_lock(lock_dir string) {
+	if (os.read_file(os.join_path(lock_dir, 'owner')) or { '' }) == lock_owner() {
+		os.rmdir_all(lock_dir) or {}
+	}
+}
+
+// lock_owner names this run in the lock it holds.
+fn lock_owner() string {
+	return 'pid ${os.getpid()}'
 }
 
 fn parse_args(args []string) !Options {
@@ -415,7 +497,14 @@ fn main() {
 	graphify_exe := os.join_path(root, 'bin', exe_name)
 	log_path := os.join_path(store, 'update.log')
 
+	// a first run has no store yet, for its log or its lock
+	os.mkdir_all(store) or {}
 	log_line(log_path, '--- vlang graph update start ---')
+	lock_dir := os.join_path(store, lock_name)
+	if !acquire_lock(log_path, lock_dir) {
+		log_line(log_path, '--- done ---')
+		return
+	}
 	remove_build_leftovers(os.join_path(root, 'bin'))
 
 	// graphify first: a change to it must be built before it extracts
@@ -487,6 +576,7 @@ fn main() {
 		fail(log_path, 'project extract failed: ${failed.join(', ')}')
 	}
 	log_line(log_path, '--- done ---')
+	release_lock(lock_dir)
 }
 
 // extract_project extracts one project into the store, as `extract --store` names
