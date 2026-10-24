@@ -103,6 +103,7 @@ graphify path     build_graph emit_skeleton    # shortest path between symbols
 graphify path     http.get net.dial_tcp --routes 20   # list more chains of calls than the 5 shown
 graphify explain  build_graph                  # a symbol + its relationships
 graphify body     build_graph                  # just that declaration's source
+graphify neighbors build_graph                 # the names of the symbols linked to it
 graphify skeleton .                            # body-less skeleton of a path
 graphify merge-graphs a/graph.json b/graph.json --out merged.json   # combine two graphs
 graphify communities --resolution 1.5          # split the graph into subsystems
@@ -440,6 +441,10 @@ as complete:
 
 Resolution order: `--graph` > `GRAPHIFY_GRAPH` > `GRAPHIFY_STORE` (the project
 holding the cwd, else `<store>/<cwd-name>`) > `./graphify-out`.
+
+Only a missing `./graphify-out/graph.json` is made up for by building a graph
+of `.`; a graph named, or looked up in a store, that isn't there is an error
+that says to run `extract`.
 
 `extract` writes a Graphify-style bundle to `graphify-out/`:
 
