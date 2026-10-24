@@ -59,6 +59,7 @@ struct Config {
 // GraphManifest is the part of a graph's manifest.json that says whether it is out
 // of date (graph_out_of_date).
 struct GraphManifest {
+	root          string
 	source_commit string
 	binary_hash   string
 	library       []GraphLibrary
@@ -550,7 +551,7 @@ fn main() {
 	// a pull or a rebuild shows as a graph out of date
 	exe_hash := sha256.hexhash(os.read_file(graphify_exe) or { '' })
 	vlang_head := head_of(vlang)
-	vlang_graph := os.join_path(store, os.base(os.real_path(vlang)))
+	vlang_graph := store_project_dir(store, vlang)
 	why := if opts.force { 'forced' } else { graph_out_of_date(vlang_graph, vlang_head, exe_hash, '') }
 	if why == '' {
 		log_line(log_path, 'The graph is up to date. Skipping extract.')
@@ -585,7 +586,7 @@ fn extract_project(log_path string, exe string, project string, store string, ex
 	if !os.is_dir(project) {
 		return error('${project}: no such directory')
 	}
-	out := os.join_path(store, os.base(os.real_path(project)))
+	out := store_project_dir(store, project)
 	why := if force {
 		'forced'
 	} else {
@@ -601,6 +602,27 @@ fn extract_project(log_path string, exe string, project string, store string, ex
 	if result.exit_code != 0 {
 		return error('${project}: extract failed')
 	}
+}
+
+// store_project_dir is the directory `extract --store` writes the graph of the
+// project at `root` to, as graphify.store_project_dir picks it: the one whose
+// manifest names that root, else one named after it, with `-2` and so on after it
+// when another project of that name has it.
+fn store_project_dir(store string, root string) string {
+	real := os.real_path(root)
+	for name in os.ls(store) or { []string{} } {
+		text := os.read_file(os.join_path(store, name, 'manifest.json')) or { continue }
+		m := json2.decode[GraphManifest](text) or { continue }
+		if m.root != '' && os.real_path(m.root) == real {
+			return os.join_path(store, name)
+		}
+	}
+	stem := os.base(real)
+	mut out := os.join_path(store, stem)
+	for n := 2; os.exists(os.join_path(out, 'manifest.json')); n++ {
+		out = os.join_path(store, '${stem}-${n}')
+	}
+	return out
 }
 
 // graph_out_of_date says why the graph in `dir` is out of date, or '' when it isn't:

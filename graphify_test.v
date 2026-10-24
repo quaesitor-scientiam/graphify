@@ -9570,6 +9570,30 @@ fn test_a_worktree_store_is_current_until_its_worktree_changes() {
 	assert failed && !worktree_store_current(store, proj)
 }
 
+fn test_two_projects_of_one_name_have_a_store_directory_each() {
+	// `extract --store` filed a project under its directory's name, so a second
+	// project of that name took over the first's graph
+	tree := os.real_path(write_tree('store_names', {
+		'a/proj/m.v': 'module main\n'
+		'b/proj/m.v': 'module main\n'
+	}))
+	defer {
+		os.rmdir_all(tree) or {}
+	}
+	store := os.join_path(tree, 'store')
+	a := os.join_path(tree, 'a', 'proj')
+	b := os.join_path(tree, 'b', 'proj')
+	assert store_project_dir(store, a) == os.join_path(store, 'proj')
+	for root in [a, b] {
+		dir := store_project_dir(store, root)
+		os.mkdir_all(dir) or { panic(err) }
+		os.write_file(os.join_path(dir, 'manifest.json'), json_root(root)) or { panic(err) }
+	}
+	assert store_project_dir(store, a) == os.join_path(store, 'proj')
+	assert store_project_dir(store, b) == os.join_path(store, 'proj-2')
+	assert store_project_dir(store, os.join_path(tree, 'c', 'proj')) == os.join_path(store, 'proj-3')
+}
+
 fn test_a_worktree_changes_with_a_file_git_quotes_the_name_of() {
 	// git quotes a path with a space or a non-ASCII letter, and a second edit of it
 	// went unseen
