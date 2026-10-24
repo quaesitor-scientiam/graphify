@@ -4611,6 +4611,37 @@ pub fn caller() string {
 	assert g.query('read_it', 2000, false).contains('// m/a.c.v:3')
 }
 
+fn test_a_call_through_a_fn_field_is_marked_as_one() {
+	// `s.on_running(mut s)` calls the function a field holds, not a method; listed
+	// among the calls unmarked, it reads as one.
+	root := write_tree('fn_field_call', {
+		'm/s.v': 'module m
+
+pub struct Server {
+pub mut:
+	on_running fn (mut s Server) = unsafe { nil }
+}
+
+pub fn (mut s Server) close() {}
+
+pub fn (mut s Server) run() {
+	s.on_running(mut s)
+	s.close()
+}
+'
+	})
+	defer {
+		os.rmdir_all(root) or {}
+	}
+	g := build_graph(Options{ root: root })
+	run := g.explain('Server.run')
+	assert run.contains('on_running (m/s.v:5) [field]'), run
+	assert run.contains('close (m/s.v:8) at line 12'), run
+	assert run.contains('^ [field] = '), run
+	// a declaration that calls no field has no note
+	assert !g.explain('Server.close').contains('^ [field]')
+}
+
 fn test_index_representative_ranks_backends() {
 	// Backend first (plain/.c.v, then .wasm.v/.native.v, then .js.v), in any
 	// order; between files of one backend, the later one, as before.

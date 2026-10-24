@@ -1418,12 +1418,16 @@ fn (g Graph) explain_id(id string, uncertain bool) string {
 	mut referenced_by := []string{}
 	mut embeds := []string{}
 	mut any_inferred := false
+	mut any_field := false
 	for e in idx.edges_of(id) {
 		if e.from == id {
 			match e.kind {
 				.calls {
-					calls.add(label(idx, e.to) + prov_suffix(e.provenance), e.lines, e.build)
+					fmark := field_mark(idx, e.to)
+					calls.add(label(idx, e.to) + fmark + prov_suffix(e.provenance), e.lines,
+						e.build)
 					any_inferred = any_inferred || e.provenance == .inferred
+					any_field = any_field || fmark != ''
 				}
 				.defines { defines << label(idx, e.to) }
 				.references {
@@ -1472,6 +1476,9 @@ fn (g Graph) explain_id(id string, uncertain bool) string {
 	}
 	if called_by.labels.len > 0 {
 		out << 'called by     : ${capped(called_by.items())}'
+	}
+	if any_field {
+		out << '  ^ [field] = a call through the fn that field holds, not a call of a method'
 	}
 	if any_inferred {
 		out << '  ^ [inferred] = picked among several same-named candidates by the inferred receiver type or by locality/visibility, not a name that was unambiguous outright — see the edge provenance note in README'
@@ -1593,6 +1600,13 @@ fn label(idx Index, id string) string {
 		return '${s.name} (${s.loc()}) [library]'
 	}
 	return id
+}
+
+// field_mark marks a call of a field, ` [field]`: `s.on_running(mut s)` calls the fn
+// the field holds, which reads as a method call when it isn't marked.
+fn field_mark(idx Index, id string) string {
+	s := idx.symbol(id) or { idx.lib_by_id[id] or { return '' } }
+	return if s.kind == .field { ' [field]' } else { '' }
 }
 
 // prov_suffix marks a resolved `calls` edge that resolve_callee had to
