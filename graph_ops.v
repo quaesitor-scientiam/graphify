@@ -1325,7 +1325,7 @@ const max_bodies = 4
 // many calls each has, for a name with more than max_shown of them.
 fn (g Graph) list_declarations(node string, ids []string) string {
 	idx := g.index()
-	mut out := ['`${node}` names ${ids.len} declarations, the most called first; get_node one by its id, or as Type.method or file:line:']
+	mut out := ['`${node}` names ${ids.len} declarations, the most called first; ${g.command('get_node')} one by its id, or as Type.method or file:line:']
 	mut rows := []DeclRow{cap: ids.len}
 	for id in ids {
 		s := idx.symbol(id) or { continue }
@@ -1405,7 +1405,7 @@ fn (g Graph) explain_id(id string, uncertain bool) string {
 		shown := if dlines.len > 8 { dlines[..8] } else { dlines }
 		mut d := shown.map('  | ' + it).join('\n')
 		if dlines.len > shown.len {
-			d += '\n  | … (${dlines.len - shown.len} more lines — use get_body for the full source)'
+			d += '\n  | … (${dlines.len - shown.len} more lines — use ${g.command('get_body')} for the full source)'
 		}
 		out << d
 	}
@@ -1521,7 +1521,7 @@ fn (g Graph) explain_id(id string, uncertain bool) string {
 		}
 	}
 	if s.kind in [SymbolKind.function, .method, .struct_] {
-		out << '(use `get_body ${s.name}` to read its source)'
+		out << '(use `${g.command('get_body')} ${s.name}` to read its source)'
 	}
 	return out.join('\n')
 }

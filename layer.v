@@ -190,6 +190,31 @@ pub fn project_for(projects_dir string, dir string, base_root string) ?string {
 	return if best == '' { none } else { best }
 }
 
+// base_for is the graph.json in `projects_dir` of the V tree whose vlib the project
+// graph at `project_graph` read, as its manifest names it, for the project to be
+// layered on (layer_graph); none when the project read no vlib, or is that V tree's
+// own graph, or no graph in `projects_dir` is rooted at it.
+pub fn base_for(projects_dir string, project_graph string) ?string {
+	pm := load_manifest(os.join_path(os.dir(project_graph), 'manifest.json')) or { return none }
+	mut vlib := ''
+	for l in pm.library {
+		if l.label == 'vlib' && l.root != '' {
+			vlib = os.real_path(l.root)
+		}
+	}
+	if vlib == '' || (pm.root != '' && os.real_path(pm.root) == vlib) {
+		return none
+	}
+	for name in os.ls(projects_dir) or { return none } {
+		graph := os.join_path(projects_dir, name, 'graph.json')
+		m := load_manifest(os.join_path(projects_dir, name, 'manifest.json')) or { continue }
+		if m.root != '' && os.exists(graph) && os.real_path(m.root) == vlib {
+			return graph
+		}
+	}
+	return none
+}
+
 // path_holds reports whether `path` is `root` or a path inside it.
 fn path_holds(root string, path string) bool {
 	if path == root {
