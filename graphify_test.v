@@ -10341,6 +10341,28 @@ fn test_a_name_only_an_option_makes_true_is_not_the_default_build() {
 	assert text.all_before('\n') == '2 chains of calls from start to goal (1 in the default build), at most 10 calls longer than the shortest:', text
 }
 
+// The other names V sets only from the command line are not the default build's
+// either: a target no host builds for unasked (`-arch wasm32`, `-os wasm32_wasi` or
+// `wasm32_emscripten`), `-fast-math`, `v interpret`, the JavaScript backend's `es5`,
+// `-apk`, and a C++ compiler (`cplusplus`). A file named for one,
+// `_wasm32_emscripten.c.v`, is another build's.
+fn test_a_name_only_a_target_or_option_makes_true_is_not_the_default_build() {
+	for name in ['wasm32', 'wasm32_wasi', 'wasm32_emscripten', 'fast_math', 'es5', 'interpreter',
+		'apk', 'cplusplus'] {
+		assert !default_term(name), name
+		assert default_term('!' + name), name
+	}
+	g := graph_of({
+		'm/a.v':                     'module m\n\npub fn goal() {}\n\npub fn start() {\n\tdirect()\n\tbare()\n}\n\nfn direct() {\n\tgoal()\n}\n'
+		'm/b_wasm32_emscripten.c.v': 'module m\n\nfn bare() {\n\tgoal()\n}\n'
+	})
+	r := g.count_call_paths('start', 'goal', 5)
+	assert r.total == 2 && r.in_default == 1, r.str()
+	assert r.other_builds == {
+		'wasm32_emscripten': 1
+	}, r.other_builds.str()
+}
+
 // `&&` binds tighter than `||`: a build with an `||` outside any brackets is one term,
 // `a ? && b ? || c ? && d ?`, not `a ?` and `b ? || c ?` and `d ?`, and it is the
 // default build's when some alternative of it has only names that hold by default.
