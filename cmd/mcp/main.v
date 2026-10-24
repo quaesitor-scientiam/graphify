@@ -330,7 +330,30 @@ fn (mut app App) answer(name string, arguments string) (string, bool) {
 	app.used_at = time.now().unix()
 	app.refresh()
 	args := (json2.decode[json2.Any](arguments) or { json2.null }).as_map()
-	return call_tool(name, args, app.served, join_notes(app.wt.note(), app.note))
+	mut text, is_error := tool_text(name, args, app.served)
+	// what was looked up may be what changed in the worktree, which is being extracted
+	// again: the command line extracts before it answers, so wait for the extract, a
+	// while, and look in the graph it publishes. A function just written was not found.
+	if !is_error && app.wt.running && missed(name, text) && app.wt.wait(extract_wait) {
+		app.refresh()
+		text, is_error = tool_text(name, args, app.served)
+	}
+	return with_note(text, is_error, join_notes(app.wt.note(), app.note))
+}
+
+// extract_wait bounds how long a lookup that found nothing waits for the worktree's
+// extract (App.answer): a vlang worktree's takes about 20 s with its cache.
+const extract_wait = 30 * time.second
+
+// missed reports whether `text`, the tool `name`'s answer, is that it found nothing.
+fn missed(name string, text string) bool {
+	return match name {
+		'get_node', 'get_body' { text.starts_with('no symbol matches: ') }
+		'query_graph' { text.starts_with('no symbols match: ') }
+		'get_neighbors' { text == no_neighbors }
+		'shortest_path' { text == no_path }
+		else { false }
+	}
 }
 
 // move_to picks the project and the worktree again for `dir`, the session's
@@ -475,10 +498,22 @@ fn notes(graph_path string, project_path string, served Served, cli string) stri
 	return sentences(out)
 }
 
-// call_tool runs one tool and returns its text, and whether it is a tool error the
-// client should surface rather than treat as an answer; `note`, when set, says the
-// graph may be stale and goes first in the result.
-fn call_tool(name string, args map[string]json2.Any, served Served, note string) (string, bool) {
+// with_note puts `note` before the tool's answer `text`, when it is set.
+fn with_note(text string, is_error bool, note string) (string, bool) {
+	if is_error || note == '' {
+		return text, is_error
+	}
+	return '(note: ${note})\n\n${text}', false
+}
+
+// what get_neighbors and shortest_path answer when they find nothing
+const no_neighbors = '(no neighbors / unknown node)'
+const no_path = '(no path)'
+
+// tool_text runs one tool and returns its text, and whether it is a tool error the
+// client should surface rather than treat as an answer. The note goes first in the
+// result (with_note).
+fn tool_text(name string, args map[string]json2.Any, served Served) (string, bool) {
 	g := served.g
 	mut str_args := map[string]string{}
 	for k, v in args {
@@ -513,7 +548,7 @@ fn call_tool(name string, args map[string]json2.Any, served Served, note string)
 		'get_neighbors' {
 			names := g.neighbor_names((args['node'] or { json2.null }).str())
 			if names.len == 0 {
-				'(no neighbors / unknown node)'
+				no_neighbors
 			} else {
 				names.join('\n')
 			}
@@ -527,7 +562,7 @@ fn call_tool(name string, args map[string]json2.Any, served Served, note string)
 				g.path_between(a, b)
 			}
 			if path == '' {
-				'(no path)'
+				no_path
 			} else {
 				path
 			}
@@ -535,9 +570,6 @@ fn call_tool(name string, args map[string]json2.Any, served Served, note string)
 		else {
 			'unknown tool: ${name}'
 		}
-	}
-	if note != '' {
-		return '(note: ${note})\n\n${text}', false
 	}
 	return text, false
 }
@@ -712,6 +744,19 @@ fn (mut wt Worktree) poll() bool {
 	came := !wt.ready
 	wt.ready = true
 	return came
+}
+
+// wait waits up to `timeout` for the extract running to finish, and reports whether
+// it did. Its outcome stays in `done` for poll to take, as refresh does.
+fn (wt Worktree) wait(timeout time.Duration) bool {
+	deadline := time.now().add(timeout)
+	for wt.done.len == 0 {
+		if time.now() >= deadline {
+			return false
+		}
+		time.sleep(100 * time.millisecond)
+	}
+	return true
 }
 
 // refresh extracts the worktree again when it has changed since the last extract
