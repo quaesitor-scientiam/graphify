@@ -72,6 +72,48 @@ they are small next to the input either way.
 
 ## Results
 
+### 2026-10-23, second round on Windows, graphify at 2495be7 (#124), vlang at c4e254fab1
+
+The Windows round again, after #124 marked calls through fn-typed fields `[field]`.
+Files in `results/2026-10-23-windows-r2/`. The baseline runs saw no MCP server and no
+graphify tool. The grader found no drift beyond the key's "Changes at c4e254fab1".
+
+| Run | Items found | Wrong | Q3 extra | Tool calls | Turns | Time | Cost |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| graphify 1 | 69/69 | 0 | 10/10 | 47 | 48 | 238 s | $1.62 |
+| graphify 4 | 69/69 | 0 | 10/10 | 38 | 39 | 161 s | $1.58 |
+| baseline 2 | 67/69 | 0 | 10/10 | 61 | 62 | 222 s | $2.48 |
+| baseline 3 | 68/69 | 0 | 10/10 | 53 | 54 | 284 s | $2.36 |
+| **graphify, mean** | **69** | 0 | 10 | **42.5** | **43.5** | **199.5 s** | **$1.60** |
+| **baseline, mean** | **67.5** | 0 | 10 | **57** | **58** | **253 s** | **$2.42** |
+
+| Run | Final context | Cache writes | Cache reads, all turns | Weighted input |
+| --- | --- | --- | --- | --- |
+| graphify 1 | 117k | 89k | 2.82M | 393k |
+| graphify 4 | 118k | 89k | 2.82M | 394k |
+| baseline 2 | 163k | 163k | 3.72M | 576k |
+| baseline 3 | 145k | 145k | 4.00M | 581k |
+| **graphify, mean** | **118k** | 89k | **2.82M** | **394k** |
+| **baseline, mean** | **154k** | 154k | **3.86M** | **579k** |
+
+What it says:
+
+- Both graphify runs found every item, with nothing wrong. The baseline's misses are
+  all in Q2: baseline 2 missed points 1 and 2, baseline 3 point 2. The point 2 misses
+  are strict ones: each said the temporary's `fd` defaults to 0 without citing the
+  field at os/file.c.v:21. Scored leniently, the baseline runs have 68 and 69.
+- The `[field]` mark of #124 held. Both graphify runs called `get_node` on
+  `http.Server.listen_and_serve`, got `on_running (vlib/net/http/server.v:64) [field]`
+  among its calls, and left that call out of Q6 as not a method call. In the round
+  before, both listed it.
+- graphify finished 21% sooner (199.5 s against 253 s), with 25% fewer tool calls, and
+  cost 34% less ($1.60 against $2.42; weighted input 32% less).
+- Against the round before, at the same commits, graphify cost about the same ($1.60
+  against $1.55) and the baseline more ($2.42 against $2.09), which is most of the
+  wider gap in cost. One round of two runs a side is noisy.
+- No hook asked for more: in every run the reply in which the agent first stopped is
+  also the transcript's final result.
+
 ### 2026-10-23, headless, on Windows, graphify at 7ac9c6e, vlang at c4e254fab1
 
 The Opus round on Windows again, with `headless/run.ps1` and `answer.py` (#122).
