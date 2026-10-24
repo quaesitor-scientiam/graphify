@@ -1085,16 +1085,19 @@ fn opposite_term(t string) string {
 
 // option_terms are the names a `$if` tests that only an option on the command line
 // makes true: `-prod`, `-g` (`debug`), `v test`, `-profile`, `-autofree`, `-nofloat`,
-// `-freestanding`, `-prealloc`, `-no-bounds-checking`, and the backends other than C's
-// that V names there (`js` with its variants, and `native`). Others that are not
-// listed, such as `wasm32`, are taken for the default build's.
+// `-freestanding`, `-prealloc`, `-no-bounds-checking`, `-fast-math`, `-apk`,
+// `v interpret`, a C++ compiler (`cplusplus`, `-cc g++`), the backends other than C's
+// that V names there (`js` with its variants and `es5`, and `native`), and the
+// WebAssembly targets no host builds for unasked (`-arch wasm32`, `-os wasm32_wasi` or
+// `wasm32_emscripten`).
 const option_terms = ['prod', 'debug', 'test', 'profile', 'autofree', 'nofloat', 'freestanding',
-	'prealloc', 'no_bounds_checking', 'js', 'js_node', 'js_browser', 'js_freestanding', 'native']
+	'prealloc', 'no_bounds_checking', 'fast_math', 'apk', 'interpreter', 'cplusplus', 'js', 'js_node',
+	'js_browser', 'js_freestanding', 'es5', 'native', 'wasm32', 'wasm32_wasi', 'wasm32_emscripten']
 
 // default_term reports whether a build term can hold without an option on the command
 // line: some alternative of it, joined by `||`, has only names that do. A `-d` flag
-// (`x ?`) and an option_terms name don't; a term naming an OS, an architecture or a C
-// compiler holds on a host's default build, and so does the opposite of any name.
+// (`x ?`) and an option_terms name don't; a term naming any other OS, architecture or
+// C compiler holds on a host's default build, and so does the opposite of any name.
 fn default_term(t string) bool {
 	for alt in split_build(t, `|`) {
 		if split_build(alt, `&`).all(default_conjunct(it)) {

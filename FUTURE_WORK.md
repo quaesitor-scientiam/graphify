@@ -1706,7 +1706,10 @@ On vlang, against master:
   `nofloat`, `freestanding`, `prealloc`, `no_bounds_checking`, and the `js` and
   `native` backends. A term naming an OS, an architecture or a C compiler holds on
   a host's default build. The names V has beyond these, `wasm32` for one, are taken
-  for the default build's.
+  for the default build's. (Since 2026-10-24 `option_terms` also has `fast_math`,
+  `apk`, `interpreter`, `es5`, `cplusplus` (a C++ compiler), and the WebAssembly
+  targets `wasm32`, `wasm32_wasi` and `wasm32_emscripten`, which no host builds for
+  unasked.)
   The default build's routes are listed first, then the others, each shortest first.
   The count says how many are the default build's. When routes of other builds
   don't fit among the 5 shown, a last line gives their builds, with how many routes
