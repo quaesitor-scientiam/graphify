@@ -388,7 +388,8 @@ fn (mut d Daemon) answer(line string) (string, bool) {
 	key := if dir == '' { '' } else { os.real_path(dir) }
 	mut app := d.apps[key] or {
 		eprintln('graphify-mcp daemon: a session in ${dir}')
-		a := new_app(d.cfg, dir, d.bases) or { return 'graphify-mcp: ${err}', true }
+		mut a := new_app(d.cfg, dir, d.bases) or { return 'graphify-mcp: ${err}', true }
+		a.held = d.mu
 		d.apps[key] = a
 		a
 	}
