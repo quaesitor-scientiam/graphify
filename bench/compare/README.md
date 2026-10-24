@@ -72,6 +72,55 @@ they are small next to the input either way.
 
 ## Results
 
+### 2026-10-23, headless, on Windows, graphify at 7ac9c6e, vlang at c4e254fab1
+
+The Opus round on Windows again, with `headless/run.ps1` and `answer.py` (#122).
+graphify at 7ac9c6e has the same code as 1672ca7 (#118): #119 to #122 changed only the
+benchmark. vlang is 23 commits past the other rounds' ffc38ada48; the grader re-keyed
+at the source and found only moved lines, now in `key.md` ("Changes at c4e254fab1").
+Files in `results/2026-10-23-windows/`. The baseline runs saw no MCP server and no
+graphify tool.
+
+| Run | Items found | Wrong | Q3 extra | Tool calls | Turns | Time | Cost |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| graphify 1 | 69/69 | 1 | 10/10 | 39 | 40 | 186 s | $1.56 |
+| graphify 4 | 69/69 | 1 | 10/10 | 40 | 41 | 163 s | $1.53 |
+| baseline 2 | 69/69 | 0 | 10/10 | 47 | 48 | 271 s | $2.20 |
+| baseline 3 | 67/69 | 0 | 10/10 | 54 | 55 | 205 s | $1.98 |
+| **graphify, mean** | **69** | 1 | 10 | **39.5** | **40.5** | **174.5 s** | **$1.55** |
+| **baseline, mean** | **68** | 0 | 10 | **50.5** | **51.5** | **238 s** | **$2.09** |
+
+| Run | Final context | Cache writes | Cache reads, all turns | Weighted input |
+| --- | --- | --- | --- | --- |
+| graphify 1 | 121k | 93k | 2.59M | 375k |
+| graphify 4 | 120k | 91k | 2.56M | 370k |
+| baseline 2 | 157k | 128k | 4.02M | 561k |
+| baseline 3 | 140k | 110k | 3.53M | 491k |
+| **graphify, mean** | **120k** | 92k | **2.57M** | **372k** |
+| **baseline, mean** | **148k** | 119k | **3.77M** | **526k** |
+
+What it says:
+
+- Completeness is level: 69 and 68 of 69. Baseline 3 missed Q2's points 1 and 2.
+- Both graphify runs gave the same wrong item: Q6's `s.on_running(mut s)`
+  (net/http/server.v:116), a call through a function-typed field, which the key leaves
+  out. Each said it was a call through a field and listed it anyway. The grader counted
+  that as wrong, a judgement call: the Windows grader of 2026-10-22 let the same labelled
+  row in graphify 1's answer stand. The row comes from graphify. `get_node
+  http.Server.listen_and_serve` lists `on_running (vlib/net/http/server.v:64)` among its
+  calls, as it lists the methods, and nothing says the callee is a field. Both runs looked
+  that node up. Both baseline runs named the call and left it out.
+- graphify finished 27% sooner (174.5 s against 238 s), with 22% fewer tool calls, and
+  cost 26% less ($1.55 against $2.09; weighted input 29% less).
+- Both sides cost less than in the Windows round of 2026-10-22: graphify $1.55 against
+  $2.02, the baseline $2.09 against $2.47. That is close to the `run.sh` round after #118
+  ($1.45 and $2.03). This round doesn't show why.
+- No hook asked for more: in every run the reply in which the agent first stopped is
+  also the transcript's final result. The graphify answers end with a "Skeptical review"
+  and a "Revised answer", which the user's global CLAUDE.md asks of every answer and a
+  baseline run doesn't load. So the graphify answers are longer, and a grader can tell
+  the two sides apart by them.
+
 ### 2026-10-22, headless, on Windows, graphify at 612193e, vlang at ffc38ada48
 
 The Opus round on Windows, with `headless/run.ps1`. graphify at 612193e has the same
