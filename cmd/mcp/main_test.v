@@ -383,7 +383,7 @@ fn test_shortest_path_lists_as_many_routes_as_it_is_asked_for() {
 
 fn test_notes_are_joined_as_sentences() {
 	// a worktree's note has no full stop, and ran on into the stale note after it
-	assert join_notes('it is being extracted again', 'the project: out of date.') == 'it is being extracted again. the project: out of date.'
+	assert join_notes('it is being extracted again', 'the project: out of date.') == 'it is being extracted again. The project: out of date.'
 	assert join_notes('', 'out of date.') == 'out of date.'
-	assert sentences(['a', '', 'b.']) == 'a. b.'
+	assert sentences(['a', '', 'b.']) == 'a. B.'
 }

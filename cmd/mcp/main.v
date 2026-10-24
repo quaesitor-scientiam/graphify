@@ -755,12 +755,13 @@ fn join_notes(a string, b string) string {
 }
 
 // sentences joins the notes that are set, each ended as a sentence, so that one
-// does not run on into the next.
+// does not run on into the next; each after the first begins with a capital letter.
 fn sentences(notes []string) string {
 	mut out := []string{}
 	for n in notes {
 		if n != '' {
-			out << if n.ends_with('.') { n } else { '${n}.' }
+			ended := if n.ends_with('.') { n } else { '${n}.' }
+			out << if out.len > 0 { ended.capitalize() } else { ended }
 		}
 	}
 	return out.join(' ')

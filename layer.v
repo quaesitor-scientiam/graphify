@@ -215,6 +215,27 @@ pub fn base_for(projects_dir string, project_graph string) ?string {
 	return none
 }
 
+// store_project_dir is the directory in the central `store` that `extract --store`
+// writes the graph of the project at `root` to: the one whose manifest names that
+// root, when there is one; else one named after the project's directory, with `-2`,
+// `-3` and so on after it when another project of that name has it. A second project
+// of one name took over the first's directory, so that the first had no graph.
+pub fn store_project_dir(store string, root string) string {
+	real := os.real_path(root)
+	for name in os.ls(store) or { []string{} } {
+		m := load_manifest(os.join_path(store, name, 'manifest.json')) or { continue }
+		if m.root != '' && os.real_path(m.root) == real {
+			return os.join_path(store, name)
+		}
+	}
+	base := os.base(real)
+	mut dir := os.join_path(store, base)
+	for n := 2; os.exists(os.join_path(dir, 'manifest.json')); n++ {
+		dir = os.join_path(store, '${base}-${n}')
+	}
+	return dir
+}
+
 // path_holds reports whether `path` is `root` or a path inside it.
 fn path_holds(root string, path string) bool {
 	if path == root {

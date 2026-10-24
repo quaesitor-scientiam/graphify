@@ -417,7 +417,12 @@ Queries read `./graphify-out/graph.json` by default. Override with `--graph <fil
 
 **Central store (recommended for multiple projects).** Set `GRAPHIFY_STORE` once;
 then `extract` auto-files each project under `<store>/<project-name>/`, and queries
-resolve the graph for whatever project directory you're in — no path juggling:
+resolve the graph for whatever project directory you're in — no path juggling.
+A second project of the same name gets `<project-name>-2/`, and a project
+extracted again goes back to the directory whose manifest names its root.
+Extracting the root of a git worktree of a project in the store writes the
+worktree's graph to its worktree store, the one the queries answer from there,
+rather than filing it as another project:
 
 ```
 $env:GRAPHIFY_STORE = 'S:\graph_data'
@@ -446,7 +451,9 @@ holding the cwd, or of a worktree of one) > `./graphify-out`.
 
 Only a missing `./graphify-out/graph.json` is made up for by building a graph
 of `.`; a graph named, or looked up in a store, that isn't there is an error
-that says to run `extract`.
+that says to run `extract`. The graph built reads the vlib and `~/.vmodules`
+modules it imports, as `extract` does, and keeps its cache in the user's cache
+directory, so the next command there reparses only what changed.
 
 `extract` writes a Graphify-style bundle to `graphify-out/`:
 

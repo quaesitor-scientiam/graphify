@@ -121,6 +121,21 @@ fn main() {
 
 fn cmd_extract(args []string) {
 	path := positional(args, 0) or { '.' }
+	store := store_dir(args)
+	if store != '' && '--out' !in args {
+		// a worktree of a project in the store goes to its worktree store, which the
+		// MCP server and the other commands answer from: filed under its own name, it
+		// was a second project, which nothing refreshed or removed
+		if found := worktree_of(store, path) {
+			wt := graphify.worktree_store(graphify.worktree_stores(), found.root)
+			graphify.extract_worktree_store(wt, found, os.executable()) or {
+				fail('extract failed: ${err}')
+			}
+			println('${found.root} is a worktree of the project graph ${found.graph}')
+			println('wrote ${wt}/graph.json, GRAPH_REPORT.md, manifest.json')
+			return
+		}
+	}
 	out := resolve_out(args, path)
 	// parse each file in its own worker process, so one file that panics V's
 	// parser is skipped (and reported) rather than aborting the whole extract.
@@ -381,18 +396,26 @@ fn store_dir(args []string) string {
 	return str_flag(args, '--store') or { os.getenv('GRAPHIFY_STORE') }
 }
 
-// resolve_out picks where `extract` writes: an explicit --out, else a
-// per-project subdir under the central store (<store>/<project-name>/), else
-// the default ./graphify-out/.
+// resolve_out picks where `extract` writes: an explicit --out, else the project's
+// own directory in the central store (graphify.store_project_dir), else the default
+// ./graphify-out/.
 fn resolve_out(args []string, path string) string {
 	if o := str_flag(args, '--out') {
 		return o
 	}
 	store := store_dir(args)
 	if store != '' {
-		return os.join_path(store, os.base(os.real_path(path)))
+		return graphify.store_project_dir(store, path)
 	}
 	return graphify.out_dir_name
+}
+
+// worktree_of is the project graph in `store` that the directory `path` is the root
+// of a worktree of, as store_graph finds one; none when it is no worktree's root.
+fn worktree_of(store string, path string) ?graphify.WorktreeGraph {
+	project := graphify.project_for(store, path, '') or { '' }
+	found := graphify.worktree_graph(store, path, project, '', '')?
+	return if os.real_path(path) == os.real_path(found.root) { found } else { none }
 }
 
 // load reads the persisted graph (or builds one from cwd when the default
@@ -432,7 +455,7 @@ fn load(args []string) graphify.Graph {
 		fail('${file} not found: run `graphify extract` on the project first')
 	} else {
 		eprintln('note: ${file} not found, building graph from "." (run `graphify extract` to persist)')
-		graphify.build_graph(graphify.Options{ root: '.' })
+		build_here()
 	}
 	shared := source_dir != ''
 	if shared {
@@ -466,6 +489,16 @@ fn load(args []string) graphify.Graph {
 	g.cli = true
 	// built once: a command looks things up in it many times, and none changes the graph
 	g.cache_index()
+	return g
+}
+
+// build_here builds the graph of ".", as `extract` does, with the vlib and VMODULES
+// modules it imports, so that its calls into them resolve, and a graph layered with
+// --base reaches into vlib. Its cache is kept in the user's cache directory, one
+// for each directory, so that the next command in it reparses only what changed.
+fn build_here() graphify.Graph {
+	cache := graphify.worktree_store(os.join_path(os.cache_dir(), 'graphify', 'built'), '.')
+	g, _ := graphify.build_graph_with_library('.', os.executable(), cache, graphify.detect_library_roots())
 	return g
 }
 
