@@ -430,17 +430,19 @@ as complete:
 
 - **Any directory of a project.** The store's graph is the one whose root holds
   the working directory, the deepest such root, found by its `manifest.json`.
-  Before, it was `<store>/<cwd-name>`, which is still the fallback.
+  Before, it was `<store>/<cwd-name>`, which answered from another project's
+  graph in a directory of the same name, and is gone.
 - **The vlib under it.** A project graph is layered on the store's graph of the
   V tree whose vlib it read, so `explain`, `path` and `query` carry on into vlib.
   For a graph given with `--graph`, `--base <graph.json>` layers it on that graph.
 - **Worktrees.** In another git worktree of a project, or of the V tree, the
-  query answers from the worktree's own graph. It is extracted into the
-  worktree's store, the one the MCP server uses, and extracted again first
-  when the worktree has changed since.
+  query answers from the worktree's own graph, wherever the worktree is. It is
+  extracted into the worktree's store, the one the MCP server uses, and
+  extracted again first when the worktree has changed since. When that fails,
+  the graph extracted before answers, as the MCP server serves it.
 
 Resolution order: `--graph` > `GRAPHIFY_GRAPH` > `GRAPHIFY_STORE` (the project
-holding the cwd, else `<store>/<cwd-name>`) > `./graphify-out`.
+holding the cwd, or of a worktree of one) > `./graphify-out`.
 
 Only a missing `./graphify-out/graph.json` is made up for by building a graph
 of `.`; a graph named, or looked up in a store, that isn't there is an error

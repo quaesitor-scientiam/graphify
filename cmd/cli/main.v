@@ -454,27 +454,44 @@ fn load(args []string) graphify.Graph {
 // store_graph is the graph.json in the central `store` to answer from in the working
 // directory, and the graph.json to layer it on, or '': the project graph whose root
 // holds the working directory, on the graph of the vlib it read (graphify.base_for);
-// in another git worktree of its repository, the worktree's own graph in its worktree
-// store, extracted first when the worktree has changed since. Without a project graph
-// there, <store>/<directory name>/graph.json.
+// in another git worktree of a graph's repository, wherever the worktree is, the
+// worktree's own graph in its worktree store, extracted first when the worktree has
+// changed since. '' when no graph in the store is of the working directory.
 fn store_graph(store string) (string, string) {
 	dir := os.getwd()
-	file := graphify.project_for(store, dir, '') or {
-		return os.join_path(store, os.base(dir), 'graph.json'), ''
+	project := graphify.project_for(store, dir, '') or { '' }
+	found := graphify.worktree_graph(store, dir, project, '', '') or {
+		return project, if project == '' { '' } else { graphify.base_for(store, project) or { '' } }
 	}
-	base := graphify.base_for(store, file) or { '' }
-	found := graphify.worktree_graph('', dir, file, '', '') or { return file, base }
+	base := graphify.base_for(store, found.graph) or { '' }
 	stores := graphify.worktree_stores()
 	graphify.prune_worktree_stores(stores)
 	wt := graphify.worktree_store(stores, found.root)
+	wt_graph := os.join_path(wt, 'graph.json')
 	if !graphify.worktree_store_current(wt, found.root) {
 		eprintln('note: extracting the worktree ${found.root}...')
 		graphify.extract_worktree_store(wt, found, os.executable()) or {
+			// a graph extracted for the worktree before has its branch, as the MCP
+			// server serves it
+			if extracted_for(wt, found.root) {
+				eprintln('note: the worktree ${found.root} has changed, but its graph could not be extracted again (${err}), so this is its graph from before')
+				return wt_graph, base
+			}
 			eprintln('note: cannot extract the worktree ${found.root} (${err}), so this is the graph of the checkout, not of this branch')
-			return file, base
+			return found.graph, base
 		}
 	}
-	return os.join_path(wt, 'graph.json'), base
+	return wt_graph, base
+}
+
+// extracted_for reports whether the worktree `store` holds a graph extracted from
+// the worktree rooted at `root`.
+fn extracted_for(store string, root string) bool {
+	if !os.exists(os.join_path(store, 'graph.json')) {
+		return false
+	}
+	m := graphify.load_manifest(os.join_path(store, 'manifest.json')) or { return false }
+	return os.real_path(m.root) == os.real_path(root)
 }
 
 // --- tiny arg helpers ---
