@@ -14,9 +14,20 @@ on Sonnet, so the only intended difference is whether the graph is available.
 
 The scripts were run from a local working copy and still contain its paths:
 `S:\gf-bench2` (both arms and results), `S:/vProjects/graphify/bin/graphify.exe`
-(the CLI) and `S:/gf-bench2/wired/graphify-out/graph.json` (the graph). Change them
-before running elsewhere. The raw transcripts and the per-run results files are not
-committed; they hold local paths.
+(the CLI) and `S:/gf-bench2/wired/graphify-out/graph.json` (the graph). The raw
+transcripts and the per-run results files are not committed; they hold local paths.
+
+To run elsewhere, change all of these together:
+
+- The arm folders, `baseline` and `wired`, each holding a copy of the corpus. They
+  are not in the repo.
+- The results path, the CLI path and the graph path in `run_bench.ps1`.
+- The transcript folder names the script searches for, `S--gf-bench2-baseline` and
+  `S--gf-bench2-wired`. Claude Code derives these from the arm folders' paths, so
+  moving the folders changes the names. Changing only the paths breaks the lookup.
+
+Needs a built `graphify.exe` and a logged-in `claude` CLI on PATH. The script is
+Windows PowerShell and was run on Windows only.
 
 ## Method
 
