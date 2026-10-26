@@ -133,8 +133,8 @@ fn extract_v3(path string, src string, rel string, real_path string) FileResult 
 	mut anon := map[string]flat.NodeId{}
 	if a.synthesized_anon_struct_types.len > 0 {
 		for i, n in a.nodes {
-			if n.kind == .struct_decl && n.value in a.synthesized_anon_struct_types {
-				anon[anon_type(n.value)] = flat.NodeId(i)
+			if n.kind == .struct_decl && flat.source_type_id(n.value_text()) in a.synthesized_anon_struct_types {
+				anon[anon_type(n.value_text())] = flat.NodeId(i)
 			}
 		}
 	}
@@ -225,15 +225,15 @@ fn (f &V3File) method_branches(ids []flat.NodeId, branch string, mut out map[str
 		match n.kind {
 			.comptime_if {
 				for i, k in f.kids(id) {
-					f.method_branches([k], branch + comptime_branch(n.value, i == 0), mut out)
+					f.method_branches([k], branch + comptime_branch(n.value_text(), i == 0), mut out)
 				}
 			}
 			.block {
 				f.method_branches(f.kids(id), branch, mut out)
 			}
 			.fn_decl {
-				if n.value.contains('.') {
-					out[n.value] << DeclBranch{
+				if n.value_text().contains('.') {
+					out[n.value_text()] << DeclBranch{
 						line:   f.line_of(n.pos.offset)
 						branch: branch
 					}
@@ -695,7 +695,7 @@ fn (mut f V3File) extract(root flat.NodeId) ([]Symbol, []Edge) {
 	for id in top {
 		n := f.node(id)
 		if n.kind == .module_decl {
-			declared = n.value
+			declared = n.value_text()
 			mod_line = f.line_of(n.pos.offset)
 		}
 	}
@@ -716,7 +716,7 @@ fn (mut f V3File) extract(root flat.NodeId) ([]Symbol, []Edge) {
 		if n.kind != .import_decl {
 			continue
 		}
-		written := n.value
+		written := n.value_text()
 		path := resolve_import(written, f.real_path, f.rel)
 		alias := if n.typ_text() != '' { n.typ_text() } else { written.all_after_last('.') }
 		f.imports[alias] = path
@@ -728,7 +728,7 @@ fn (mut f V3File) extract(root flat.NodeId) ([]Symbol, []Edge) {
 		for k in f.kids(id) {
 			sel := f.node(k)
 			if sel.kind == .ident {
-				f.selected[sel.value] = path
+				f.selected[sel.value_text()] = path
 			}
 		}
 		syms << Symbol{
@@ -813,13 +813,13 @@ fn (mut f V3File) extract_implied_imports(declared string, mut syms []Symbol, mu
 				found << 'v.debug'
 			}
 			.struct_init {
-				if n.value == 'embed_file.EmbedFileData' {
+				if n.value_text() == 'embed_file.EmbedFileData' {
 					found << 'v.preludes.embed_file'
 					end := int_min(int(n.pos.end), f.src.len)
 					if n.pos.offset < end && f.src[n.pos.offset..end].contains('.zlib') {
 						found << 'v.preludes.embed_file.zlib'
 					}
-				} else if 'chan' in type_words(n.value) {
+				} else if 'chan' in type_words(n.value_text()) {
 					// a channel literal, `chan int{cap: 5}`
 					found << 'sync'
 				}
@@ -834,7 +834,7 @@ fn (mut f V3File) extract_implied_imports(declared string, mut syms []Symbol, mu
 				found << 'math'
 			}
 		}
-		if n.kind == .decl_assign && n.value == 'shared' {
+		if n.kind == .decl_assign && n.value_text() == 'shared' {
 			found << 'sync'
 		}
 		if n.typ_text() != '' && n.kind != .struct_init {
@@ -923,7 +923,7 @@ fn (mut f V3File) extract_script_main(top []flat.NodeId, mut syms []Symbol, mut 
 	mut stmts := []flat.NodeId{}
 	for id in top {
 		n := f.node(id)
-		if n.kind == .fn_decl && n.value == 'main' {
+		if n.kind == .fn_decl && n.value_text() == 'main' {
 			return
 		}
 		if n.kind in script_stmt_kinds {
@@ -1013,7 +1013,7 @@ fn (f &V3File) build_cond(n flat.Node) string {
 	}
 	// an arm of a file-scope `$match @OS` is a `$if` the parser makes, with no
 	// source of its own and the host's OS for its subject
-	c := spaced_build(n.value)
+	c := spaced_build(n.value_text())
 	host := "'${os.user_os()}' == "
 	return if c.starts_with(host) { '@OS == ' + c[host.len..] } else { c }
 }
@@ -1213,7 +1213,7 @@ fn (mut f V3File) add_symbol(mut syms []Symbol, mut edges []Edge, s Symbol) {
 fn (mut f V3File) extract_fn(id flat.NodeId, mut syms []Symbol, mut edges []Edge) {
 	n := f.node(id)
 	kids := f.kids(id)
-	v := n.value
+	v := n.value_text()
 	if (v.starts_with('C.') || v.starts_with('JS.')) && v.count('.') == 1 {
 		// an extern binding; a method on a C type, `C.SSL.str`, is real V
 		return
@@ -1249,7 +1249,7 @@ fn (mut f V3File) extract_fn(id flat.NodeId, mut syms []Symbol, mut edges []Edge
 	mut fid := '${f.mod_id}.${name}'
 	if is_method {
 		r := f.node(params[0])
-		recv_name = r.value
+		recv_name = r.value_text()
 		recv_typ = f.type_text(r.typ_text())
 		fid = '${f.mod_id}.${recv_typ.trim_left('&')}.${name}'
 	}
@@ -1304,14 +1304,14 @@ fn (mut f V3File) extract_fn(id flat.NodeId, mut syms []Symbol, mut edges []Edge
 	mut vars := map[string]string{}
 	for pid in params {
 		pn := f.node(pid)
-		if pn.value != '' && pn.value != '_' {
-			vars[pn.value] = if pn.typ_text() != '' { 't:' + f.type_text(pn.typ_text()) } else { '' }
+		if pn.value_text() != '' && pn.value_text() != '_' {
+			vars[pn.value_text()] = if pn.typ_text() != '' { 't:' + f.type_text(pn.typ_text()) } else { '' }
 		}
 	}
 	for i := start; i < params.len; i++ {
 		pn := f.node(params[i])
 		if t := f.param_type(pn) {
-			locals[pn.value] = t
+			locals[pn.value_text()] = t
 		}
 	}
 	ctx := V3CallCtx{
@@ -1339,14 +1339,14 @@ fn (mut f V3File) extract_fn(id flat.NodeId, mut syms []Symbol, mut edges []Edge
 // (`mut p &T`) or V's (`mut p T`); `shared` comes as part of its type.
 fn (f &V3File) param_text(pn &flat.Node, typ string) string {
 	if typ.starts_with('shared ') {
-		return 'shared ${pn.value} ${typ[7..]}'
+		return 'shared ${pn.value_text()} ${typ[7..]}'
 	}
 	if !pn.is_mut {
-		return '${pn.value} ${typ}'
+		return '${pn.value_text()} ${typ}'
 	}
 	after := f.src[int(pn.pos.end)..].trim_left(' \t')
 	written := if typ.starts_with('&') && !after.starts_with('&') { typ[1..] } else { typ }
-	return 'mut ${pn.value} ${written}'
+	return 'mut ${pn.value_text()} ${written}'
 }
 
 // receiver_text renders a method's receiver as its declaration writes it, `mut c T`,
@@ -1371,7 +1371,7 @@ fn (f &V3File) receiver_text(name string, typ string, is_mut bool, line int) str
 
 fn (mut f V3File) extract_struct(id flat.NodeId, mut syms []Symbol, mut edges []Edge) {
 	n := f.node(id)
-	short := decl_name(n.value)
+	short := decl_name(n.value_text())
 	if short == '' {
 		return
 	}
@@ -1380,7 +1380,7 @@ fn (mut f V3File) extract_struct(id flat.NodeId, mut syms []Symbol, mut edges []
 	// a C struct, `struct C.name`, keeps its `C.` on the signature, which tells it from
 	// a V struct of the same name (see field_of), and a JS one its `JS.` (see
 	// resolve_type_ref)
-	host_prefix := host_qualifier(n.value)
+	host_prefix := host_qualifier(n.value_text())
 	// and on its id, `<module>.C.name`: it is a type of its own, not the V type `name`
 	// of its module, such as the alias `type name = C.name` beside it, which would
 	// otherwise share the id. Its methods are `<module>.C.name.method` already.
@@ -1405,7 +1405,7 @@ fn (mut f V3File) extract_struct(id flat.NodeId, mut syms []Symbol, mut edges []
 			continue
 		}
 		base := base_name(fd.typ_text())
-		if fd.value == fd.typ_text() && base.len > 0 && base[0].is_capital() {
+		if fd.value_text() == fd.typ_text() && base.len > 0 && base[0].is_capital() {
 			// an embedded struct: V3 lists it as a field named by its type as
 			// written, `Base`, `veb.Middleware[Context]`
 			edges << Edge{
@@ -1419,7 +1419,7 @@ fn (mut f V3File) extract_struct(id flat.NodeId, mut syms []Symbol, mut edges []
 		}
 		fline := f.line_of(fd.pos.offset)
 		tname := f.type_text(fd.typ_text())
-		fname := fd.value.trim_left('@')
+		fname := fd.value_text().trim_left('@')
 		f.add_symbol(mut syms, mut edges, Symbol{
 			id:        '${sid}.${fname}'
 			name:      fname
@@ -1428,7 +1428,7 @@ fn (mut f V3File) extract_struct(id flat.NodeId, mut syms []Symbol, mut edges []
 			file:      f.rel
 			line:      fline
 			end_line:  f.line_of(fd.pos.end)
-			is_pub:    f.field_is_pub(line, fline, n.value.starts_with('C.'))
+			is_pub:    f.field_is_pub(line, fline, n.value_text().starts_with('C.'))
 			parent:    sid
 		})
 		f.walk_initializer(.field, fname, fline, f.kids(k), mut edges)
@@ -1438,7 +1438,7 @@ fn (mut f V3File) extract_struct(id flat.NodeId, mut syms []Symbol, mut edges []
 
 fn (mut f V3File) extract_enum(id flat.NodeId, mut syms []Symbol, mut edges []Edge) {
 	n := f.node(id)
-	short := decl_name(n.value)
+	short := decl_name(n.value_text())
 	if short == '' {
 		return
 	}
@@ -1472,7 +1472,7 @@ fn (mut f V3File) extract_enum(id flat.NodeId, mut syms []Symbol, mut edges []Ed
 
 fn (mut f V3File) extract_interface(id flat.NodeId, mut syms []Symbol, mut edges []Edge) {
 	n := f.node(id)
-	short := decl_name(n.value)
+	short := decl_name(n.value_text())
 	if short == '' {
 		return
 	}
@@ -1483,7 +1483,7 @@ fn (mut f V3File) extract_interface(id flat.NodeId, mut syms []Symbol, mut edges
 		id:        iid
 		name:      short
 		kind:      .interface_
-		signature: (if is_pub { 'pub ' } else { '' }) + 'interface ${host_qualifier(n.value)}${short}'
+		signature: (if is_pub { 'pub ' } else { '' }) + 'interface ${host_qualifier(n.value_text())}${short}'
 		file:      f.rel
 		line:      line
 		end_line:  f.line_of(n.pos.end)
@@ -1502,7 +1502,7 @@ fn (mut f V3File) extract_interface(id flat.NodeId, mut syms []Symbol, mut edges
 			// a method; V3 marks it with `op`, its parameters are its children
 			mut parts := []string{}
 			mut mseen := map[string]bool{}
-			mid := '${iid}.${m.value}'
+			mid := '${iid}.${m.value_text()}'
 			for pk in f.kids(k) {
 				pn := f.node(pk)
 				if pn.kind == .param {
@@ -1510,14 +1510,14 @@ fn (mut f V3File) extract_interface(id flat.NodeId, mut syms []Symbol, mut edges
 					f.add_type_ref(mid, pn.typ_text(), mut edges, mut mseen)
 				}
 			}
-			mut sig := 'fn (${short}) ${m.value}(${parts.join(', ')})'
+			mut sig := 'fn (${short}) ${m.value_text()}(${parts.join(', ')})'
 			if m.typ_text() != '' && m.typ_text() != 'void' {
 				sig += ' ${f.type_text(m.typ_text())}'
 				f.add_type_ref(mid, m.typ_text(), mut edges, mut mseen)
 			}
 			f.add_symbol(mut syms, mut edges, Symbol{
 				id:        mid
-				name:      m.value
+				name:      m.value_text()
 				kind:      .method
 				signature: sig
 				file:      f.rel
@@ -1531,23 +1531,23 @@ fn (mut f V3File) extract_interface(id flat.NodeId, mut syms []Symbol, mut edges
 		}
 		// an embedded interface is a member with no type and a capitalized
 		// name; fields are lower case
-		base := base_name(m.value)
+		base := base_name(m.value_text())
 		if m.typ_text() == '' && base.len > 0 && base[0].is_capital() {
 			edges << Edge{
 				from: iid
-				to:   f.type_ref(m.value)
+				to:   f.type_ref(m.value_text())
 				kind: .embeds
 				file: f.rel
 			}
-			add_ref(iid, f.type_ref(m.value), f.rel, mut edges, mut rseen)
+			add_ref(iid, f.type_ref(m.value_text()), f.rel, mut edges, mut rseen)
 			continue
 		}
 		if m.typ_text() != '' {
 			f.add_symbol(mut syms, mut edges, Symbol{
-				id:        '${iid}.${m.value}'
-				name:      m.value
+				id:        '${iid}.${m.value_text()}'
+				name:      m.value_text()
 				kind:      .field
-				signature: '${m.value} ${f.type_text(m.typ_text())}'
+				signature: '${m.value_text()} ${f.type_text(m.typ_text())}'
 				file:      f.rel
 				line:      mline
 				end_line:  mline
@@ -1568,7 +1568,7 @@ fn (mut f V3File) extract_consts(id flat.NodeId, mut syms []Symbol, mut edges []
 		if cf.kind != .const_field {
 			continue
 		}
-		name := decl_name(cf.value)
+		name := decl_name(cf.value_text())
 		value := f.kids(k)
 		f.add_symbol(mut syms, mut edges, Symbol{
 			id:        '${f.mod_id}.${name}'
@@ -1593,17 +1593,17 @@ fn (mut f V3File) extract_consts(id flat.NodeId, mut syms []Symbol, mut edges []
 fn (mut f V3File) extract_globals(id flat.NodeId, mut syms []Symbol, mut edges []Edge) {
 	for k in f.kids(id) {
 		g := f.node(k)
-		if g.kind != .field_decl || g.value == '' {
+		if g.kind != .field_decl || g.value_text() == '' {
 			continue
 		}
 		value := f.kids(k)
 		typ := if g.typ_text() != '' { f.type_text(g.typ_text()) } else { '' }
 		line := f.line_of(g.pos.offset)
 		f.add_symbol(mut syms, mut edges, Symbol{
-			id:        '${f.mod_id}.${g.value}'
-			name:      g.value
+			id:        '${f.mod_id}.${g.value_text()}'
+			name:      g.value_text()
 			kind:      .global
-			signature: '__global ${g.value}' + if typ != '' { ' ${typ}' } else { '' }
+			signature: '__global ${g.value_text()}' + if typ != '' { ' ${typ}' } else { '' }
 			file:      f.rel
 			line:      line
 			end_line:  f.line_of(g.pos.end)
@@ -1617,17 +1617,17 @@ fn (mut f V3File) extract_globals(id flat.NodeId, mut syms []Symbol, mut edges [
 				''
 			}
 		})
-		f.walk_initializer(.global, g.value, line, value, mut edges)
+		f.walk_initializer(.global, g.value_text(), line, value, mut edges)
 		if typ != '' {
 			mut rseen := map[string]bool{}
-			f.add_type_ref('${f.mod_id}.${g.value}', g.typ_text(), mut edges, mut rseen)
+			f.add_type_ref('${f.mod_id}.${g.value_text()}', g.typ_text(), mut edges, mut rseen)
 		}
 	}
 }
 
 fn (mut f V3File) extract_type(id flat.NodeId, mut syms []Symbol, mut edges []Edge) {
 	n := f.node(id)
-	short := decl_name(n.value)
+	short := decl_name(n.value_text())
 	if short == '' {
 		return
 	}
@@ -1642,7 +1642,7 @@ fn (mut f V3File) extract_type(id flat.NodeId, mut syms []Symbol, mut edges []Ed
 	variants := f.kids(id)
 	if variants.len > 0 {
 		for k in variants {
-			parts << f.type_text(f.node(k).value)
+			parts << f.type_text(f.node(k).value_text())
 		}
 		rhs = parts.join(' | ')
 	} else {
@@ -1675,11 +1675,11 @@ fn (mut f V3File) extract_type(id flat.NodeId, mut syms []Symbol, mut edges []Ed
 // V3CallCtx.locals.
 fn (f &V3File) param_type(pn &flat.Node) ?string {
 	// a function value keeps its written type, whose return type a call of it has
-	if pn.value != '' && pn.value != '_' && pn.typ_text().starts_with('fn') {
+	if pn.value_text() != '' && pn.value_text() != '_' && pn.typ_text().starts_with('fn') {
 		return pn.typ_text()
 	}
 	t := f.recv_type(pn.typ_text())
-	if pn.value != '' && pn.value != '_' && t.bytes().all(it.is_alnum() || it == `_` || it == `.`)
+	if pn.value_text() != '' && pn.value_text() != '_' && t.bytes().all(it.is_alnum() || it == `_` || it == `.`)
 		&& !is_generic_param(t.all_after_last('.')) {
 		return t
 	}
@@ -1990,13 +1990,13 @@ fn (f &V3File) comptime_name_step(sel flat.NodeId, ctx V3CallCtx) string {
 	}
 	inner := f.node(ks[1])
 	ik := f.kids(ks[1])
-	if inner.kind != .selector || inner.value != 'name' || ik.len != 1 {
+	if inner.kind != .selector || inner.value_text() != 'name' || ik.len != 1 {
 		return ''
 	}
 	if f.node(ik[0]).kind != .ident {
 		return ''
 	}
-	return ctx.pins['name:' + f.node(ik[0]).value] or { '' }
+	return ctx.pins['name:' + f.node(ik[0]).value_text()] or { '' }
 }
 
 // comptime_field_pin is the recipe of `x.$(field.name)`, the selector `sel`
@@ -2010,19 +2010,19 @@ fn (f &V3File) comptime_field_pin(sel flat.NodeId, ctx V3CallCtx) string {
 	}
 	inner := f.node(ks[1])
 	ik := f.kids(ks[1])
-	if inner.kind != .selector || inner.value != 'name' || ik.len != 1 {
+	if inner.kind != .selector || inner.value_text() != 'name' || ik.len != 1 {
 		return ''
 	}
 	if f.node(ik[0]).kind != .ident {
 		return ''
 	}
-	return ctx.pins['field:' + f.node(ik[0]).value] or { '' }
+	return ctx.pins['field:' + f.node(ik[0]).value_text()] or { '' }
 }
 
 // is_dollar_selector reports whether `id` is a comptime selector, `x.$(...)` or
 // `x.$method`, which the parser writes as a selector named `$` on `x`.
 fn (f &V3File) is_dollar_selector(id flat.NodeId) bool {
-	return f.node(id).kind == .selector && f.node(id).value == '$' && f.kids(id).len == 2
+	return f.node(id).kind == .selector && f.node(id).value_text() == '$' && f.kids(id).len == 2
 }
 
 // comptime_ret_pin is the recipe of `x.$method()`, the selector `sel` whose
@@ -2033,7 +2033,7 @@ fn (f &V3File) comptime_ret_pin(sel flat.NodeId, ctx V3CallCtx) string {
 	if ks.len != 2 || f.node(ks[1]).kind != .ident {
 		return ''
 	}
-	return ctx.pins['ret:' + f.node(ks[1]).value] or { '' }
+	return ctx.pins['ret:' + f.node(ks[1]).value_text()] or { '' }
 }
 
 // walk_initializer records the calls in a declaration's initializer as calls
@@ -2079,13 +2079,13 @@ fn (mut f V3File) walk(id flat.NodeId, ctx V3CallCtx, mut edges []Edge, mut seen
 				callee := f.node(kids[0])
 				ck := f.kids(kids[0])
 				if callee.kind == .selector && ck.len > 0
-					&& (callee.value in methods_with_it || callee.value in ['sort', 'sorted']) {
+					&& (callee.value_text() in methods_with_it || callee.value_text() in ['sort', 'sorted']) {
 					// `xs.filter(it.ok())`: `it` is one element of `xs`, and so
 					// are `a` and `b` in `xs.sort(a.x < b.x)`
 					r := f.recipe(ck[0], ctx)
 					f.walk(kids[0], ctx, mut edges, mut seen)
 					elem := if r == '' { '' } else { r + recipe_sep + '[]' }
-					it_ctx := if callee.value in methods_with_it {
+					it_ctx := if callee.value_text() in methods_with_it {
 						ctx.with_vars(['it'], [elem])
 					} else {
 						ctx.with_vars(['a', 'b'], [elem, elem])
@@ -2100,10 +2100,10 @@ fn (mut f V3File) walk(id flat.NodeId, ctx V3CallCtx, mut edges []Edge, mut seen
 			// only when T is Empty, so a variable typed T is an Empty in it; the
 			// other branches keep T
 			if kids.len >= 1 {
-				name, typ := comptime_type_is(n.value)
+				name, typ := comptime_type_is(n.value_text())
 				if name != '' && name in ctx.tparams {
 					f.walk(kids[0], ctx.retyped(name, f.type_text(typ)), mut edges, mut seen)
-					f.walk_list(kids[1..], ctx.guarded('-', n.value), mut edges, mut seen)
+					f.walk_list(kids[1..], ctx.guarded('-', n.value_text()), mut edges, mut seen)
 					return ctx
 				}
 				// `$if data is bool` on a variable of type T: `data` is a bool in the block
@@ -2116,16 +2116,16 @@ fn (mut f V3File) walk(id flat.NodeId, ctx V3CallCtx, mut edges []Edge, mut seen
 			// `$if T.unaliased_typ is string { ... }` in a generic function: the block is
 			// compiled only for the instances of T that meet the condition, so its calls
 			// carry it as a guard, and the blocks after it carry the negation
-			if kids.len >= 1 && comptime_guard_tparam(n.value, ctx.tparams) {
-				f.walk(kids[0], ctx.guarded('+', n.value), mut edges, mut seen)
-				f.walk_list(kids[1..], ctx.guarded('-', n.value), mut edges, mut seen)
+			if kids.len >= 1 && comptime_guard_tparam(n.value_text(), ctx.tparams) {
+				f.walk(kids[0], ctx.guarded('+', n.value_text()), mut edges, mut seen)
+				f.walk_list(kids[1..], ctx.guarded('-', n.value_text()), mut edges, mut seen)
 				return ctx
 			}
 			// `$if field.typ is int { x.$(field.name) }` in a field loop: the
 			// block's selector is an int (see comptime_pin). The branches after
 			// it keep the context they had.
 			if kids.len > 0 {
-				if key, recipe := comptime_pin(n.value) {
+				if key, recipe := comptime_pin(n.value_text()) {
 					mut pins := ctx.pins.clone()
 					pins[key] = recipe
 					f.walk(kids[0], V3CallCtx{ ...ctx, pins: pins }, mut edges, mut seen)
@@ -2136,7 +2136,7 @@ fn (mut f V3File) walk(id flat.NodeId, ctx V3CallCtx, mut edges []Edge, mut seen
 			// `$if linux { ... }`, `$if use_openssl ? { ... }`: a branch's calls are made
 			// only in the builds that take it, the block's when the condition holds and
 			// an `$else`'s when it doesn't (an `$else $if` is a `$if` nested in it)
-			if kids.len > 0 && is_build_cond(n.value) {
+			if kids.len > 0 && is_build_cond(n.value_text()) {
 				c := f.build_cond(n)
 				for i, k in kids {
 					f.walk(k, ctx.built(if i == 0 { c } else { negate_build(c) }), mut edges, mut
@@ -2148,7 +2148,7 @@ fn (mut f V3File) walk(id flat.NodeId, ctx V3CallCtx, mut edges []Edge, mut seen
 		.comptime_for {
 			// `$for field in T.fields`: each field is a builtin FieldData, and each of
 			// `$for a in T.attributes` a VAttribute
-			parts := n.value.split('|')
+			parts := n.value_text().split('|')
 			if parts.len == 2 && parts[1] in ['fields', 'attributes'] {
 				typ := if parts[1] == 'fields' { 'FieldData' } else { 'VAttribute' }
 				f.walk_list(kids, ctx.with_vars([parts[0]], ['t:builtin.${typ}']), mut edges, mut
@@ -2165,15 +2165,15 @@ fn (mut f V3File) walk(id flat.NodeId, ctx V3CallCtx, mut edges []Edge, mut seen
 				mut names := []string{}
 				mut recipes := []string{}
 				if iter.kind == .range {
-					names << f.node(kids[0]).value
+					names << f.node(kids[0]).value_text()
 					recipes << range_recipe(f, kids[2], ctx)
 				} else if int(kids[1]) < 0 {
-					names << f.node(kids[0]).value
+					names << f.node(kids[0]).value_text()
 					recipes << if r == '' { '' } else { r + recipe_sep + '[]' }
 				} else {
-					names << f.node(kids[0]).value
+					names << f.node(kids[0]).value_text()
 					recipes << if r == '' { '' } else { r + recipe_sep + 'k' }
-					names << f.node(kids[1]).value
+					names << f.node(kids[1]).value_text()
 					recipes << if r == '' { '' } else { r + recipe_sep + '[]' }
 				}
 				f.walk_list(kids, ctx.with_vars(names, recipes), mut edges, mut seen)
@@ -2244,8 +2244,8 @@ fn (mut f V3File) walk(id flat.NodeId, ctx V3CallCtx, mut edges []Edge, mut seen
 			mut recipes := []string{}
 			for k in kids {
 				p := f.node(k)
-				if p.kind == .param && p.value != '' {
-					names << p.value
+				if p.kind == .param && p.value_text() != '' {
+					names << p.value_text()
 					recipes << if p.typ_text() != '' { 't:' + f.type_text(p.typ_text()) } else { '' }
 				}
 			}
@@ -2254,7 +2254,7 @@ fn (mut f V3File) walk(id flat.NodeId, ctx V3CallCtx, mut edges []Edge, mut seen
 				p := f.node(k)
 				if p.kind == .param {
 					if t := f.param_type(p) {
-						inner.locals[p.value] = t
+						inner.locals[p.value_text()] = t
 					}
 				}
 			}
@@ -2280,7 +2280,7 @@ fn (mut f V3File) walk(id flat.NodeId, ctx V3CallCtx, mut edges []Edge, mut seen
 fn (f &V3File) match_branch_ctx(subject flat.NodeId, branch flat.NodeId, ctx V3CallCtx) V3CallCtx {
 	path := f.value_path(subject)
 	bk := f.kids(branch)
-	if path != '' && f.node(branch).value == '1' && bk.len >= 2 {
+	if path != '' && f.node(branch).value_text() == '1' && bk.len >= 2 {
 		if pt := f.match_pattern_type(bk[0]) {
 			return ctx.narrowed(path, 't:' + f.type_text(pt))
 		}
@@ -2304,7 +2304,7 @@ fn (f &V3File) always_leaves(block flat.NodeId) bool {
 		if lk.len == 1 && f.node(lk[0]).kind == .call {
 			ck := f.kids(lk[0])
 			return ck.len > 0 && f.node(ck[0]).kind == .ident
-				&& f.node(ck[0]).value in ['panic', 'exit']
+				&& f.node(ck[0]).value_text() in ['panic', 'exit']
 		}
 	}
 	return false
@@ -2313,12 +2313,12 @@ fn (f &V3File) always_leaves(block flat.NodeId) bool {
 // declare returns `ctx` with the variables a `:=` declares. `a := x` has the
 // children [a, x], `a, b := x, y` [a, x, b, y], and `a, b := f()` [a, f(), b].
 fn (f &V3File) declare(n &flat.Node, kids []flat.NodeId, ctx V3CallCtx) V3CallCtx {
-	count := decl_count(n.value)
+	count := decl_count(n.value_text())
 	mut names := []string{}
 	mut recipes := []string{}
 	if kids.len == 2 * count {
 		for i := 0; i < kids.len; i += 2 {
-			names << f.node(kids[i]).value
+			names << f.node(kids[i]).value_text()
 			recipes << f.recipe(kids[i + 1], ctx)
 		}
 	} else if count > 1 && kids.len == count + 1 {
@@ -2329,13 +2329,13 @@ fn (f &V3File) declare(n &flat.Node, kids []flat.NodeId, ctx V3CallCtx) V3CallCt
 		if f.node(kids[1]).kind in [.if_expr, .match_stmt] {
 			elems := f.tuple_recipes(kids[1], count, ctx)
 			for i, k in lhs {
-				names << f.node(k).value
+				names << f.node(k).value_text()
 				recipes << elems[i]
 			}
 		} else {
 			r := f.recipe(kids[1], ctx)
 			for i, k in lhs {
-				names << f.node(k).value
+				names << f.node(k).value_text()
 				recipes << if r == '' { '' } else { r + recipe_sep + '#${i}' }
 			}
 		}
@@ -2434,12 +2434,12 @@ fn (f &V3File) type_checks(cond flat.NodeId) []TypeCheck {
 	}
 	n := f.node(cond)
 	kids := f.kids(cond)
-	if n.kind == .is_expr && kids.len == 1 && n.value != '' && n.op != .not {
+	if n.kind == .is_expr && kids.len == 1 && n.value_text() != '' && n.op != .not {
 		path := f.value_path(kids[0])
 		if path != '' {
 			return [TypeCheck{
 				name: path
-				typ:  n.value
+				typ:  n.value_text()
 			}]
 		}
 	}
@@ -2487,14 +2487,14 @@ fn (f &V3File) false_checks(cond flat.NodeId) []TypeCheck {
 fn (f &V3File) value_path(id flat.NodeId) string {
 	n := f.node(id)
 	if n.kind == .ident {
-		return n.value
+		return n.value_text()
 	}
-	if n.kind == .selector && n.value != '$' {
+	if n.kind == .selector && n.value_text() != '$' {
 		kids := f.kids(id)
 		if kids.len == 1 {
 			base := f.value_path(kids[0])
 			if base != '' {
-				return base + '.' + n.value
+				return base + '.' + n.value_text()
 			}
 		}
 	}
@@ -2505,13 +2505,13 @@ fn (f &V3File) value_path(id flat.NodeId) string {
 // or `&Foo{}`.
 fn (f &V3File) struct_init_type(id flat.NodeId) ?string {
 	n := f.node(id)
-	if n.kind == .struct_init && n.value != '' {
-		return n.value
+	if n.kind == .struct_init && n.value_text() != '' {
+		return n.value_text()
 	}
 	if n.kind == .prefix {
 		kids := f.kids(id)
 		if kids.len == 1 && f.node(kids[0]).kind == .struct_init {
-			return f.node(kids[0]).value
+			return f.node(kids[0]).value_text()
 		}
 	}
 	return none
@@ -2528,7 +2528,7 @@ fn (f &V3File) plain_callee(call flat.NodeId, ctx V3CallCtx) bool {
 	}
 	c := f.node(ks[0])
 	if c.kind == .ident {
-		return c.value !in ctx.vars
+		return c.value_text() !in ctx.vars
 	}
 	if c.kind == .selector {
 		return true
@@ -2557,17 +2557,17 @@ fn (f &V3File) type_arg(id flat.NodeId) ?string {
 	n := f.node(id)
 	mut name := ''
 	if n.kind == .ident {
-		name = n.value
+		name = n.value_text()
 	} else if n.kind == .selector {
 		ks := f.kids(id)
 		if ks.len != 1 || f.node(ks[0]).kind != .ident {
 			return none
 		}
-		name = '${f.node(ks[0]).value}.${n.value}'
+		name = '${f.node(ks[0]).value_text()}.${n.value_text()}'
 	} else if n.kind == .map_init || n.kind == .array_init {
 		// a map or array type written out, `map[string]json.Any`, as the type itself,
 		// with its module names as the file's imports give them
-		t := if n.typ_text() != '' { n.typ_text() } else { n.value }
+		t := if n.typ_text() != '' { n.typ_text() } else { n.value_text() }
 		return if t == '' { none } else { f.type_text(t) }
 	} else if n.kind == .index {
 		// a generic struct written out, `AnyStruct[json.Any]`: its name and its type
@@ -2635,11 +2635,11 @@ fn (f &V3File) recipe(id flat.NodeId, ctx V3CallCtx) string {
 			return 't:rune'
 		}
 		.ident {
-			if n.value in ctx.vars {
-				return ctx.vars[n.value]
+			if n.value_text() in ctx.vars {
+				return ctx.vars[n.value_text()]
 			}
 			// not a variable in scope: a const or global of this module
-			return 'g:' + n.value
+			return 'g:' + n.value_text()
 		}
 		.paren, .or_expr {
 			return if kids.len > 0 { f.recipe(kids[0], ctx) } else { '' }
@@ -2676,22 +2676,22 @@ fn (f &V3File) recipe(id flat.NodeId, ctx V3CallCtx) string {
 			}
 		}
 		.struct_init, .cast_expr, .as_expr {
-			if n.value != '' {
-				return 't:' + f.type_text(n.value)
+			if n.value_text() != '' {
+				return 't:' + f.type_text(n.value_text())
 			}
 		}
 		.assoc {
 			// `Foo{ ...x, a: 1 }`, or `{ ...x, a: 1 }` with the type of the `x` it copies
-			if n.value != '' {
-				return 't:' + f.type_text(n.value)
+			if n.value_text() != '' {
+				return 't:' + f.type_text(n.value_text())
 			}
 			if kids.len > 0 {
 				return f.recipe(kids[0], ctx)
 			}
 		}
 		.map_init {
-			if n.value != '' {
-				return 't:' + f.type_text(n.value)
+			if n.value_text() != '' {
+				return 't:' + f.type_text(n.value_text())
 			}
 			// `{ 'name': 'Joe' }` with no type written: its keys and values
 			// are literals of one kind each
@@ -2729,7 +2729,7 @@ fn (f &V3File) recipe(id flat.NodeId, ctx V3CallCtx) string {
 			}
 		}
 		.array_init {
-			t := if n.typ_text() != '' { n.typ_text() } else { n.value }
+			t := if n.typ_text() != '' { n.typ_text() } else { n.value_text() }
 			if t != '' {
 				return 't:' + f.type_text(t)
 			}
@@ -2768,7 +2768,7 @@ fn (f &V3File) recipe(id flat.NodeId, ctx V3CallCtx) string {
 				if r == '' {
 					return r
 				}
-				if n.value == 'range' {
+				if n.value_text() == 'range' {
 					// a slice has the type of what it slices, or a fixed array's elements
 					return r + recipe_sep + 'sl'
 				}
@@ -2777,13 +2777,13 @@ fn (f &V3File) recipe(id flat.NodeId, ctx V3CallCtx) string {
 		}
 		.selector {
 			// a field a type check narrowed, `x.base_type` in `if x.base_type is Alias { ... }`
-			if n.value != '$' && ctx.vars.len > 0 {
+			if n.value_text() != '$' && ctx.vars.len > 0 {
 				path := f.value_path(id)
 				if path != '' && path in ctx.vars {
 					return ctx.vars[path]
 				}
 			}
-			if n.value == '$' && kids.len == 2 {
+			if n.value_text() == '$' && kids.len == 2 {
 				// `x.$(field.name)` is the field an enclosing `$if field.name == 'x'` names, of
 				// x's type, or else has the type an enclosing `$if` fixes its field to
 				step := f.comptime_name_step(id, ctx)
@@ -2793,30 +2793,30 @@ fn (f &V3File) recipe(id flat.NodeId, ctx V3CallCtx) string {
 				}
 				return f.comptime_field_pin(id, ctx)
 			}
-			if n.value in ['len', 'cap'] {
+			if n.value_text() in ['len', 'cap'] {
 				return 't:int'
 			}
 			if kids.len == 1 {
 				t := f.node(kids[0])
 				if t.kind == .typeof_expr {
 					// the fields of `typeof(x)`: its name, index and indirections
-					match n.value {
+					match n.value_text() {
 						'name' { return 't:string' }
 						'idx' { return 't:int' }
 						'indirections' { return 't:u8' }
 						else { return '' }
 					}
 				}
-				if t.kind == .ident && t.value in ['C', 'JS'] {
+				if t.kind == .ident && t.value_text() in ['C', 'JS'] {
 					return ''
 				}
-				if t.kind == .ident && t.value in f.imports && t.value !in ctx.vars {
+				if t.kind == .ident && t.value_text() in f.imports && t.value_text() !in ctx.vars {
 					// another module's const or global, `os.args`
-					return 'g:' + f.imports[t.value] + '.' + n.value
+					return 'g:' + f.imports[t.value_text()] + '.' + n.value_text()
 				}
 				r := f.recipe(kids[0], ctx)
 				if r != '' {
-					return r + recipe_sep + 'f:' + n.value
+					return r + recipe_sep + 'f:' + n.value_text()
 				}
 			}
 		}
@@ -2971,10 +2971,10 @@ fn (f &V3File) it_method(id flat.NodeId) string {
 		return ''
 	}
 	cs := f.kids(ks[0])
-	if cs.len != 1 || f.node(cs[0]).kind != .ident || f.node(cs[0]).value != 'it' {
+	if cs.len != 1 || f.node(cs[0]).kind != .ident || f.node(cs[0]).value_text() != 'it' {
 		return ''
 	}
-	return f.node(ks[0]).value
+	return f.node(ks[0]).value_text()
 }
 
 // match_pattern_type is the type a `match` branch's pattern names, which a subject
@@ -2985,14 +2985,14 @@ fn (f &V3File) match_pattern_type(pat flat.NodeId) ?string {
 	kids := f.kids(pat)
 	match n.kind {
 		.ident {
-			if n.value in primitive_types || (n.value.len > 0 && n.value[0].is_capital()) {
-				return n.value
+			if n.value_text() in primitive_types || (n.value_text().len > 0 && n.value_text()[0].is_capital()) {
+				return n.value_text()
 			}
 		}
 		.selector {
-			if kids.len == 1 && f.node(kids[0]).kind == .ident && f.node(kids[0]).value in f.imports
-				&& n.value.len > 0 && n.value[0].is_capital() {
-				return '${f.node(kids[0]).value}.${n.value}'
+			if kids.len == 1 && f.node(kids[0]).kind == .ident && f.node(kids[0]).value_text() in f.imports
+				&& n.value_text().len > 0 && n.value_text()[0].is_capital() {
+				return '${f.node(kids[0]).value_text()}.${n.value_text()}'
 			}
 		}
 		.array_init {
@@ -3132,9 +3132,9 @@ fn (f &V3File) literal_type(id flat.NodeId) string {
 		.selector {
 			// `Animal.cat`, a member of an enum, has the enum's type: the name before a
 			// member is capitalized, which is a type's
-			if kids.len == 1 && f.node(kids[0]).kind == .ident && f.node(kids[0]).value.len > 0
-				&& f.node(kids[0]).value[0].is_capital() && n.value.len > 0 && !n.value[0].is_capital() {
-				return f.type_text(f.node(kids[0]).value)
+			if kids.len == 1 && f.node(kids[0]).kind == .ident && f.node(kids[0]).value_text().len > 0
+				&& f.node(kids[0]).value_text()[0].is_capital() && n.value_text().len > 0 && !n.value_text()[0].is_capital() {
+				return f.type_text(f.node(kids[0]).value_text())
 			}
 		}
 		.prefix {
@@ -3144,13 +3144,13 @@ fn (f &V3File) literal_type(id flat.NodeId) string {
 			}
 		}
 		.cast_expr, .struct_init {
-			if n.value != '' {
-				return f.type_text(n.value)
+			if n.value_text() != '' {
+				return f.type_text(n.value_text())
 			}
 		}
 		.map_init {
-			if n.value != '' {
-				return f.type_text(n.value)
+			if n.value_text() != '' {
+				return f.type_text(n.value_text())
 			}
 			if t := literal_map_type(f, kids) {
 				return t
@@ -3168,13 +3168,13 @@ fn (f &V3File) literal_type(id flat.NodeId) string {
 			// `Any(1)`, `json.Any(1)`: a capitalized callee is a type, not a function
 			if kids.len > 0 {
 				c := f.node(kids[0])
-				if c.kind == .ident && c.value != '' && (c.value in primitive_types || c.value[0].is_capital()) {
-					return f.type_text(c.value)
+				if c.kind == .ident && c.value_text() != '' && (c.value_text() in primitive_types || c.value_text()[0].is_capital()) {
+					return f.type_text(c.value_text())
 				}
-				if c.kind == .selector && c.value.len > 0 && c.value[0].is_capital() {
+				if c.kind == .selector && c.value_text().len > 0 && c.value_text()[0].is_capital() {
 					ck := f.kids(kids[0])
 					if ck.len == 1 && f.node(ck[0]).kind == .ident {
-						return f.type_text('${f.node(ck[0]).value}.${c.value}')
+						return f.type_text('${f.node(ck[0]).value_text()}.${c.value_text()}')
 					}
 				}
 			}
@@ -3231,7 +3231,7 @@ fn (f &V3File) callee(callee_id flat.NodeId, ctx V3CallCtx) (string, bool, flat.
 	}
 	c := f.node(cid)
 	if c.kind == .ident {
-		mut name := c.value.trim_left('@')
+		mut name := c.value_text().trim_left('@')
 		if mod := f.selected[name] {
 			name = '${mod}.${name}'
 		}
@@ -3245,38 +3245,38 @@ fn (f &V3File) callee(callee_id flat.NodeId, ctx V3CallCtx) (string, bool, flat.
 		return '', false, flat.NodeId(-1)
 	}
 	target := f.node(ks[0])
-	if target.kind == .selector && c.value.len > 0 && target.value.len > 0
-		&& target.value[0].is_capital() {
+	if target.kind == .selector && c.value_text().len > 0 && target.value_text().len > 0
+		&& target.value_text()[0].is_capital() {
 		// a static method through its module, `flat.FlatAst.new()`
 		tk := f.kids(ks[0])
 		if tk.len > 0 && f.node(tk[0]).kind == .ident {
-			if mod := f.imports[f.node(tk[0]).value] {
-				return '${mod}.${target.value}__static__${c.value}', false, flat.NodeId(-1)
+			if mod := f.imports[f.node(tk[0]).value_text()] {
+				return '${mod}.${target.value_text()}__static__${c.value_text()}', false, flat.NodeId(-1)
 			}
 		}
 	}
-	if target.kind == .ident && (target.value in ['C', 'JS'] || target.value in f.imports)
-		&& target.value !in ctx.vars {
-		mod := f.imports[target.value] or { target.value }
-		return '${mod}.${c.value}', false, flat.NodeId(-1)
+	if target.kind == .ident && (target.value_text() in ['C', 'JS'] || target.value_text() in f.imports)
+		&& target.value_text() !in ctx.vars {
+		mod := f.imports[target.value_text()] or { target.value_text() }
+		return '${mod}.${c.value_text()}', false, flat.NodeId(-1)
 	}
 	// a function of the module the file is in, called through the module's own name
 	// (`semver.from(s)` inside `module semver`): not a method on a global of that name,
 	// unless a local or a variable of the same name shadows it
-	if target.kind == .ident && target.value.len > 0 && target.value == f.mod_id.all_after_last('.')
-		&& target.value !in ctx.vars && target.value !in ctx.locals {
-		return '${f.mod_id}.${c.value}', false, flat.NodeId(-1)
+	if target.kind == .ident && target.value_text().len > 0 && target.value_text() == f.mod_id.all_after_last('.')
+		&& target.value_text() !in ctx.vars && target.value_text() !in ctx.locals {
+		return '${f.mod_id}.${c.value_text()}', false, flat.NodeId(-1)
 	}
-	if target.kind == .ident && target.value.len > 0 && target.value[0].is_capital()
-		&& target.value !in ctx.locals {
-		return '${target.value}__static__${c.value}', false, flat.NodeId(-1)
+	if target.kind == .ident && target.value_text().len > 0 && target.value_text()[0].is_capital()
+		&& target.value_text() !in ctx.locals {
+		return '${target.value_text()}__static__${c.value_text()}', false, flat.NodeId(-1)
 	}
 	// a static member of a JS binding, `JS.Promise.race(p)` or `JS.Array.prototype.constructor()`,
 	// is a call into the JS host as `JS.parseInt` is, so its full path is its name
 	if js := f.js_path(ks[0]) {
-		return '${js}.${c.value}', false, flat.NodeId(-1)
+		return '${js}.${c.value_text()}', false, flat.NodeId(-1)
 	}
-	return c.value, true, ks[0]
+	return c.value_text(), true, ks[0]
 }
 
 // js_path is the dotted path of a selector chain that starts at the `JS` binding:
@@ -3285,7 +3285,7 @@ fn (f &V3File) callee(callee_id flat.NodeId, ctx V3CallCtx) (string, bool, flat.
 fn (f &V3File) js_path(id flat.NodeId) ?string {
 	n := f.node(id)
 	if n.kind == .ident {
-		if n.value == 'JS' {
+		if n.value_text() == 'JS' {
 			return 'JS'
 		}
 		return none
@@ -3295,7 +3295,7 @@ fn (f &V3File) js_path(id flat.NodeId) ?string {
 		return none
 	}
 	root := f.js_path(ks[0]) or { return none }
-	return '${root}.${n.value}'
+	return '${root}.${n.value_text()}'
 }
 
 // record_call adds one `calls` edge per distinct callee in a body (see
@@ -3309,19 +3309,19 @@ fn (mut f V3File) record_call(callee_id flat.NodeId, args []flat.NodeId, ctx V3C
 	if is_method {
 		target := f.node(target_id)
 		if target.kind == .ident {
-			if ctx.recv_name != '' && target.value == ctx.recv_name {
+			if ctx.recv_name != '' && target.value_text() == ctx.recv_name {
 				rt = ctx.recv_type
-			} else if t := ctx.locals[target.value] {
+			} else if t := ctx.locals[target.value_text()] {
 				rt = t
 			}
-		} else if target.kind == .struct_init && target.value != '' {
-			rt = f.recv_type(target.value)
+		} else if target.kind == .struct_init && target.value_text() != '' {
+			rt = f.recv_type(target.value_text())
 		}
 		if rt == '' {
 			recipe = f.recipe(target_id, ctx)
 			// a narrowed variable also carries its declared type (see narrowed)
-			if target.kind == .ident && target.value in ctx.fallbacks && recipe != '' {
-				recipe += recipe_alt + ctx.fallbacks[target.value]
+			if target.kind == .ident && target.value_text() in ctx.fallbacks && recipe != '' {
+				recipe += recipe_alt + ctx.fallbacks[target.value_text()]
 			}
 		}
 	}
