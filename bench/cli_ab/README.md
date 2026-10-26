@@ -23,11 +23,14 @@ To run elsewhere, change all of these together:
   are not in the repo.
 - The results path, the CLI path and the graph path in `run_bench.ps1`.
 - The transcript folder names the script searches for, `S--gf-bench2-baseline` and
-  `S--gf-bench2-wired`. Claude Code derives these from the arm folders' paths, so
-  moving the folders changes the names. Changing only the paths breaks the lookup.
+  `S--gf-bench2-wired`. These follow the pattern seen in `~/.claude/projects`: the
+  folder's path with `:`, `\` and `.` turned into `-` (for example `S:\gf-bench2\baseline`
+  becomes `S--gf-bench2-baseline`). Moving the folders changes the names, and changing
+  only the paths breaks the lookup.
 
-Needs a built `graphify.exe` and a logged-in `claude` CLI on PATH. The script is
-Windows PowerShell and was run on Windows only.
+Needs a built `graphify.exe` and a logged-in `claude` CLI on PATH. The script needs
+PowerShell 7 (`pwsh`) and was run on Windows only; it hasn't been tested on Windows
+PowerShell 5.1.
 
 ## Method
 
