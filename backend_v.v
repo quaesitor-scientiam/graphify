@@ -1059,7 +1059,34 @@ fn either_build(a string, b string) string {
 			return ''
 		}
 	}
+	if rest := absorbed_build(a, b) {
+		return rest
+	}
 	return '${grouped_build(a)} || ${grouped_build(b)}'
+}
+
+// absorbed_build is the condition `(x && p) || (x && !p)` holds under, which is `x`: the
+// terms of `a` other than `p`, when `b` has the opposite of `p` and the same other
+// terms. none when no term of `a` is absorbed this way, so either_build joins them.
+fn absorbed_build(a string, b string) ?string {
+	at := split_build(a, `&`)
+	bt := split_build(b, `&`)
+	for p in at {
+		q := opposite_term(p)
+		if q !in bt {
+			continue
+		}
+		rest := at.filter(it != p)
+		others := bt.filter(it != q)
+		mut sorted_rest := rest.clone()
+		mut sorted_others := others.clone()
+		sorted_rest.sort()
+		sorted_others.sort()
+		if sorted_rest == sorted_others {
+			return rest.map(grouped_build(it)).join(' && ')
+		}
+	}
+	return none
 }
 
 // grouped_build is `cond` in brackets when it has a `||` outside any brackets of its

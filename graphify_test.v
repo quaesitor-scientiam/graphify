@@ -10338,7 +10338,13 @@ fn test_two_builds_that_are_opposites_make_every_build() {
 	assert either_build('(js || windows)', '!(js || windows)') == ''
 	// builds that aren't opposites are joined as before
 	assert either_build('windows || linux', '!(windows || darwin)') == '(windows || linux) || !(windows || darwin)'
-	assert either_build('a ? && b ?', '!a ? && b ?') == 'a ? && b ? || !a ? && b ?'
+	// a shared term, with the opposite of one more: `(a && b) || (!a && b)` is `b`
+	assert either_build('a ? && b ?', '!a ? && b ?') == 'b ?'
+	assert either_build('!a ? && b ?', 'a ? && b ?') == 'b ?'
+	assert either_build('windows && a ? && b ?', '!windows && a ? && b ?') == 'a ? && b ?'
+	assert either_build('a ? && (b ? || c ?)', '!a ? && (b ? || c ?)') == '(b ? || c ?)'
+	// the rest must match on both sides, or nothing is absorbed
+	assert either_build('a ? && b ?', '!a ? && c ?') == 'a ? && b ? || !a ? && c ?'
 	assert either_build('windows', 'linux') == 'windows || linux'
 	assert either_build('windows', '!linux') == 'windows || !linux'
 	assert either_build('windows || linux', '!darwin') == '(windows || linux) || !darwin'
@@ -10443,7 +10449,7 @@ fn test_a_build_that_is_a_union_of_conjunctions_is_one_term() {
 	r := g.count_call_paths('start', 'goal', 5)
 	assert r.total == 1 && r.in_default == 0, r.str()
 	text := g.path_between('start', 'goal')
-	assert text.contains('  needs \$if (p ? && q ? || !p ? && q ?) && !p ?'), text
+	assert text.contains('  needs \$if q ? && !p ?'), text
 }
 
 // A route of calls through declarations or calls of builds that contradict each
