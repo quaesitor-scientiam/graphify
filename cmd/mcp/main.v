@@ -333,6 +333,7 @@ fn (mut s Session) answer(name string, arguments string) (string, bool) {
 fn (mut app App) answer(name string, arguments string) (string, bool) {
 	app.used_at = time.now().unix()
 	app.refresh()
+	app.wait_stale(extract_wait)
 	args := (json2.decode[json2.Any](arguments) or { json2.null }).as_map()
 	mut text, is_error := tool_text(name, args, app.served)
 	// what was looked up may be what changed in the worktree, which is being extracted
@@ -366,6 +367,20 @@ fn (mut app App) wait_extract(timeout time.Duration) bool {
 		}
 	}
 	return true
+}
+
+// wait_stale waits up to `timeout` for the worktree's extract when the graph served
+// is one from before graphify or V was updated, as after an update and a restart,
+// and serves the graph it publishes: that graph's answers, not the old one's with
+// a note that it is out of date. Once one lookup has waited, the others do not.
+fn (mut app App) wait_stale(timeout time.Duration) {
+	if !app.wt.stale {
+		return
+	}
+	if app.wt.running && app.wait_extract(timeout) {
+		app.refresh()
+	}
+	app.wt.stale = false
 }
 
 // extract_wait bounds how long a lookup that found nothing waits for the worktree's
@@ -680,6 +695,8 @@ fn tool(name string, desc string, input_schema json2.Any) mcp.Tool {
 // worktree of a graph's repository: `graph`, the checkout's graph.json; `root`,
 // the graph's root in the worktree; `path`, the graph.json its own graph is
 // extracted to. An extract runs in the background, and `done` has its outcome.
+// `stale` is set while the graph served from the start is one extracted before
+// graphify or V was updated, until a lookup has waited for the extract (App.wait_stale).
 struct Worktree {
 	graph string
 	root  string
@@ -689,6 +706,7 @@ mut:
 	ready    bool
 	running  bool
 	failed   string
+	stale    bool
 	state    string
 	state_at i64
 	done     chan string
@@ -697,7 +715,9 @@ mut:
 // start_worktree finds the worktree `dir`, the session's directory, is in (graphify.worktree_graph)
 // and starts extracting its graph; a Worktree with no root when there is none, or
 // no graphify beside this server to extract it with. A graph a server extracted for
-// the worktree before is served from the start, while it is extracted again.
+// the worktree before is served from the start, while it is extracted again; one
+// from before graphify or V was updated only once the lookups have waited for that
+// extract (App.wait_stale).
 fn start_worktree(projects_dir string, dir string, project_path string, graph_path string, base_root string) Worktree {
 	stores := graphify.worktree_stores()
 	graphify.prune_worktree_stores(stores)
@@ -725,6 +745,7 @@ fn start_worktree(projects_dir string, dir string, project_path string, graph_pa
 	if m := graphify.load_manifest(os.join_path(store, 'manifest.json')) {
 		wt.ready = os.exists(path) && os.real_path(m.root) == os.real_path(found.root)
 	}
+	wt.stale = wt.ready && graphify.stale_note(path, found.root, cli) != ''
 	wt.extract()
 	return wt
 }

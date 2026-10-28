@@ -438,3 +438,66 @@ fn test_a_lookup_waiting_for_the_extract_lets_the_daemon_answer_other_sessions()
 	mu.unlock()
 	other.wait()
 }
+
+fn test_a_lookup_waits_for_the_extract_when_the_graph_served_is_from_before_an_update() {
+	dir := os.join_path(os.temp_dir(), 'graphify stale worktree ${os.getpid()}')
+	defer {
+		os.rmdir_all(dir) or {}
+	}
+	src := os.join_path(dir, 'src')
+	os.mkdir_all(os.join_path(src, 'lib')) or { panic(err) }
+	lib := os.join_path(src, 'lib', 'lib.v')
+	os.write_file(lib, 'module lib\n\npub fn helper() int {\n\treturn 1\n}\n') or { panic(err) }
+	// the worktree's graph as an earlier graphify left it
+	store := os.join_path(dir, 'store')
+	graphify.write_bundle(graphify.build_graph(graphify.Options{ root: src }), store, graphify.ExtractReport{}) or {
+		panic(err)
+	}
+	path := os.join_path(store, 'graph.json')
+	mut app := new_app(Config{ graph_path: path }, dir, &BaseCache{}) or { panic(err) }
+	app.wt = Worktree{
+		graph:    path
+		root:     src
+		path:     path
+		ready:    true
+		running:  true
+		stale:    true
+		state_at: time.now().unix()
+		done:     chan string{cap: 1}
+	}
+	// the extract publishes the worktree's graph as it is now, with helper moved down
+	os.write_file(lib, 'module lib\n\nfn first() {}\n\npub fn helper() int {\n\treturn 1\n}\n') or {
+		panic(err)
+	}
+	done := app.wt.done
+	extract := spawn fn [src, store, done] () {
+		time.sleep(200 * time.millisecond)
+		graphify.write_bundle(graphify.build_graph(graphify.Options{ root: src }), store,
+			graphify.ExtractReport{}) or { panic(err) }
+		done <- ''
+	}()
+	text, is_error := app.answer('get_node', '{"node":"helper"}')
+	extract.wait()
+	assert !is_error
+	// found in the old graph too, but answered from the new one
+	assert text.contains('fn helper  (lib/lib.v:5)'), text
+	assert !text.contains('extracted again'), text
+	assert !app.wt.stale && !app.wt.running
+}
+
+fn test_a_graph_from_before_an_update_is_waited_for_once() {
+	mut app := &App{
+		wt: Worktree{
+			running: true
+			stale:   true
+			done:    chan string{cap: 1}
+		}
+	}
+	// the extract does not end in time: answered from the graph there is, and the
+	// next lookups do not wait again
+	app.wait_stale(50 * time.millisecond)
+	assert !app.wt.stale && app.wt.running
+	started := time.now()
+	app.wait_stale(5 * time.second)
+	assert time.since(started) < time.second
+}
