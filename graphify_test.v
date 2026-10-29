@@ -8170,7 +8170,8 @@ fn write_canned(tpl_dir string, root string, rel string) {
 // into dir and returns its path. For each file in LIST it copies that file's
 // canned line (from the directory named by GRAPHIFY_TEST_CANNED) to OUT, except
 // that while `crash_now` exists there it panics on crash.v, as a parser that
-// crashes would, so the extract sees a worker that dies partway through its batch.
+// crashes would, so the extract sees a worker that dies partway through its batch;
+// `crash_once` makes it panic on crash.v once, removing the file as it does.
 fn compile_crash_worker(dir string) string {
 	src := os.join_path(dir, 'fake_worker.vsh')
 	os.write_file(src, "module main
@@ -8185,6 +8186,10 @@ fn main() {
 		rel := line.all_after(u8(9).ascii_str())
 		if rel == 'crash.v' && os.exists(os.join_path(tpl, 'crash_now')) {
 			panic('the parser crashed on crash.v')
+		}
+		if rel == 'crash.v' && os.exists(os.join_path(tpl, 'crash_once')) {
+			os.rm(os.join_path(tpl, 'crash_once')) or {}
+			panic('the parser crashed on crash.v, once')
 		}
 		canned := os.read_file(os.join_path(tpl, rel + '.line')) or { exit(1) }
 		out.writeln(canned.trim_right('\\r\\n')) or { exit(1) }
@@ -8264,6 +8269,35 @@ fn check_first_sighting(worker string, dir string) {
 	assert !g.symbols.any(it.id == 'demo.crash_fn'), g.symbols.map(it.id).str()
 }
 
+// check_crash_once runs a crash on crash.v that does not happen again: the file is
+// parsed again in a worker of its own, so it is neither failed nor stale, and the
+// file queued behind it is parsed too.
+fn check_crash_once(worker string, dir string) {
+	root := write_tree('worker_crash_once', {
+		'crash.v': 'module demo\n\npub fn crash_fn() int {\n\treturn 2\n}\n'
+		'z.v':     'module demo\n\npub fn z_fn() int {\n\treturn 3\n}\n'
+	})
+	tpl := os.join_path(dir, 'once')
+	out := root + '_out'
+	os.mkdir_all(tpl) or { panic(err) }
+	os.setenv('GRAPHIFY_TEST_CANNED', tpl, true)
+	defer {
+		os.rmdir_all(root) or {}
+		os.rmdir_all(out) or {}
+	}
+	for rel in ['crash.v', 'z.v'] {
+		write_canned(tpl, root, rel)
+	}
+	os.write_file(os.join_path(tpl, 'crash_once'), '') or { panic(err) }
+	g, r := build_graph_resilient(root, worker, out)
+	assert !os.exists(os.join_path(tpl, 'crash_once')) // the worker did crash
+	assert r.failed.len == 0, r.failed.str()
+	assert r.stale.len == 0, r.stale.str()
+	ids := g.symbols.map(it.id)
+	assert 'demo.crash_fn' in ids, ids.str()
+	assert 'demo.z_fn' in ids, ids.str()
+}
+
 fn test_a_worker_crash_is_recovered_from_on_both_paths() {
 	// one compile of the stand-in serves both cases; the directory they share is
 	// removed at the end
@@ -8275,6 +8309,7 @@ fn test_a_worker_crash_is_recovered_from_on_both_paths() {
 	worker := compile_crash_worker(dir)
 	check_carry_forward(worker, dir)
 	check_first_sighting(worker, dir)
+	check_crash_once(worker, dir)
 }
 
 fn test_a_c_function_binding_is_a_symbol_and_types_the_call_that_uses_it() {

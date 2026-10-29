@@ -208,6 +208,10 @@ mut:
 	stale     []string
 	partial   []string
 	batch_seq int
+	// the files a worker has crashed on once, each parsed again in a worker of its
+	// own: a crash that does not happen again, as one on a busy Windows runner,
+	// costs the file nothing
+	crashed map[string]bool
 }
 
 // parse extracts `items`, reusing the cache for a file whose content is unchanged
@@ -244,14 +248,22 @@ fn (mut run ParseRun) parse(items []WorkItem) {
 	batch_size := 200
 	parallel := if runtime.nr_cpus() > 0 { runtime.nr_cpus() } else { 1 }
 
-	for queue.len > 0 {
+	// the files that crashed a worker once, each to be parsed in a batch of its own
+	mut solo := []WorkItem{}
+	for queue.len > 0 || solo.len > 0 {
 		// slice off up to `parallel` batches and spawn them all before waiting
 		// on any of them, so they run concurrently instead of one at a time.
 		mut jobs := []BatchJob{}
-		for jobs.len < parallel && queue.len > 0 {
-			n := if queue.len < batch_size { queue.len } else { batch_size }
-			batch := queue#[..n].clone()
-			queue = queue#[n..].clone()
+		for jobs.len < parallel && (queue.len > 0 || solo.len > 0) {
+			mut batch := []WorkItem{}
+			if solo.len > 0 {
+				batch = [solo[0]]
+				solo = solo#[1..].clone()
+			} else {
+				n := if queue.len < batch_size { queue.len } else { batch_size }
+				batch = queue#[..n].clone()
+				queue = queue#[n..].clone()
+			}
 
 			run.batch_seq++
 			listfile := os.join_path(os.temp_dir(), 'gf_list_${run.pid}_${run.batch_seq}.txt')
@@ -289,6 +301,7 @@ fn (mut run ParseRun) parse(items []WorkItem) {
 
 		// wait for the whole wave, then harvest + recover each job on its own
 		mut retry := []WorkItem{}
+		mut alone := []WorkItem{}
 		for mut job in jobs {
 			job.proc.wait()
 			job.proc.close()
@@ -315,9 +328,17 @@ fn (mut run ParseRun) parse(items []WorkItem) {
 			}
 			completed := results.len
 			n := job.batch.len
-			if completed < n {
-				// the file at index `completed` crashed this worker — skip it
-				// and requeue the rest of the batch for the next wave.
+			if completed < n && !run.crashed[job.batch[completed].rel] {
+				// the file at index `completed` crashed this worker, the first time:
+				// requeue it, alone, and the rest of the batch for the next wave.
+				run.crashed[job.batch[completed].rel] = true
+				alone << job.batch[completed]
+				for i := completed + 1; i < n; i++ {
+					retry << job.batch[i]
+				}
+			} else if completed < n {
+				// it crashed again — skip it and requeue the rest of the batch
+				// for the next wave.
 				crashed_rel := job.batch[completed].rel
 				run.failed << crashed_rel
 				if fallback := stale_fallback_for(run.old_cache, crashed_rel) {
@@ -336,6 +357,7 @@ fn (mut run ParseRun) parse(items []WorkItem) {
 			retry << queue
 			queue = retry.clone()
 		}
+		solo << alone
 	}
 }
 
