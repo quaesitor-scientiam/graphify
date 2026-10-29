@@ -397,6 +397,10 @@ fn build_one(log_path string, v_exe string, out string, prod bool, args []string
 		os.rm(old) or {}
 	}
 	os.rename(tmp, out)!
+	// The Windows linker leaves a `<name>.manifest` beside each exe it writes; the
+	// manifest is already embedded in the exe, so the sidecar is only litter.
+	os.rm(tmp + '.manifest') or {}
+	os.rm(out + '.manifest') or {}
 }
 
 // remove_old_copies deletes the copies of `out` that earlier builds set
