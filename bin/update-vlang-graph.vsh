@@ -361,12 +361,13 @@ fn build_stamp(graphify_root string, v_exe string) !string {
 
 // build_one builds one binary next to its final name and then swaps it in,
 // so a running copy (the MCP server, on Windows) never blocks the build.
-// `prod` (-prod: optimised, link-time) is for the CLI only. It takes 2 min to build
-// where a plain build takes 8 s, but the CLI is what extracts and answers queries:
-// a plain CLI extracts vlang in about 80 s against 25-50 s, and answers 4x slower.
-// The MCP server takes 3 min 14 s with -prod and 29 s without, and the hook 36 s and
-// 6 s; each answers about as fast either way (a lookup 0.05 s against 0.02 s, a hook
-// call 0.04 s against 0.03 s).
+// `prod` (-prod: optimised, link-time) is for the CLI and the MCP server. The CLI
+// takes 2 min to build where a plain build takes 8 s, but it is what extracts and
+// answers queries: a plain CLI extracts vlang in about 80 s against 25-50 s, and
+// answers 4x slower. The MCP server takes 29 s against 3 s, and starts in 1.2 s
+// against 7 s and answers 3-6x faster (get_node 5 ms against 16 ms, query_graph 70 ms
+// against 330 ms; macOS, V 4b1f3e2, whose plain builds use TCC). The hook takes 36 s
+// and 6 s, and answers about as fast either way (a call 0.04 s against 0.03 s).
 fn build_one(log_path string, v_exe string, out string, prod bool, args []string) ! {
 	tmp := out + '.new' + $if windows { '.exe' } $else { '' }
 	mut cmd := [v_exe, '-o', tmp]
@@ -444,7 +445,7 @@ fn rebuild_if_stale(log_path string, root string, exe string) !bool {
 	mut all_built := true
 	mcp := os.join_path(root, 'bin', 'graphify-mcp' + ext)
 	if os.exists(mcp) {
-		build_one(log_path, v_exe, mcp, false, ['cmd/mcp']) or {
+		build_one(log_path, v_exe, mcp, true, ['cmd/mcp']) or {
 			log_line(log_path, 'WARNING: ${err}')
 			all_built = false
 		}
