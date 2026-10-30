@@ -658,8 +658,10 @@ fn graph_out_of_date(dir string, head string, exe_hash string, vlib_head string)
 	if exe_hash != '' && m.binary_hash != exe_hash {
 		return 'graphify was rebuilt'
 	}
-	// extracted when no V tree was found (set_vroot), and one is now
-	if m.library.len == 0 && os.getenv('VROOT') != '' {
+	// extracted when no V tree was found (set_vroot), and one is now. The target
+	// repo's own graph records no libraries (its vlib is itself), so only a
+	// project's, which passes its vlib_head, can lack them.
+	if vlib_head != '' && m.library.len == 0 && os.getenv('VROOT') != '' {
 		return 'it was extracted without its libraries'
 	}
 	if vlib_head != '' {
