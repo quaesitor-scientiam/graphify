@@ -1432,17 +1432,30 @@ fn (mut f V3File) extract_struct(id flat.NodeId, mut syms []Symbol, mut edges []
 			continue
 		}
 		base := base_name(fd.typ_text())
-		if fd.value_text() == fd.typ_text() && base.len > 0 && base[0].is_capital() {
+		// an embedded struct with a default, `Base = value`, has no type of its own: V3
+		// lists it as a field named by its type, with the default as its initializer
+		embedded := if fd.value_text() == fd.typ_text() && base.len > 0 && base[0].is_capital() {
+			fd.typ_text()
+		} else if fd.typ_text() == '' && fd.value_text().len > 0 && fd.value_text()[0].is_capital() {
+			fd.value_text()
+		} else {
+			''
+		}
+		if embedded != '' {
 			// an embedded struct: V3 lists it as a field named by its type as
 			// written, `Base`, `veb.Middleware[Context]`
 			edges << Edge{
 				from: sid
-				to:   f.type_ref(fd.typ_text())
+				to:   f.type_ref(embedded)
 				kind: .embeds
 				file: f.rel
 			}
-			add_ref(sid, f.type_ref(fd.typ_text()), f.rel, mut edges, mut rseen)
-			continue
+			add_ref(sid, f.type_ref(embedded), f.rel, mut edges, mut rseen)
+			// a default `Base = value` is also the field its calls are made from, so it
+			// continues below as before; only a written type, `Base Type`, ends here
+			if fd.typ_text() != '' {
+				continue
+			}
 		}
 		fline := f.line_of(fd.pos.offset)
 		tname := f.type_text(fd.typ_text())
