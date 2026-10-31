@@ -953,6 +953,9 @@ fn resolve_initializer_callers(mut g Graph) {
 fn resolve_edges(mut g Graph) {
 	resolve_initializer_callers(mut g)
 	mut by_name := map[string][]CallCand{}
+	// const_calls holds the constants by name: a constant that holds a function is
+	// called as one, and it is the fallback when no function of that name fits (see infer_call)
+	mut const_calls := map[string][]CallCand{}
 	mut by_type_name := map[string][]TypeCand{}
 	// type aliases by name, for a bare call of one (see alias_conversion)
 	mut alias_by_name := map[string][]TypeCand{}
@@ -1038,6 +1041,15 @@ fn resolve_edges(mut g Graph) {
 				is_method: s.kind == .method
 				mod:       s.parent // fn/method symbols hang off their module
 				file:      s.file
+			}
+		}
+		// a constant of a literal's type (`const sys_write = 1`, recipe `t:int`) is no
+		// function, so a call of its name is some other function's
+		if s.kind == .constant && !s.recipe.starts_with('t:') {
+			const_calls[s.name] << CallCand{
+				id:   s.id
+				mod:  s.parent
+				file: s.file
 			}
 		}
 		if s.kind == .type_alias && s.id.starts_with('C.') {
@@ -1251,6 +1263,7 @@ fn resolve_edges(mut g Graph) {
 	}
 	mut inf := Infer{
 		by_name:      by_name
+		const_calls:  const_calls
 		by_type_name: by_type_name
 		site_of:      site_of
 		imports_of:   imports_of

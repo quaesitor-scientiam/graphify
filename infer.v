@@ -18,6 +18,7 @@ module graphify
 // by resolve_edges.
 struct Infer {
 	by_name      map[string][]CallCand
+	const_calls  map[string][]CallCand // constants by name: the fallback for a call (see infer_call)
 	by_type_name map[string][]TypeCand
 	site_of      map[string]DeclSite
 	imports_of   map[string][]string
@@ -86,7 +87,10 @@ const embed_depth = 4
 // resolve_callee's narrowing.
 fn (mut inf Infer) infer_call(e Edge) ?CallResolution {
 	if e.to.contains('.') {
-		return resolve_qualified_callee(e, inf.by_name, inf.site_of, inf.scope_of)
+		if r := resolve_qualified_callee(e, inf.by_name, inf.site_of, inf.scope_of) {
+			return r
+		}
+		return resolve_qualified_callee(e, inf.const_calls, inf.site_of, inf.scope_of)
 	}
 	if e.is_method {
 		if t := inf.receiver(e) {
@@ -150,7 +154,39 @@ fn (mut inf Infer) infer_call(e Edge) ?CallResolution {
 			}
 		}
 	}
-	return resolve_callee(e, inf.by_name, inf.site_of, inf.imports_of)
+	if r := resolve_callee(e, inf.by_name, inf.site_of, inf.imports_of) {
+		return r
+	}
+	// a constant holding a function is called as one (`const f = g`, then `f()`), and a
+	// method call is never one. A function of the name that resolve_callee could not pick
+	// (a platform copy, say) is the callee, not the constant, so only a name with none
+	// is a constant's
+	if e.is_method || e.to in inf.by_name {
+		return none
+	}
+	return resolve_const_callee(e, inf.const_calls, inf.site_of, inf.imports_of)
+}
+
+// resolve_const_callee resolves a call of a name no function has to the one constant of
+// that name the caller can see (see infer_call). Unlike resolve_callee, which takes a name
+// that is unique in the whole graph, it needs visibility, so a constant of an unrelated,
+// unimported module is never the callee. A constant in the caller's own file is visible
+// even in a standalone `main` program, where visible_from grants no module visibility.
+fn resolve_const_callee(e Edge, const_calls map[string][]CallCand, site_of map[string]DeclSite, imports_of map[string][]string) ?CallResolution {
+	cands := const_calls[e.to] or { return none }
+	caller := caller_site(e, site_of) or { return none }
+	imports := imports_of[caller.file] or { []string{} }
+	mut visible := []CallCand{}
+	for c in cands {
+		if (c.file == caller.file || visible_from(c.mod, caller, imports)) && !test_private(c.file, caller.file) {
+			visible << c
+		}
+	}
+	id := only_id(visible) or { return none }
+	return CallResolution{
+		id:       id
+		inferred: true
+	}
 }
 
 // receiver is the type of a method call's receiver: as the parser wrote it
