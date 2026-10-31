@@ -190,16 +190,19 @@ fn expand_type_param_calls(edges []Edge, sources []Edge, fields []Symbol, mut in
 				field_edges << field_any_fallback(e, mut inf, unaddressable, variants_of)
 				continue
 			}
+			// each platform's copy of a method, as resolve_edges links a call that reaches one
 			for id in ids {
-				field_edges << Edge{
-					from:       e.from
-					to:         id
-					kind:       .calls
-					is_method:  true
-					file:       e.file
-					provenance: .comptime
-					lines:      e.lines
-					build:      e.build
+				for vid in variants_of[id] or { [id] } {
+					field_edges << Edge{
+						from:       e.from
+						to:         vid
+						kind:       .calls
+						is_method:  true
+						file:       e.file
+						provenance: .comptime
+						lines:      e.lines
+						build:      e.build
+					}
 				}
 			}
 			continue
@@ -583,7 +586,7 @@ fn field_any_ids(e Edge, caller Symbol, tps []string, instances map[string][]Inf
 	if at < 1 {
 		return []string{}
 	}
-	kinds := steps[at][3..].split(',').filter(it != '')
+	kinds := steps[at][3..].split(';').filter(it != '')
 	rest := steps[at + 1..]
 	prefix := steps[..at]
 	mut owners := []InferredType{}
@@ -623,7 +626,7 @@ fn field_any_ids(e Edge, caller Symbol, tps []string, instances map[string][]Inf
 		decl := inf.find_type(short, qual, owner, file) or { continue }
 		for fname in inf.fields_of[decl.id] or { []string{} } {
 			ft := inf.field_of(owner, fname, file, 0) or { continue }
-			if !field_kind_holds(ft, kinds, mut inf) {
+			if !field_kind_holds(fname, ft, kinds, mut inf) {
 				continue
 			}
 			mut recv := ft
@@ -652,20 +655,41 @@ fn own_name(t InferredType) string {
 	return t.text
 }
 
-// field_kind_holds reports whether a field of type `ft` is of every kind in `kinds`, as
-// field_any_step records them: `$map`, or `!$map` for a field that is not one. A kind
-// that can't be told from the declarations keeps the field.
-fn field_kind_holds(ft InferredType, kinds []string, mut inf Infer) bool {
+// field_kind_holds reports whether the field `fname` of type `ft` meets every narrowing
+// in `kinds`, as field_any_step records them: a kind, `$map`, tested on the type as
+// declared, or `~$map` on the type it aliases, as V's FieldData flags are; the field
+// `n:name`; or the type `t:int`; each negated by a leading `!`. A kind that can't be told
+// keeps the field, but a primitive, array, map, channel or function type is never a
+// struct, enum, sum type or interface.
+fn field_kind_holds(fname string, ft InferredType, kinds []string, mut inf Infer) bool {
 	for k in kinds {
 		negated := k.starts_with('!')
-		test := k.trim_left('!')
+		mut test := if negated { k[1..] } else { k }
+		mut t := ft
+		if test.starts_with('~') {
+			test = test[1..]
+			t = inf.unalias(ft, ft.file)
+		}
+		text := bare_type(t.text)
 		mut holds := false
-		if test == '$array' {
-			holds = bare_type(ft.text).starts_with('[')
+		if test.starts_with('n:') {
+			holds = fname == test[2..]
+		} else if test.starts_with('t:') {
+			// an option or a reference is that type as written: bare_type drops the `?` and `&`
+			want := test[2..]
+			holds = if want.starts_with('?') || want.starts_with('&') {
+				t.text.trim_space() == want
+			} else {
+				type_is(t, want, false, mut inf) or { continue }
+			}
+		} else if test == '$array' {
+			holds = text.starts_with('[')
+		} else if test in ['$struct', '$enum', '$sumtype', '$interface'] && !is_declared_kind(text) {
+			holds = false
 		} else if test == '$struct' {
-			holds = inf.is_struct_type(ft) or { continue }
+			holds = inf.is_struct_type(t) or { continue }
 		} else {
-			holds = type_is(ft, test, false, mut inf) or { continue }
+			holds = type_is(t, test, false, mut inf) or { continue }
 		}
 		if holds == negated {
 			return false
@@ -674,12 +698,21 @@ fn field_kind_holds(ft InferredType, kinds []string, mut inf Infer) bool {
 	return true
 }
 
+// is_declared_kind reports whether a type text can name a struct, enum, sum type or
+// interface: a named type that is not a primitive, an array, a map, a channel or a
+// function type.
+fn is_declared_kind(text string) bool {
+	return is_named_type(text) && text !in primitive_types && !text.starts_with('map[')
+		&& !text.starts_with('chan ') && !text.starts_with('fn ') && !text.starts_with('fn(')
+		&& !text.starts_with('thread')
+}
+
 // is_struct_type reports whether `t` names a struct: a named type that is not a
-// primitive, an enum, a sum type, an interface or an alias. none when no declaration
-// names it.
+// primitive, an array, a map, an enum, a sum type, an interface or an alias. none when
+// no declaration names it.
 fn (inf &Infer) is_struct_type(t InferredType) ?bool {
 	text := bare_type(t.text)
-	if !is_named_type(text) || text in primitive_types {
+	if !is_declared_kind(text) {
 		return false
 	}
 	named := strip_generic_args(text)

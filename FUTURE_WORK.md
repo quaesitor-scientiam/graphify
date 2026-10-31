@@ -460,21 +460,31 @@ array literal, and json2's `T{}.clear()`.
 **Calls on any field in a field loop (October 2026).** Inside `$for field in T.fields`,
 `x.$(field.name).str()` is another field's `str()` on each iteration, so no one target
 is right. Unless a `$if field.typ is X` or `$if field.name == 'x'` fixes the field,
-the receiver's recipe now ends in an any-field step (`fa:`, `field_any_step` in
-backend_v.v) that carries the kinds the enclosing `$if`s narrow it to: `field.is_struct`
-and `field.typ is $map` keep fields of that kind, and their `$else` branches drop them.
-`expand_type_param_calls` links the call to the method on every field type of x's type
-that the kinds keep, one edge each with provenance `comptime` (`field_any_ids` in
-generics.v). x's type is the instances of a type parameter, as for a method on a type
-parameter, or the one type its recipe names. Steps after the field are followed from
+and when x is of the type the loop walks (`T` of `$for field in T.fields`), the
+receiver's recipe now ends in an any-field step (`fa:`, `field_any_step` in
+backend_v.v) carrying what the enclosing `$if`s narrow the field to
+(`comptime_kind_pin`): `field.is_struct`, `is_array`, `is_map`, `is_enum` and
+`field.unaliased_typ is $kind` test the unaliased type, as V's FieldData does;
+`field.typ is $kind` the type as declared; `field.is_option` the option; a leading `!`
+negates. Each `$else` branch takes the negation, and the `$else` after a
+`$if field.typ is X` or `$if field.name == 'x'` leaves out that type or field.
+`expand_type_param_calls` links the call to the method on every field type the
+narrowings keep, one edge each with provenance `comptime`, and every platform copy of
+that method (`field_any_ids` in generics.v). The fields are those of the instances of a
+type parameter, under the call's comptime guards, as for a method on a type parameter,
+or of the one type the recipe names. A primitive, array, map, channel or function type
+is never a struct, enum, sum type or interface. Steps after the field are followed from
 each field's type, so `k.str()` and `v.str()` in `for k, v in data.$(field.name)` reach
 the key's and the value's `str()`. A call no field answers is resolved as before, on an
 unknown receiver. On vlang `2586a70d02`: unresolved calls 221 to 213, 16 `comptime`
 edges, and one `array.map` call keeps its target as `comptime` rather than `inferred`.
-Not followed: a selector nested in another field loop's selector,
-`value.$(field.name).$(sub.name)`, a field of a type parameter's field,
-`val.inner.$(field.name)` on a `val T`, and kinds the declarations can't tell, which
-keep the field. A graph.json with `comptime` edges stores provenance 3, which a
+Not followed, and so resolved as before: a selector nested in another field loop's
+selector, `value.$(field.name).$(sub.name)`; a field of a type parameter's field,
+`val.inner.$(field.name)` on a `val T`; x of a type other than the loop's, which
+includes x retyped by `$if T is X` around a loop over `T.fields`; and a compound
+condition. A kind the declarations can't tell keeps the field. The comptime edges carry
+no build of their own: a field type that is an alias declared once per build gets the
+default build's method, as the generic expansion gives a type parameter's. A graph.json with `comptime` edges stores provenance 3, which a
 graphify built before this change rejects when it loads the graph (x.json2 refuses an
 enum value it doesn't know); a running MCP server of that build keeps serving the graph
 it had until it restarts.

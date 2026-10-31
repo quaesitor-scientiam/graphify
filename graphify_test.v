@@ -4589,6 +4589,169 @@ fn run() {
 	assert g.report().contains('comptime 6')
 }
 
+fn test_a_field_loops_kind_narrowings_choose_the_fields_a_call_reaches() {
+	g := graph_of({
+		'lib/lib.v': 'module lib
+
+struct Alpha {}
+
+fn (a Alpha) show() string {
+	return ""
+}
+
+struct Beta {}
+
+fn (b Beta) show() string {
+	return ""
+}
+
+enum Color {
+	red
+}
+
+fn (c Color) show() string {
+	return ""
+}
+
+type Gamma = Beta
+
+fn (n int) show() string {
+	return ""
+}
+
+struct Box {
+	a Alpha
+	b Beta
+	c Color
+	g Gamma
+	n int
+}
+
+struct Small {
+	a Alpha
+}
+
+fn enums(x Box) {
+	\$for field in Box.fields {
+		\$if field.is_enum {
+			x.\$(field.name).show()
+		}
+	}
+}
+
+fn not_structs(x Box) {
+	\$for field in Box.fields {
+		\$if field.is_struct {
+		} \$else {
+			x.\$(field.name).show()
+		}
+	}
+}
+
+fn negated(x Box) {
+	\$for field in Box.fields {
+		\$if !field.is_struct {
+			x.\$(field.name).show()
+		}
+	}
+}
+
+fn not_alpha(x Box) {
+	\$for field in Box.fields {
+		\$if field.typ is Alpha {
+		} \$else {
+			x.\$(field.name).show()
+		}
+	}
+}
+
+fn not_named(x Box) {
+	\$for field in Box.fields {
+		\$if field.name == \'a\' {
+		} \$else \$if field.is_enum {
+		} \$else {
+			x.\$(field.name).show()
+		}
+	}
+}
+
+fn other_loop(x Box) {
+	\$for field in Small.fields {
+		x.\$(field.name).show()
+	}
+}
+
+fn guarded[T](x T) {
+	\$if T.unaliased_typ is Small {
+		\$for field in T.fields {
+			x.\$(field.name).show()
+		}
+	}
+}
+
+fn run() {
+	guarded(Box{})
+	guarded(Small{})
+}
+'
+	})
+	comptime_of := fn [g] (from string) []string {
+		return g.edges.filter(it.kind == .calls && it.from == from && it.provenance == .comptime).map(it.to).sorted()
+	}
+	// V reads is_enum and is_struct off the unaliased type: Gamma, an alias of a struct, is
+	// one; an int is neither, whatever methods it has
+	assert comptime_of('lib.enums') == ['lib.Color.show']
+	assert comptime_of('lib.not_structs') == ['lib.Color.show', 'lib.int.show']
+	assert comptime_of('lib.negated') == ['lib.Color.show', 'lib.int.show']
+	// an `\$else` after `typ is Alpha` is every other field, the alias of Beta included
+	assert comptime_of('lib.not_alpha') == ['lib.Beta.show', 'lib.Color.show', 'lib.int.show']
+	// after the field `a` and the enum, only b, g and n are left
+	assert comptime_of('lib.not_named') == ['lib.Beta.show', 'lib.int.show']
+	// x is not of the type the loop walks, so its fields are not the loop's
+	assert comptime_of('lib.other_loop') == []
+	// the guard keeps the Small instance only, not Box
+	assert comptime_of('lib.guarded') == ['lib.Alpha.show']
+}
+
+fn test_a_call_on_any_field_is_linked_per_field_even_when_its_name_is_unique() {
+	g := graph_of({
+		'lib/lib.v': 'module lib
+
+struct Delta {}
+
+fn (d Delta) only_here() {
+}
+
+struct Holder {
+	d Delta
+	n int
+}
+
+fn concrete(x Holder) {
+	\$for field in Holder.fields {
+		x.\$(field.name).only_here()
+	}
+}
+
+fn generic[T](x T) {
+	\$for field in T.fields {
+		x.\$(field.name).only_here()
+	}
+}
+
+fn run() {
+	generic(Holder{})
+}
+'
+	})
+	// a name match would give the same callee as extracted; the loop makes it comptime
+	for from in ['lib.concrete', 'lib.generic'] {
+		calls := g.edges.filter(it.kind == .calls && it.from == from)
+		assert calls.len == 1 && calls[0].to == 'lib.Delta.only_here', '${from}: ${calls}'
+		assert calls[0].provenance == .comptime, '${from}: ${calls}'
+	}
+}
+
 fn test_a_call_in_a_field_loop_that_no_field_answers_resolves_as_before() {
 	g := graph_of({
 		'lib/lib.v': 'module lib

@@ -1353,7 +1353,10 @@ fn resolve_edges(mut g Graph) {
 			// (build_worlds), where that differs from what it is here
 			here := inf.infer_call(e)
 			mut in_builds := []CallResolution{}
-			if e.is_method && e.to in builds.methods {
+			// a call on any field that infer_call left to expand_type_param_calls is not one
+			// to link through another build's name match first
+			deferred := e.is_method && has_field_any(e.recv_recipe) && here == none
+			if e.is_method && e.to in builds.methods && !deferred {
 				in_builds = builds.infer_call(e, here)
 			}
 			if in_builds.len > 0 && (here or { CallResolution{
