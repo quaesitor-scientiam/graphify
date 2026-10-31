@@ -4504,6 +4504,151 @@ fn run(p lib.Plain, o lib.Owned) {
 	assert run.any(it.to == 'lib.Owned.free')
 }
 
+fn test_a_call_on_any_field_in_a_field_loop_reaches_each_field_types_method() {
+	g := graph_of({
+		'lib/lib.v': 'module lib
+
+struct Alpha {}
+
+fn (a Alpha) show() string {
+	return ""
+}
+
+struct Beta {}
+
+fn (b Beta) show() string {
+	return ""
+}
+
+struct Key {}
+
+fn (k Key) show() string {
+	return ""
+}
+
+struct Plain {}
+
+struct Box {
+	a Alpha
+	b Beta
+	p Plain
+	n int
+	m map[Key]Alpha
+}
+
+fn concrete(x Box) {
+	\$for field in Box.fields {
+		\$if field.is_struct {
+			x.\$(field.name).show()
+		}
+	}
+}
+
+fn generic[T](x T) {
+	\$for field in T.fields {
+		\$if field.is_map {
+		} \$else {
+			x.\$(field.name).show()
+		}
+	}
+}
+
+fn maps(x Box) {
+	\$for field in Box.fields {
+		\$if field.typ is \$map {
+			for k, v in x.\$(field.name) {
+				k.show()
+				v.show()
+			}
+		}
+	}
+}
+
+fn run() {
+	generic(Box{})
+}
+'
+	})
+	calls_of := fn [g] (from string) []Edge {
+		return g.edges.filter(it.kind == .calls && it.from == from)
+	}
+	// each struct field's show, one comptime edge each; the map and int fields are no structs
+	concrete := calls_of('lib.concrete')
+	assert concrete.filter(it.provenance == .comptime).map(it.to).sorted() == ['lib.Alpha.show', 'lib.Beta.show'], concrete.str()
+	// in a generic function, the fields of each instance, less the map the `\$if` leaves out
+	generic := calls_of('lib.generic')
+	assert generic.filter(it.provenance == .comptime).map(it.to).sorted() == ['lib.Alpha.show', 'lib.Beta.show'], generic.str()
+	// a map field's keys and values, each typed apart
+	maps := calls_of('lib.maps')
+	key := maps.filter(it.to == 'lib.Key.show')
+	value := maps.filter(it.to == 'lib.Alpha.show')
+	assert key.len == 1 && key[0].provenance == .comptime, maps.str()
+	assert value.len == 1 && value[0].provenance == .comptime, maps.str()
+	assert key[0].lines != value[0].lines, maps.str()
+	assert !maps.any(it.to == 'lib.Beta.show' || it.to == 'show'), maps.str()
+	assert g.report().contains('comptime 6')
+}
+
+fn test_a_call_in_a_field_loop_that_no_field_answers_resolves_as_before() {
+	g := graph_of({
+		'lib/lib.v': 'module lib
+
+struct Widget {}
+
+fn (w Widget) frob() {
+}
+
+struct Gadget {}
+
+fn (g Gadget) show() string {
+	return ""
+}
+
+struct Box {
+	n int
+	g Gadget
+}
+
+fn concrete(x Box) {
+	\$for field in Box.fields {
+		x.\$(field.name).frob()
+	}
+}
+
+fn generic[T](x T) {
+	\$for field in T.fields {
+		x.\$(field.name).frob()
+	}
+}
+
+fn both(x Box, g Gadget) {
+	g.show()
+	\$for field in Box.fields {
+		x.\$(field.name).show()
+	}
+}
+
+fn run() {
+	generic(Box{})
+}
+'
+	})
+	calls_of := fn [g] (from string) []Edge {
+		return g.edges.filter(it.kind == .calls && it.from == from)
+	}
+	// no field of Box has a frob, so the call is matched by its name, as before field loops
+	// were followed, both on a known type and on a type parameter's instances
+	for from in ['lib.concrete', 'lib.generic'] {
+		calls := calls_of(from)
+		assert calls.len == 1 && calls[0].to == 'lib.Widget.frob', '${from}: ${calls}'
+		assert calls[0].provenance != .comptime, '${from}: ${calls}'
+	}
+	// a field loop's call that reaches a method the function already calls joins that edge
+	both := calls_of('lib.both').filter(it.to == 'lib.Gadget.show')
+	assert both.len == 1, both.str()
+	assert both[0].provenance != .comptime && both[0].lines.len == 2, both.str()
+}
+
 fn test_index_leaves_undeclared_calls_unresolved() {
 	// `conv` and `on_done` are each declared exactly once, so a bare-name
 	// match would resolve the undeclared calls to them

@@ -30,6 +30,7 @@ struct Infer {
 	sum_variants map[string][]string // sum type id -> its variants, as written
 	embeds_of    map[string][]Edge // struct or interface id -> its raw `embeds` edges
 	field_id     map[string]string // '<struct id>\x00<field>' -> the field's symbol id
+	fields_of    map[string][]string // struct id -> its field names, in order
 	consts       map[string][]Symbol // name -> the consts and globals with a recipe
 	enum_ids     map[string]bool     // ids of enums
 	dynamic_ids  map[string]bool     // ids of sum types and interfaces
@@ -86,6 +87,22 @@ const embed_depth = 4
 // and a method call by its receiver's type, given or inferred, falling back to
 // resolve_callee's narrowing.
 fn (mut inf Infer) infer_call(e Edge) ?CallResolution {
+	// a call on any field of a type is a call on each of them, which no one resolution
+	// names: expand_type_param_calls links it (see field_any_ids). One on a type
+	// parameter waits for the parameter's instances; one that no field of a known type
+	// answers is resolved as a call on an unknown receiver, as before the step existed
+	if e.is_method && has_field_any(e.recv_recipe) {
+		if field_any_on_tparam(e, inf.generics_of[e.from] or { []string{} }) {
+			return none
+		}
+		if field_any_ids(e, Symbol{}, []string{}, map[string][]InferredType{}, mut inf).len > 0 {
+			return none
+		}
+		return inf.infer_call(Edge{
+			...e
+			recv_recipe: ''
+		})
+	}
 	if e.to.contains('.') {
 		if r := resolve_qualified_callee(e, inf.by_name, inf.site_of, inf.scope_of) {
 			return r

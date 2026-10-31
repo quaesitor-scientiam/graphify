@@ -209,7 +209,7 @@ pub fn (g Graph) report() string {
 	}
 	b << ''
 	b << '## Edges by provenance'
-	b << '`extracted` = unique name or (calls only) a parser-typed receiver; `inferred` = picked among several real candidates by the inferred receiver type or by locality/visibility; `built-in` = a primitive type such as `int`, which has no declaration to resolve to; `library` = a declaration in a module the project imports from vlib or ~/.vmodules, outside its tree; `external` = a call to a `C.` or `JS.` function, or a `C.` or `JS.` type that nothing in the program declares; `undeclared` = a call with no declaration to resolve to, of a function value or a method V provides itself (`thread.wait()`); `unresolved` = name stayed ambiguous or unknown.'
+	b << '`extracted` = unique name or (calls only) a parser-typed receiver; `inferred` = picked among several real candidates by the inferred receiver type or by locality/visibility; `built-in` = a primitive type such as `int`, which has no declaration to resolve to; `library` = a declaration in a module the project imports from vlib or ~/.vmodules, outside its tree; `external` = a call to a `C.` or `JS.` function, or a `C.` or `JS.` type that nothing in the program declares; `undeclared` = a call with no declaration to resolve to, of a function value or a method V provides itself (`thread.wait()`); `comptime` = one of the methods a call on `x.\$(field.name)` in a `\$for field in T.fields` loop reaches, one edge per field type; `unresolved` = name stayed ambiguous or unknown.'
 	b << '- calls: ${calls_prov.str()}'
 	b << '- references: ${refs_prov.str()}'
 	b << '- embeds: ${embeds_prov.str()}'
@@ -302,6 +302,7 @@ struct ProvCounts {
 mut:
 	extracted  int
 	inferred   int
+	comptime   int // one field type's method of a call in a field loop, see EdgeProvenance
 	builtin    int // a primitive type name, see builtin_type_names
 	library    int // a declaration in the library, Graph.library
 	external   int // a call to a `C.` or `JS.` function, or a `C.` or `JS.` type nothing declares
@@ -314,7 +315,8 @@ fn (c ProvCounts) str() string {
 	library := if c.library > 0 { ', library ${c.library}' } else { '' }
 	external := if c.external > 0 { ', external ${c.external}' } else { '' }
 	undeclared := if c.undeclared > 0 { ', undeclared ${c.undeclared}' } else { '' }
-	return 'extracted ${c.extracted}, inferred ${c.inferred}${library}${builtin}${external}${undeclared}, unresolved ${c.unresolved}'
+	comptime := if c.comptime > 0 { ', comptime ${c.comptime}' } else { '' }
+	return 'extracted ${c.extracted}, inferred ${c.inferred}${comptime}${library}${builtin}${external}${undeclared}, unresolved ${c.unresolved}'
 }
 
 // builtin_type_names are V's primitive types. Unlike `string`, `array` and
@@ -358,6 +360,8 @@ fn count_provenance(idx Index, edges []Edge, kind EdgeKind) ProvCounts {
 			}
 		} else if e.provenance == .inferred {
 			c.inferred++
+		} else if e.provenance == .comptime {
+			c.comptime++
 		} else {
 			c.extracted++
 		}

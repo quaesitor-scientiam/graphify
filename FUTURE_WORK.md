@@ -457,6 +457,28 @@ the JS prelude's `stats_import`), 3 are JS-only, and 4 are single cases: a const
 holding a function, `ctx` in a veb example that never declares it, an untyped
 array literal, and json2's `T{}.clear()`.
 
+**Calls on any field in a field loop (October 2026).** Inside `$for field in T.fields`,
+`x.$(field.name).str()` is another field's `str()` on each iteration, so no one target
+is right. Unless a `$if field.typ is X` or `$if field.name == 'x'` fixes the field,
+the receiver's recipe now ends in an any-field step (`fa:`, `field_any_step` in
+backend_v.v) that carries the kinds the enclosing `$if`s narrow it to: `field.is_struct`
+and `field.typ is $map` keep fields of that kind, and their `$else` branches drop them.
+`expand_type_param_calls` links the call to the method on every field type of x's type
+that the kinds keep, one edge each with provenance `comptime` (`field_any_ids` in
+generics.v). x's type is the instances of a type parameter, as for a method on a type
+parameter, or the one type its recipe names. Steps after the field are followed from
+each field's type, so `k.str()` and `v.str()` in `for k, v in data.$(field.name)` reach
+the key's and the value's `str()`. A call no field answers is resolved as before, on an
+unknown receiver. On vlang `2586a70d02`: unresolved calls 221 to 213, 16 `comptime`
+edges, and one `array.map` call keeps its target as `comptime` rather than `inferred`.
+Not followed: a selector nested in another field loop's selector,
+`value.$(field.name).$(sub.name)`, a field of a type parameter's field,
+`val.inner.$(field.name)` on a `val T`, and kinds the declarations can't tell, which
+keep the field. A graph.json with `comptime` edges stores provenance 3, which a
+graphify built before this change rejects when it loads the graph (x.json2 refuses an
+enum value it doesn't know); a running MCP server of that build keeps serving the graph
+it had until it restarts.
+
 The raw edge is retained and `explain` reports ambiguous callers rather than
 inventing links. A future opt-in deep mode could run the checker over a whole
 project, but given the small remainder, it would need to address these

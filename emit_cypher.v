@@ -34,7 +34,11 @@ pub fn (g Graph) emit_cypher() string {
 	for e in idx.edges {
 		mut props := ''
 		if e.kind in [EdgeKind.calls, .embeds, .references] {
-			prov := if e.provenance == .inferred { 'inferred' } else { 'extracted' }
+			prov := match e.provenance {
+				.inferred { 'inferred' }
+				.comptime { 'comptime' }
+				else { 'extracted' }
+			}
 			props = ' {provenance: ${cypher_str(prov)}}'
 		}
 		sb << 'MATCH (a:Symbol {id: ${cypher_str(e.from)}}), (b:Symbol {id: ${cypher_str(e.to)}}) CREATE (a)-[:${cypher_rel_type(e.kind)}${props}]->(b);'
