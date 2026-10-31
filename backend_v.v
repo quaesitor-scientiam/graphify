@@ -2124,13 +2124,13 @@ fn (f &V3File) comptime_field_pin(sel flat.NodeId, ctx V3CallCtx) string {
 	return ctx.pins['field:' + f.node(ik[0]).value_text()] or { '' }
 }
 
-// field_any_step is the step of `x.$(field.name)`, the selector `sel`, in a `$for field
-// in X.fields` loop that no `$if` fixes to one field or type, and X as the loop writes it:
-// `fa:` and the `;`-separated narrowings of the enclosing `$if`s, a kind
-// (`fa:~$struct;!$map`, see comptime_kind_pin), or a field or type an earlier branch took
-// (`!n:name`, `!t:int`). Each iteration is another field, so the step stands for every
-// field of X that the narrowings keep. ('', '') when the inner name is not a field loop's
-// variable.
+// field_any_step reads `x.$(field.name)`, the selector `sel`, in a `$for field in
+// X.fields` loop that no `$if` fixes to one field or type: the `;`-separated narrowings
+// of the enclosing `$if`s, each a kind (`~$struct;!$map`, see comptime_kind_pin) or a
+// field or type an earlier branch took (`!n:name`, `!t:int`), and X as the loop writes
+// it. Each iteration is another field, so a call on the selector reaches every field of X
+// that the narrowings keep (the `fa:` step, see recipe). ('', '') when the inner name is
+// not a field loop's variable.
 fn (f &V3File) field_any_step(sel flat.NodeId, ctx V3CallCtx) (string, string) {
 	ks := f.kids(sel)
 	if ks.len != 2 {
@@ -2148,7 +2148,7 @@ fn (f &V3File) field_any_step(sel flat.NodeId, ctx V3CallCtx) (string, string) {
 	if (ctx.vars[v] or { '' }) != 't:builtin.FieldData' {
 		return '', ''
 	}
-	return 'fa:' + (ctx.pins['kind:' + v] or { '' }), ctx.pins['loop:' + v] or { '' }
+	return ctx.pins['kind:' + v] or { '' }, ctx.pins['loop:' + v] or { '' }
 }
 
 // is_dollar_selector reports whether `id` is a comptime selector, `x.$(...)` or
@@ -2968,14 +2968,14 @@ fn (f &V3File) recipe(id flat.NodeId, ctx V3CallCtx) string {
 				if pinned != '' {
 					return pinned
 				}
-				// otherwise it is any field the loop reaches, when x is of the type the loop
-				// walks: x of another type has fields the loop never names
-				any, loop := f.field_any_step(id, ctx)
-				if any != '' && loop != '' {
+				// otherwise it is any field the loop reaches: `fa:` with the narrowings and the
+				// loop's type, `L:Data`, which field_any_ids holds x's type to, since x of
+				// another type has fields the loop never names
+				narrowings, loop := f.field_any_step(id, ctx)
+				if loop != '' {
 					base := f.recipe(kids[0], ctx)
-					if base.starts_with('t:') && !base.contains(recipe_sep)
-						&& bare_type(base[2..]) == bare_type(loop) {
-						return base + recipe_sep + any
+					if base != '' {
+						return base + recipe_sep + 'fa:' + add_kind(narrowings, 'L:' + loop)
 					}
 				}
 				return ''

@@ -92,7 +92,7 @@ fn (mut inf Infer) infer_call(e Edge) ?CallResolution {
 	// parameter waits for the parameter's instances; one that no field of a known type
 	// answers is resolved as a call on an unknown receiver, as before the step existed
 	if e.is_method && has_field_any(e.recv_recipe) {
-		if field_any_on_tparam(e, inf.generics_of[e.from] or { []string{} }) {
+		if inf.field_any_on_tparam(e, inf.generics_of[e.from] or { []string{} }) {
 			return none
 		}
 		if field_any_ids(e, Symbol{}, []string{}, map[string][]InferredType{}, mut inf).len > 0 {

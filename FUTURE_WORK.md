@@ -467,10 +467,14 @@ backend_v.v) carrying what the enclosing `$if`s narrow the field to
 `field.unaliased_typ is $kind` test the unaliased type, as V's FieldData does;
 `field.typ is $kind` the type as declared; `field.is_option` the option; a leading `!`
 negates. Each `$else` branch takes the negation, and the `$else` after a
-`$if field.typ is X` or `$if field.name == 'x'` leaves out that type or field.
+`$if field.typ is X` or `$if field.name == 'x'` leaves out that type or field; the type
+is compared whole, as V does, so an `&X`, `?X` or `[]X` field stays in the `$else`.
+x may be any receiver whose recipe follows to the loop's type, such as an element of
+an array of it.
 `expand_type_param_calls` links the call to the method on every field type the
 narrowings keep, one edge each with provenance `comptime`, and every platform copy of
-that method (`field_any_ids` in generics.v). The fields are those of the instances of a
+that method, even where `method_on` sees the copies as several methods
+(`field_any_ids` and `platform_copy_method` in generics.v). The fields are those of the instances of a
 type parameter, under the call's comptime guards, as for a method on a type parameter,
 or of the one type the recipe names. A primitive, array, map, channel or function type
 is never a struct, enum, sum type or interface. Steps after the field are followed from
@@ -481,8 +485,9 @@ edges, and one `array.map` call keeps its target as `comptime` rather than `infe
 Not followed, and so resolved as before: a selector nested in another field loop's
 selector, `value.$(field.name).$(sub.name)`; a field of a type parameter's field,
 `val.inner.$(field.name)` on a `val T`; x of a type other than the loop's, which
-includes x retyped by `$if T is X` around a loop over `T.fields`; and a compound
-condition. A kind the declarations can't tell keeps the field. The comptime edges carry
+includes x retyped by `$if T is X` around a loop over `T.fields`; a loop over a
+qualified type, `$for field in a.S.fields`, whose type V3's parser leaves unnamed; and a
+compound condition. A kind the declarations can't tell keeps the field. The comptime edges carry
 no build of their own: a field type that is an alias declared once per build gets the
 default build's method, as the generic expansion gives a type parameter's. A graph.json with `comptime` edges stores provenance 3, which a
 graphify built before this change rejects when it loads the graph (x.json2 refuses an

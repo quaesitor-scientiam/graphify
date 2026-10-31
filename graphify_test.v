@@ -4619,12 +4619,24 @@ fn (n int) show() string {
 	return ""
 }
 
+struct Epsilon {}
+
+fn (e Epsilon) show() string {
+	return ""
+}
+
+fn (xs []Alpha) show() string {
+	return ""
+}
+
 struct Box {
 	a Alpha
 	b Beta
 	c Color
 	g Gamma
 	n int
+	r &Epsilon
+	l []Alpha
 }
 
 struct Small {
@@ -4689,9 +4701,47 @@ fn guarded[T](x T) {
 	}
 }
 
+fn not_epsilon(x Box) {
+	\$for field in Box.fields {
+		\$if field.typ is Epsilon {
+		} \$else {
+			x.\$(field.name).show()
+		}
+	}
+}
+
+fn unaliased_enum(x Box) {
+	\$for field in Box.fields {
+		\$if field.unaliased_typ is \$enum {
+			x.\$(field.name).show()
+		}
+	}
+}
+
+fn elems(xs []Box) {
+	for x in xs {
+		\$for field in Box.fields {
+			\$if field.is_enum {
+				x.\$(field.name).show()
+			}
+		}
+	}
+}
+
+fn gen_elems[T](xs []T) {
+	for x in xs {
+		\$for field in T.fields {
+			\$if field.is_enum {
+				x.\$(field.name).show()
+			}
+		}
+	}
+}
+
 fn run() {
 	guarded(Box{})
 	guarded(Small{})
+	gen_elems([Box{}])
 }
 '
 	})
@@ -4699,18 +4749,117 @@ fn run() {
 		return g.edges.filter(it.kind == .calls && it.from == from && it.provenance == .comptime).map(it.to).sorted()
 	}
 	// V reads is_enum and is_struct off the unaliased type: Gamma, an alias of a struct, is
-	// one; an int is neither, whatever methods it has
+	// one, and so is the Epsilon r points to; an int or an array is neither, whatever
+	// methods it has
 	assert comptime_of('lib.enums') == ['lib.Color.show']
-	assert comptime_of('lib.not_structs') == ['lib.Color.show', 'lib.int.show']
-	assert comptime_of('lib.negated') == ['lib.Color.show', 'lib.int.show']
+	assert comptime_of('lib.unaliased_enum') == ['lib.Color.show']
+	assert comptime_of('lib.not_structs') == ['lib.Color.show', 'lib.[]Alpha.show', 'lib.int.show']
+	assert comptime_of('lib.negated') == ['lib.Color.show', 'lib.[]Alpha.show', 'lib.int.show']
 	// an `\$else` after `typ is Alpha` is every other field, the alias of Beta included
-	assert comptime_of('lib.not_alpha') == ['lib.Beta.show', 'lib.Color.show', 'lib.int.show']
-	// after the field `a` and the enum, only b, g and n are left
-	assert comptime_of('lib.not_named') == ['lib.Beta.show', 'lib.int.show']
+	assert comptime_of('lib.not_alpha') == ['lib.Beta.show', 'lib.Color.show', 'lib.Epsilon.show',
+		'lib.[]Alpha.show', 'lib.int.show']
+	// `typ is Epsilon` is the whole type: r, an `&Epsilon`, is in the `\$else`
+	assert comptime_of('lib.not_epsilon') == ['lib.Alpha.show', 'lib.Beta.show', 'lib.Color.show',
+		'lib.Epsilon.show', 'lib.[]Alpha.show', 'lib.int.show']
+	// after the field `a` and the enum, b, g, n, r and l are left
+	assert comptime_of('lib.not_named') == ['lib.Beta.show', 'lib.Epsilon.show', 'lib.[]Alpha.show',
+		'lib.int.show']
 	// x is not of the type the loop walks, so its fields are not the loop's
 	assert comptime_of('lib.other_loop') == []
 	// the guard keeps the Small instance only, not Box
 	assert comptime_of('lib.guarded') == ['lib.Alpha.show']
+	// an element of an array of the loop's type is of that type, concrete or a type parameter
+	assert comptime_of('lib.elems') == ['lib.Color.show']
+	assert comptime_of('lib.gen_elems') == ['lib.Color.show']
+}
+
+fn test_a_field_loops_type_pin_compares_declarations_not_names() {
+	g := graph_of({
+		'a/a.v': 'module a
+
+pub struct Foo {}
+
+pub fn (f Foo) show() string {
+	return ""
+}
+
+pub struct S {
+pub:
+	x Foo
+}
+'
+		'b/b.v': 'module b
+
+import a
+
+struct Foo {}
+
+fn show_all[T](s T) {
+	\$for field in T.fields {
+		\$if field.typ is Foo {
+		} \$else {
+			s.\$(field.name).show()
+		}
+	}
+}
+
+fn run() {
+	show_all(a.S{})
+}
+'
+	})
+	// b's Foo is not a's: the field x is in the `\$else`, so the call reaches a.Foo.show
+	calls := g.edges.filter(it.kind == .calls && it.from == 'b.show_all')
+	assert calls.len == 1 && calls[0].to == 'a.Foo.show', calls.str()
+	assert calls[0].provenance == .comptime, calls.str()
+}
+
+fn test_a_field_loops_call_reaches_every_platform_copy_of_the_method() {
+	files := {
+		'prog/main.v':      'module main
+
+struct Doc {}
+
+struct Holder {
+	d Doc
+}
+
+fn main() {
+	run(Holder{})
+}
+
+fn run(x Holder) {
+	\$for field in Holder.fields {
+		x.\$(field.name).close()
+	}
+}
+'
+		'prog/p_nix.c.v':     'module main
+
+pub fn (d Doc) close() bool {
+	return true
+}
+'
+		'prog/p_windows.c.v': 'module main
+
+pub fn (d Doc) close() bool {
+	return true
+}
+'
+	}
+	mut g := Graph{}
+	for rel, src in files {
+		syms, edges := extract_v_text(src, rel)
+		g.symbols << syms
+		g.edges << edges
+	}
+	disambiguate_ids(mut g)
+	separate_member_ids(mut g)
+	resolve_edges(mut g)
+	calls := g.edges.filter(it.kind == .calls && it.from == 'prog.run')
+	assert calls.map(it.to).sorted() == ['prog.Doc.close@prog/p_nix.c.v',
+		'prog.Doc.close@prog/p_windows.c.v'], calls.str()
+	assert calls.all(it.provenance == .comptime), calls.str()
 }
 
 fn test_a_call_on_any_field_is_linked_per_field_even_when_its_name_is_unique() {

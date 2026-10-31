@@ -557,24 +557,18 @@ fn has_field_any(recipe string) bool {
 }
 
 // field_any_on_tparam reports whether the receiver of a call on any field of a type is
-// a field of one of `tps`, the caller's type parameters, whose instances are known only
-// once the call sites are read (see field_any_ids).
-fn field_any_on_tparam(e Edge, tps []string) bool {
-	steps := e.recv_recipe.split(recipe_sep)
-	if steps.len < 2 || !steps[0].starts_with('t:') || !steps[1].starts_with('fa:') {
-		return false
-	}
-	_ := plain_param(steps[0][2..], '', tps) or { return false }
-	return true
+// one of `tps`, the caller's type parameters, whose instances are known only once the
+// call sites are read (see field_any_ids).
+fn (mut inf Infer) field_any_on_tparam(e Edge, tps []string) bool {
+	_, tp, _ := inf.field_any_receiver(e, tps) or { return false }
+	return tp != ''
 }
 
-// field_any_ids are the methods a call on `x.$(field.name)` reaches in a field loop that
-// no `$if` fixes to one field (the `fa:` step, see field_any_step): the method on the
-// type of each field of x's type, of the kinds the step keeps, with the recipe's steps
-// after it followed from that field's type. x's type is each instance of the caller's
-// type parameter that x is, or else the one type its recipe names. Empty when no field
-// has the method.
-fn field_any_ids(e Edge, caller Symbol, tps []string, instances map[string][]InferredType, mut inf Infer) []string {
+// field_any_receiver reads a receiver recipe with an `fa:` step (see field_any_step): the
+// index of the step, and what the receiver before it is, the caller's type parameter of
+// `tps` it names or else the one type it follows to. none when there is no such step or
+// the receiver can't be followed.
+fn (mut inf Infer) field_any_receiver(e Edge, tps []string) ?(int, string, InferredType) {
 	steps := e.recv_recipe.split(recipe_sep)
 	mut at := -1
 	for i, s in steps {
@@ -584,30 +578,57 @@ fn field_any_ids(e Edge, caller Symbol, tps []string, instances map[string][]Inf
 		}
 	}
 	if at < 1 {
-		return []string{}
+		return none
 	}
-	kinds := steps[at][3..].split(';').filter(it != '')
-	rest := steps[at + 1..]
 	prefix := steps[..at]
-	mut owners := []InferredType{}
 	if prefix.len == 1 && prefix[0].starts_with('t:') {
 		if tp := plain_param(prefix[0][2..], '', tps) {
-			owners = guarded_instances(instances[instance_key(caller, tp)] or { []InferredType{} },
-				e.guards, tp, mut inf)
+			return at, tp, InferredType{}
 		}
 	}
-	if owners.len == 0 {
-		if t := inf.follow(Edge{
-			from:        e.from
-			file:        e.file
-			recv_recipe: prefix.join(recipe_sep)
-		})
-		{
-			if _ := plain_param(t.text, t.mod, tps) {
-			} else {
-				owners << t
-			}
+	t := inf.follow(Edge{
+		from:        e.from
+		file:        e.file
+		recv_recipe: prefix.join(recipe_sep)
+	})?
+	if tp := plain_param(t.text, t.mod, tps) {
+		return at, tp, InferredType{}
+	}
+	return at, '', t
+}
+
+// field_any_ids are the methods a call on `x.$(field.name)` reaches in a field loop that
+// no `$if` fixes to one field (the `fa:` step, see field_any_step): the method on the
+// type of each field of x's type that the step's narrowings keep, with the recipe's steps
+// after it followed from that field's type. x's type is each instance of the caller's
+// type parameter that x is, or else the one type its recipe follows to, and it must be the
+// type the loop walks (the step's `L:`), whose fields the loop names. Empty when no field
+// has the method.
+fn field_any_ids(e Edge, caller Symbol, tps []string, instances map[string][]InferredType, mut inf Infer) []string {
+	at, tp, recv_type := inf.field_any_receiver(e, tps) or { return []string{} }
+	steps := e.recv_recipe.split(recipe_sep)
+	mut loop := ''
+	mut kinds := []string{}
+	for k in steps[at][3..].split(';') {
+		if k.starts_with('L:') {
+			loop = k[2..]
+		} else if k != '' {
+			kinds << k
 		}
+	}
+	rest := steps[at + 1..]
+	mut owners := []InferredType{}
+	if tp != '' {
+		if loop != '' && bare_type(loop) != tp {
+			return []string{}
+		}
+		owners = guarded_instances(instances[instance_key(caller, tp)] or { []InferredType{} },
+			e.guards, tp, mut inf)
+	} else {
+		if loop != '' && !inf.names_same_type(recv_type, loop, e.file) {
+			return []string{}
+		}
+		owners << recv_type
 	}
 	mut ids := []string{}
 	for o in owners {
@@ -625,8 +646,18 @@ fn field_any_ids(e Edge, caller Symbol, tps []string, instances map[string][]Inf
 		}
 		decl := inf.find_type(short, qual, owner, file) or { continue }
 		for fname in inf.fields_of[decl.id] or { []string{} } {
-			ft := inf.field_of(owner, fname, file, 0) or { continue }
-			if !field_kind_holds(fname, ft, kinds, mut inf) {
+			// field_of reads a generic instance's arguments into the field; a type written
+			// through another module (`a.S` in module b) it can miss, and the field is then
+			// its declared type, read in the struct's own module
+			ft := inf.field_of(owner, fname, file, 0) or {
+				InferredType{
+					text:     inf.field_type['${decl.id}\x00${fname}'] or { continue }
+					mod:      decl.mod
+					file:     decl.file
+					field_id: inf.field_id['${decl.id}\x00${fname}'] or { '' }
+				}
+			}
+			if !field_kind_holds(fname, ft, kinds, e.file, mut inf) {
 				continue
 			}
 			mut recv := ft
@@ -637,13 +668,33 @@ fn field_any_ids(e Edge, caller Symbol, tps []string, instances map[string][]Inf
 					recv_recipe: 't:' + own_name(ft) + recipe_sep + rest.join(recipe_sep)
 				}, 0) or { continue }
 			}
-			id := inf.method_on(recv, e.to, e.file, 0) or { continue }
+			id := inf.method_on(recv, e.to, e.file, 0) or {
+				inf.platform_copy_method(recv, e.to) or { continue }
+			}
 			if id !in ids {
 				ids << id
 			}
 		}
 	}
 	return ids
+}
+
+// platform_copy_method is one copy of the method `name` of the type `t` when the method is
+// declared once per platform (`main.Doc.close@p_nix.c.v`, `...@p_windows.c.v`), which
+// method_on takes for several methods; variants_of links every copy of it. none when `t`
+// has no such method.
+fn (inf &Infer) platform_copy_method(t InferredType, name string) ?string {
+	named := strip_generic_args(bare_type(t.text))
+	short := named.all_after_last('.')
+	qual := if named.contains('.') { named.all_before_last('.') } else { '' }
+	decl := inf.find_type(short, qual, t, t.file)?
+	want := decl.id + '.' + name
+	for c in inf.by_name[name] or { []CallCand{} } {
+		if c.is_method && c.id.contains('@') && c.id.all_before('@') == want {
+			return c.id
+		}
+	}
+	return none
 }
 
 // own_name is a type's text as its own module writes it: `Context` for
@@ -661,7 +712,7 @@ fn own_name(t InferredType) string {
 // `n:name`; or the type `t:int`; each negated by a leading `!`. A kind that can't be told
 // keeps the field, but a primitive, array, map, channel or function type is never a
 // struct, enum, sum type or interface.
-fn field_kind_holds(fname string, ft InferredType, kinds []string, mut inf Infer) bool {
+fn field_kind_holds(fname string, ft InferredType, kinds []string, file string, mut inf Infer) bool {
 	for k in kinds {
 		negated := k.starts_with('!')
 		mut test := if negated { k[1..] } else { k }
@@ -675,13 +726,7 @@ fn field_kind_holds(fname string, ft InferredType, kinds []string, mut inf Infer
 		if test.starts_with('n:') {
 			holds = fname == test[2..]
 		} else if test.starts_with('t:') {
-			// an option or a reference is that type as written: bare_type drops the `?` and `&`
-			want := test[2..]
-			holds = if want.starts_with('?') || want.starts_with('&') {
-				t.text.trim_space() == want
-			} else {
-				type_is(t, want, false, mut inf) or { continue }
-			}
+			holds = inf.same_type(t, test[2..], file) or { continue }
 		} else if test == '$array' {
 			holds = text.starts_with('[')
 		} else if test in ['$struct', '$enum', '$sumtype', '$interface'] && !is_declared_kind(text) {
@@ -696,6 +741,79 @@ fn field_kind_holds(fname string, ft InferredType, kinds []string, mut inf Infer
 		}
 	}
 	return true
+}
+
+// same_type reports whether a field of type `t` is of the type `want`, written in `file`,
+// as V's `field.typ is want` decides it: on the whole type, so `&Foo`, `?Foo` and
+// `[]Foo` are not `Foo`. A reference, option, array, map or primitive is that type as
+// written; a named type is its declaration, read where each is written. none when that
+// can't be told, such as `[]Foo` against `[]mod.Foo`.
+fn (inf &Infer) same_type(t InferredType, want string, file string) ?bool {
+	raw := t.text.trim_space()
+	w := want.trim_space()
+	if !is_declared_kind(raw) || !is_declared_kind(w) || raw.contains('[') || w.contains('[') {
+		if raw == w {
+			return true
+		}
+		if raw.contains('.') || w.contains('.') {
+			return none
+		}
+		return false
+	}
+	// `Foo` in the struct's module and `Foo` in the loop's can be two types: each is the
+	// declaration its own file sees, and the same text only when one has none
+	rd := inf.find_type(raw.all_after_last('.'), if raw.contains('.') {
+		raw.all_before_last('.')
+	} else {
+		''
+	}, t, t.file) or {
+		if raw == w {
+			return true
+		}
+		return none
+	}
+	scope := inf.scope_of[file] or { FileScope{} }
+	wt := InferredType{
+		text: w
+		mod:  scope.mod
+		file: file
+	}
+	wd := inf.find_type(w.all_after_last('.'), if w.contains('.') {
+		w.all_before_last('.')
+	} else {
+		''
+	}, wt, file) or {
+		if raw == w {
+			return true
+		}
+		return none
+	}
+	return rd.id == wd.id
+}
+
+// names_same_type reports whether `t`, a receiver's type, is the type `loop` that a
+// field loop in `file` walks the fields of (`$for field in Data.fields`): the same
+// declaration, a reference to it included, or the same text when neither is declared.
+fn (inf &Infer) names_same_type(t InferredType, loop string, file string) bool {
+	rt := strip_generic_args(bare_type(own_name(t)))
+	lt := strip_generic_args(bare_type(loop))
+	rd := inf.find_type(rt.all_after_last('.'), if rt.contains('.') {
+		rt.all_before_last('.')
+	} else {
+		''
+	}, t, t.file) or { return rt == lt }
+	scope := inf.scope_of[file] or { FileScope{} }
+	lw := InferredType{
+		text: lt
+		mod:  scope.mod
+		file: file
+	}
+	ld := inf.find_type(lt.all_after_last('.'), if lt.contains('.') {
+		lt.all_before_last('.')
+	} else {
+		''
+	}, lw, file) or { return rt == lt }
+	return rd.id == ld.id
 }
 
 // is_declared_kind reports whether a type text can name a struct, enum, sum type or
