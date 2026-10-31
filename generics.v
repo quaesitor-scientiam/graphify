@@ -789,7 +789,7 @@ fn (inf &Infer) same_type(t InferredType, want string, file string) ?bool {
 	} else {
 		''
 	}, t_inner, t.file) or {
-		if raw == w {
+		if raw == w && t.mod == scope.mod {
 			return true
 		}
 		return none
@@ -804,7 +804,9 @@ fn (inf &Infer) same_type(t InferredType, want string, file string) ?bool {
 	} else {
 		''
 	}, wt, file) or {
-		if raw == w {
+		// the same text names the same type only in one module: a selectively imported
+		// `Foo` in the loop's file is another module's
+		if raw == w && t.mod == scope.mod {
 			return true
 		}
 		return none

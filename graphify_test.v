@@ -4831,10 +4831,32 @@ fn run() {
 	show_ref(a.S2{})
 }
 '
+		'c/c.v': 'module c
+
+pub struct Foo {}
+'
+		'd/d.v': 'module d
+
+import a
+import c { Foo }
+
+fn walk[T](v T) {
+	\$for field in T.fields {
+		\$if field.typ is Foo {
+		} \$else {
+			v.\$(field.name).show()
+		}
+	}
+}
+
+fn run() {
+	walk(a.S{})
+}
+'
 	})
 	// b's Foo is not a's: the field x is in the `\$else`, so the call reaches a.Foo.show,
-	// and so does y, an `&a.Foo`, in the `\$else` of `typ is &Foo`
-	for from in ['b.show_all', 'b.show_ref'] {
+	// and so does y, an `&a.Foo`, in the `\$else` of `typ is &Foo`; d's Foo is c's
+	for from in ['b.show_all', 'b.show_ref', 'd.walk'] {
 		calls := g.edges.filter(it.kind == .calls && it.from == from)
 		assert calls.len == 1 && calls[0].to == 'a.Foo.show', '${from}: ${calls}'
 		assert calls[0].provenance == .comptime, '${from}: ${calls}'

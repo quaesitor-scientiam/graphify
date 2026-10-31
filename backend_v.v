@@ -2268,8 +2268,14 @@ fn (mut f V3File) walk(id flat.NodeId, ctx V3CallCtx, mut edges []Edge, mut seen
 						v := key.all_after(':')
 						neg := if key.starts_with('name:') { '!n:' } else { '!t:' }
 						mut rest_pins := ctx.pins.clone()
+						// a type as the file names it: `Foo` of `import c { Foo }` is `c.Foo`
+						named := if key.starts_with('field:') {
+							f.type_text(recipe[2..])
+						} else {
+							recipe[2..]
+						}
 						rest_pins['kind:' + v] = add_kind(ctx.pins['kind:' + v] or { '' },
-							neg + recipe[2..])
+							neg + named)
 						rest = V3CallCtx{
 							...ctx
 							pins: rest_pins
