@@ -4738,10 +4738,17 @@ fn gen_elems[T](xs []T) {
 	}
 }
 
+fn two[T, U](x T, y U) {
+	\$for field in U.fields {
+		x.\$(field.name).show()
+	}
+}
+
 fn run() {
 	guarded(Box{})
 	guarded(Small{})
 	gen_elems([Box{}])
+	two(Box{}, Small{})
 }
 '
 	})
@@ -4764,8 +4771,10 @@ fn run() {
 	// after the field `a` and the enum, b, g, n, r and l are left
 	assert comptime_of('lib.not_named') == ['lib.Beta.show', 'lib.Epsilon.show', 'lib.[]Alpha.show',
 		'lib.int.show']
-	// x is not of the type the loop walks, so its fields are not the loop's
+	// x is not of the type the loop walks, so its fields are not the loop's, whether x is a
+	// known type or another type parameter than the loop's
 	assert comptime_of('lib.other_loop') == []
+	assert comptime_of('lib.two') == []
 	// the guard keeps the Small instance only, not Box
 	assert comptime_of('lib.guarded') == ['lib.Alpha.show']
 	// an element of an array of the loop's type is of that type, concrete or a type parameter
@@ -4787,6 +4796,11 @@ pub struct S {
 pub:
 	x Foo
 }
+
+pub struct S2 {
+pub:
+	y &Foo
+}
 '
 		'b/b.v': 'module b
 
@@ -4803,15 +4817,28 @@ fn show_all[T](s T) {
 	}
 }
 
+fn show_ref[T](s T) {
+	\$for field in T.fields {
+		\$if field.typ is &Foo {
+		} \$else {
+			s.\$(field.name).show()
+		}
+	}
+}
+
 fn run() {
 	show_all(a.S{})
+	show_ref(a.S2{})
 }
 '
 	})
-	// b's Foo is not a's: the field x is in the `\$else`, so the call reaches a.Foo.show
-	calls := g.edges.filter(it.kind == .calls && it.from == 'b.show_all')
-	assert calls.len == 1 && calls[0].to == 'a.Foo.show', calls.str()
-	assert calls[0].provenance == .comptime, calls.str()
+	// b's Foo is not a's: the field x is in the `\$else`, so the call reaches a.Foo.show,
+	// and so does y, an `&a.Foo`, in the `\$else` of `typ is &Foo`
+	for from in ['b.show_all', 'b.show_ref'] {
+		calls := g.edges.filter(it.kind == .calls && it.from == from)
+		assert calls.len == 1 && calls[0].to == 'a.Foo.show', '${from}: ${calls}'
+		assert calls[0].provenance == .comptime, '${from}: ${calls}'
+	}
 }
 
 fn test_a_field_loops_call_reaches_every_platform_copy_of_the_method() {

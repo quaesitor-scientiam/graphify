@@ -669,7 +669,7 @@ fn field_any_ids(e Edge, caller Symbol, tps []string, instances map[string][]Inf
 				}, 0) or { continue }
 			}
 			id := inf.method_on(recv, e.to, e.file, 0) or {
-				inf.platform_copy_method(recv, e.to) or { continue }
+				inf.platform_copy_method(recv, e.to, e.file) or { continue }
 			}
 			if id !in ids {
 				ids << id
@@ -681,16 +681,19 @@ fn field_any_ids(e Edge, caller Symbol, tps []string, instances map[string][]Inf
 
 // platform_copy_method is one copy of the method `name` of the type `t` when the method is
 // declared once per platform (`main.Doc.close@p_nix.c.v`, `...@p_windows.c.v`), which
-// method_on takes for several methods; variants_of links every copy of it. none when `t`
-// has no such method.
-fn (inf &Infer) platform_copy_method(t InferredType, name string) ?string {
+// method_on takes for several methods; variants_of links every copy of it. Only copies in
+// platform files count, as variants_of groups them, and not one that a `_test.v` file
+// keeps to itself, which `file`, the caller's, can't see (test_private). none when `t` has
+// no such method.
+fn (inf &Infer) platform_copy_method(t InferredType, name string, file string) ?string {
 	named := strip_generic_args(bare_type(t.text))
 	short := named.all_after_last('.')
 	qual := if named.contains('.') { named.all_before_last('.') } else { '' }
 	decl := inf.find_type(short, qual, t, t.file)?
 	want := decl.id + '.' + name
 	for c in inf.by_name[name] or { []CallCand{} } {
-		if c.is_method && c.id.contains('@') && c.id.all_before('@') == want {
+		if c.is_method && c.id.contains('@') && c.id.all_before('@') == want
+			&& is_platform_file(c.file) && !test_private(c.file, file) {
 			return c.id
 		}
 	}
@@ -745,13 +748,28 @@ fn field_kind_holds(fname string, ft InferredType, kinds []string, file string, 
 
 // same_type reports whether a field of type `t` is of the type `want`, written in `file`,
 // as V's `field.typ is want` decides it: on the whole type, so `&Foo`, `?Foo` and
-// `[]Foo` are not `Foo`. A reference, option, array, map or primitive is that type as
-// written; a named type is its declaration, read where each is written. none when that
-// can't be told, such as `[]Foo` against `[]mod.Foo`.
+// `[]Foo` are not `Foo`. The wrapping `&`, `?` and array brackets must match as written
+// (split_type_shape); inside them a primitive is its name, a named type its declaration,
+// read where each side is written, and a map, function or generic instance its text, in
+// one module only. none when that can't be told.
 fn (inf &Infer) same_type(t InferredType, want string, file string) ?bool {
-	raw := t.text.trim_space()
-	w := want.trim_space()
+	// `&`, `?` and the array brackets are compared as written, and the type inside them as
+	// the rest of this function compares a type
+	raw_shape, raw := split_type_shape(t.text)
+	want_shape, w := split_type_shape(want)
+	if raw_shape != want_shape {
+		return false
+	}
+	if raw in primitive_types || w in primitive_types {
+		return raw == w
+	}
+	scope := inf.scope_of[file] or { FileScope{} }
 	if !is_declared_kind(raw) || !is_declared_kind(w) || raw.contains('[') || w.contains('[') {
+		// a map, a function or a generic instance: the same text names the same type only in
+		// one module, since the names inside it are each module's own
+		if t.mod != scope.mod {
+			return none
+		}
 		if raw == w {
 			return true
 		}
@@ -760,19 +778,22 @@ fn (inf &Infer) same_type(t InferredType, want string, file string) ?bool {
 		}
 		return false
 	}
+	t_inner := InferredType{
+		...t
+		text: raw
+	}
 	// `Foo` in the struct's module and `Foo` in the loop's can be two types: each is the
 	// declaration its own file sees, and the same text only when one has none
 	rd := inf.find_type(raw.all_after_last('.'), if raw.contains('.') {
 		raw.all_before_last('.')
 	} else {
 		''
-	}, t, t.file) or {
+	}, t_inner, t.file) or {
 		if raw == w {
 			return true
 		}
 		return none
 	}
-	scope := inf.scope_of[file] or { FileScope{} }
 	wt := InferredType{
 		text: w
 		mod:  scope.mod
@@ -789,6 +810,27 @@ fn (inf &Infer) same_type(t InferredType, want string, file string) ?bool {
 		return none
 	}
 	return rd.id == wd.id
+}
+
+// split_type_shape splits a type text into what wraps a named type, its leading `&`, `?`
+// and `!` and array brackets (`[]`, `[4]`), and the type inside: `&[]Foo` is `&[]` and
+// `Foo`. A map, a function or a generic instance stays whole inside.
+fn split_type_shape(text string) (string, string) {
+	mut s := text.trim_space()
+	mut shape := ''
+	for s.len > 0 {
+		if s[0] in [`&`, `?`, `!`] {
+			shape += s[..1]
+			s = s[1..].trim_space()
+		} else if s.starts_with('[') {
+			end := s.index(']') or { break }
+			shape += s[..end + 1]
+			s = s[end + 1..]
+		} else {
+			break
+		}
+	}
+	return shape, s
 }
 
 // names_same_type reports whether `t`, a receiver's type, is the type `loop` that a

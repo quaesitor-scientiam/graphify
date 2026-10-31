@@ -468,7 +468,9 @@ backend_v.v) carrying what the enclosing `$if`s narrow the field to
 `field.typ is $kind` the type as declared; `field.is_option` the option; a leading `!`
 negates. Each `$else` branch takes the negation, and the `$else` after a
 `$if field.typ is X` or `$if field.name == 'x'` leaves out that type or field; the type
-is compared whole, as V does, so an `&X`, `?X` or `[]X` field stays in the `$else`.
+is compared whole, as V does, so an `&X`, `?X` or `[]X` field stays in the `$else`,
+and a named type by its declaration on each side (a map or generic-instance field
+declared in another module than the loop is undecided, and kept).
 x may be any receiver whose recipe follows to the loop's type, such as an element of
 an array of it.
 `expand_type_param_calls` links the call to the method on every field type the
