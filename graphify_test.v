@@ -4509,6 +4509,87 @@ fn run(j Job, conv fn (int) int) int {
 	assert g.explain('app.Job.on_done').contains('run')
 }
 
+fn test_calls_through_constants_holding_functions_resolve() {
+	// a call of a constant that holds a function resolves to that constant, from its own
+	// file or an imported module; a method call never does, even when a constant of that
+	// name exists
+	g := graph_of({
+		'lib/lib.v':  'module lib
+
+pub fn once(x int) int {
+	return x
+}
+
+pub const f = once
+pub const size = 16
+
+pub struct Box {
+pub:
+	n int
+}
+'
+		'app/main.v': 'module main
+
+import lib
+
+const tdivider = lib.once
+
+fn run() int {
+	return tdivider(1) + lib.f(2)
+}
+
+fn run_method(b lib.Box) int {
+	return b.size()
+}
+
+const count = 3
+
+fn run_count() int {
+	return count(1)
+}
+'
+	})
+	run := g.edges.filter(it.kind == .calls && it.from == 'app.run')
+	assert run.any(it.to == 'app.tdivider'), run.str()
+	assert run.any(it.to == 'lib.f'), run.str()
+	assert !g.edges.any(it.from == 'app.run_method' && it.to == 'lib.size'), g.edges.str()
+	// `count` holds an int, so `count(1)` is a call of some function, never of the constant
+	assert !g.edges.any(it.from == 'app.run_count' && it.to == 'app.count'), g.edges.str()
+}
+
+fn test_constants_are_callees_only_where_visible_and_no_function_takes_the_name() {
+	g := graph_of({
+		'lib/lib.v':  'module lib
+
+pub fn once(x int) int {
+	return x
+}
+
+pub const helper = once
+pub const abc = once
+'
+		'app/main.v': 'module main
+
+fn abc() int {
+	return 1
+}
+
+fn run_helper() int {
+	return helper(2)
+}
+
+fn run_abc() int {
+	return abc()
+}
+'
+	})
+	// app does not import lib, so lib's `helper` is not what `helper(2)` calls
+	assert !g.edges.any(it.from == 'app.run_helper' && it.to == 'lib.helper'), g.edges.str()
+	// app's own `abc` function takes the call, not the constant of that name in lib
+	assert g.edges.any(it.from == 'app.run_abc' && it.to == 'app.abc'), g.edges.str()
+	assert !g.edges.any(it.from == 'app.run_abc' && it.to == 'lib.abc'), g.edges.str()
+}
+
 fn test_stale_note() {
 	dir := os.join_path(os.temp_dir(), 'graphify_stale_${os.getpid()}')
 	os.rmdir_all(dir) or {}
