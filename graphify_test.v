@@ -4471,6 +4471,39 @@ fn run(b lib.Box) {
 	assert !g.explain('lib.cb').contains('possibly called by')
 }
 
+fn test_free_on_a_type_with_no_free_method_is_the_builtin_free() {
+	g := graph_of({
+		'lib/lib.v': 'module lib
+
+pub struct Plain {
+	a int
+}
+
+pub struct Owned {
+	a int
+}
+
+pub fn (o Owned) free() {
+}
+'
+		'app/main.v': 'module main
+
+import lib
+
+fn run(p lib.Plain, o lib.Owned) {
+	p.free()
+	o.free()
+}
+'
+	})
+	run := g.edges.filter(it.kind == .calls && it.from == 'app.run')
+	// `Plain` declares no free, so `p.free()` is the builtin one V provides for any value
+	plain := run.filter(it.to == 'free')
+	assert plain.len == 1 && plain[0].provenance == .undeclared
+	// `Owned` declares its own, which the call resolves to
+	assert run.any(it.to == 'lib.Owned.free')
+}
+
 fn test_index_leaves_undeclared_calls_unresolved() {
 	// `conv` and `on_done` are each declared exactly once, so a bare-name
 	// match would resolve the undeclared calls to them

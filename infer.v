@@ -215,6 +215,27 @@ fn (mut inf Infer) receiver(e Edge) ?InferredType {
 	return none
 }
 
+// is_builtin_free reports whether a `free()` on `t` can only be V's builtin: an array or
+// map, or a named type this graph declares itself, not through an alias, a generic
+// parameter or a C type, whose methods method_on might have missed.
+fn (inf &Infer) is_builtin_free(t InferredType, file string) bool {
+	text := bare_type(t.text)
+	if text.starts_with('[') || text.starts_with('map[') {
+		return true
+	}
+	if !is_named_type(text) {
+		return false
+	}
+	named := strip_generic_args(text)
+	short := named.all_after_last('.')
+	qual := if named.contains('.') { named.all_before_last('.') } else { '' }
+	if is_generic_param(short) {
+		return false
+	}
+	decl := inf.find_type(short, qual, t, file) or { return false }
+	return decl.id !in inf.alias_of
+}
+
 // no_method explains a call of `name` on `t` that matched no method: the id
 // of the function-typed field it calls, or '' for a method V provides without
 // declaring it (`thread.wait()`, a compiler-provided array method). none
@@ -250,6 +271,12 @@ fn (inf &Infer) no_method(t InferredType, name string, file string) ?string {
 				}
 			}
 		}
+	}
+	// `free()` that no method of the type declares is V's builtin free, which frees any
+	// value it is given (fn.v's free handling), unless the type has a field of that name
+	if name == 'free' && inf.is_builtin_free(t, file)
+		&& (inf.field_of(t, name, file, 0) or { InferredType{} }).field_id == '' {
+		return ''
 	}
 	ft := inf.field_of(t, name, file, 0)?
 	if ft.field_id == '' {
