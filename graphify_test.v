@@ -4590,6 +4590,85 @@ fn run_abc() int {
 	assert !g.edges.any(it.from == 'app.run_abc' && it.to == 'lib.abc'), g.edges.str()
 }
 
+fn test_a_field_promoted_through_an_embedded_pointer_with_a_default_is_typed() {
+	// `Alias` embeds `AliasDataRef` with a default, `AliasDataRef = empty_alias_data`, so
+	// `base_type` is promoted from `AliasData`; reading it through a narrowed variable
+	// types the call on it
+	g := graph_of({
+		'types/type.v': 'module types
+
+pub type Type = Alias | Struct
+
+pub struct Struct {
+pub:
+	id u32
+}
+
+pub struct Alias {
+	AliasDataRef = empty_alias_data
+}
+
+const empty_alias_data = &AliasData{}
+
+pub type AliasDataRef = &AliasData
+
+pub struct AliasData {
+pub:
+	base_type &Type
+}
+
+pub fn (t &Type) source_type_id() u32 {
+	return 1
+}
+
+pub fn (value Struct) source_type_id() u32 {
+	return 2
+}
+'
+		'app/main.v': 'module main
+
+import types
+
+fn pick(actual &types.Type) u32 {
+	if actual is types.Alias {
+		c := actual.base_type
+		return c.source_type_id()
+	}
+	return 0
+}
+'
+	})
+	calls := g.edges.filter(it.kind == .calls && it.from == 'app.pick')
+	assert calls.any(it.to == 'types.Type.source_type_id'), calls.str()
+}
+
+fn test_an_embedded_default_keeps_the_calls_in_it() {
+	// `BaseRef = make_base()` embeds `BaseRef`, and its default's call is still made from
+	// the field, as it was before the embed was recorded
+	g := graph_of({
+		'app/app.v': 'module app
+
+pub struct Base {
+pub:
+	id int
+}
+
+pub type BaseRef = &Base
+
+pub fn make_base() &Base {
+	return &Base{}
+}
+
+pub struct Holder {
+	BaseRef = make_base()
+	extra   int
+}
+'
+	})
+	assert g.edges.any(it.from == 'app.Holder' && it.kind == .embeds && it.to == 'app.BaseRef'), g.edges.str()
+	assert g.edges.any(it.from == 'app.Holder.BaseRef' && it.kind == .calls && it.to == 'app.make_base'), g.edges.str()
+}
+
 fn test_stale_note() {
 	dir := os.join_path(os.temp_dir(), 'graphify_stale_${os.getpid()}')
 	os.rmdir_all(dir) or {}
