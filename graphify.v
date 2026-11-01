@@ -1094,7 +1094,8 @@ fn resolve_edges(mut g Graph) {
 		// `numberfns map[string]fn () int`
 		if (s.kind == .constant && !s.recipe.starts_with('t:'))
 			|| (s.kind == .global && (!s.recipe.starts_with('t:')
-			|| container_elem(s.recipe[2..]).starts_with('fn'))) {
+			|| container_elem(s.recipe[2..]).starts_with('fn ')
+			|| container_elem(s.recipe[2..]).starts_with('fn('))) {
 			const_calls[s.name] << CallCand{
 				id:   s.id
 				mod:  s.parent
@@ -1926,7 +1927,9 @@ fn resolve_callee(e Edge, by_name map[string][]CallCand, site_of map[string]Decl
 		mut same_mod := []CallCand{}
 		for c in narrowed {
 			if c.mod == caller.mod && !test_private(c.file, caller.file)
-				&& caller.sees_in_module(c.file, (site_of[c.id] or { DeclSite{} }).is_main) {
+				&& caller.sees_in_module(c.file, (site_of[site_key(c.id, c.file)] or {
+				site_of[c.id] or { DeclSite{} }
+			}).is_main) {
 				same_mod << c
 			}
 		}

@@ -3268,19 +3268,24 @@ fn test_a_module_main_test_sees_its_directorys_main_consts_by_their_own_file() {
 	// another module, a sibling test's declarations are its own (`b_test.c.v` too),
 	// and a program file, which is no test, sees no sibling program's const.
 	g := graph_of({
-		'vlib/q/a.v':             'module q\n\npub struct LimitX {}\n\npub fn (l LimitX) check() {}\n\nfn new_limit() LimitX {\n\treturn LimitX{}\n}\n\nconst limit = new_limit()\n'
-		'vlib/q/helper.v':        'module main\n\nstruct Limit {}\n\nfn (l Limit) check() {}\n\nconst limit = Limit{}\n'
-		'vlib/q/q_test.v':        'module main\n\nfn test_q() {\n\tlimit.check()\n\thelper2()\n}\n'
+		// helper.v comes first, so the shared ids' site_of entries are a.v's
+		'vlib/q/helper.v':        'module main\n\nstruct Limit {}\n\nfn (l Limit) check() {}\n\nconst limit = Limit{}\n\nfn make_b() fn () {\n\treturn fn () {}\n}\n\nconst run = make_b()\n\n\$if windows {\n\tfn plat() {}\n} \$else {\n\tfn plat() {}\n}\n'
+		'vlib/q/a.v':             'module q\n\npub struct LimitX {}\n\npub fn (l LimitX) check() {}\n\nfn new_limit() LimitX {\n\treturn LimitX{}\n}\n\nconst limit = new_limit()\n\nfn make_a() fn () {\n\treturn fn () {}\n}\n\nconst run = make_a()\n'
+		'vlib/q/q_test.v':        'module main\n\nfn test_q() {\n\tlimit.check()\n\thelper2()\n\trun()\n\tplat()\n}\n'
 		'vlib/q/b_test.c.v':      'module main\n\nfn helper2() {}\n\nfn test_b() {}\n'
 		'vlib/crypto/md5/md5.v':  'module md5\n\npub struct Key {}\n\npub fn (k Key) check() {}\n\npub const key = Key{}\n'
 		'vlib/crypto/md5/md5_test.v': 'module main\n\nfn test_key() {\n\tkey.check()\n}\n'
 		'examples/tools/a.v':     'module main\n\nstruct Pot {}\n\nfn (p Pot) check() {}\n\nconst pot = Pot{}\n'
 		'examples/tools/b.v':     'module main\n\nfn other() {\n\tpot.check()\n}\n'
-		'vlib/y/y.v':             'module y\n\npub struct Decoy {}\n\npub fn (d Decoy) check() {}\n\npub fn helper2() {}\n'
+		'vlib/y/y.v':             'module y\n\npub struct Decoy {}\n\npub fn (d Decoy) check() {}\n\npub fn helper2() {}\n\npub fn plat() {}\n'
 	})
 	calls := g.edges.filter(it.kind == .calls)
 	q := calls.filter(it.from == 'vlib.q.test_q').map(it.to)
 	assert 'vlib.q.Limit.check' in q, q.str()
+	// a const holding a function, called, and a function declared once per build
+	// branch, whose id site_of keeps only per file
+	assert 'vlib.q.run' in q, q.str()
+	assert q.any(it.starts_with('vlib.q.plat')), q.str()
 	assert 'vlib.q.LimitX.check' !in q, q.str()
 	assert 'helper2' in q, q.str()
 	key := calls.filter(it.from == 'vlib.crypto.md5.test_key').map(it.to)
@@ -5417,18 +5422,26 @@ fn test_a_call_of_a_function_taken_from_an_array_or_map_is_linked_to_its_holder(
 	// global map holds: the field and the global are the declarations there are, as for
 	// `s.on_running(x)`, not some `list` method or `fns` function of another module
 	g := graph_of({
-		'lib/m/m.v':         'module m\n\nstruct Handlers {\n\tlist  []fn (int)\n\tnamed map[string][]fn (int)\n}\n\n__global fns map[string]fn () int\n\n__global count map[string]int\n\n__global made = make_fn()\n\nfn make_fn() fn () {\n\treturn fn () {}\n}\n\nfn (h Handlers) run(i int) {\n\th.list[i](1)\n\th.named[\'a\'][0](2)\n\t_ := fns[\'a\']()\n\tmade()\n\tcount()\n}\n'
-		'lib/other/other.v': 'module other\n\npub struct S {}\n\npub fn (s S) list() {}\n\npub fn (s S) named() {}\n'
+		'lib/m/m.v':         'module m\n\nstruct Handlers {\n\tlist  []fn (int)\n\tnamed map[string]fn (int)\n\tdeep  map[string][]fn (int)\n}\n\n__global fns map[string]fn () int\n\n__global count map[string]int\n\n__global made = make_fn()\n\nfn make_fn() fn () {\n\treturn fn () {}\n}\n\nfn (h Handlers) run(i int) {\n\th.list[i](1)\n\th.named[\'a\'](2)\n\th.deep[\'a\'][0](3)\n\t_ := fns[\'a\']()\n\tmade()\n\tcount()\n}\n'
+		'lib/other/other.v': 'module other\n\npub struct S {}\n\npub fn (s S) list() {}\n\npub fn (s S) named() {}\n\npub fn (s S) deep() {}\n'
 		'lib/other/two.v':   'module other\n\npub struct T {}\n\npub fn (t T) list() {}\n\npub fn (t T) named() {}\n'
 	})
 	calls := g.edges.filter(it.kind == .calls && it.from == 'lib.m.Handlers.run').map(it.to)
 	assert 'lib.m.Handlers.list' in calls, calls.str()
 	assert 'lib.m.Handlers.named' in calls, calls.str()
+	// a deeper index names nothing, so the only `deep` method is never what it calls
+	assert !calls.any(it.contains('deep')), calls.str()
 	assert 'lib.m.fns' in calls, calls.str()
 	// a global with no stated type is called as a const is; one whose stated type holds
 	// no function is never what a call names
 	assert 'lib.m.made' in calls, calls.str()
 	assert 'lib.m.count' !in calls, calls.str()
+	// a global whose type only starts with the letters `fn` holds no function
+	k := graph_of({
+		'lib/k/k.v':        'module k\n\nimport fnv1a\n\n__global h fnv1a.Sum\n\nfn use() {\n\th()\n}\n'
+		'lib/fnv1a/sum.v':  'module fnv1a\n\npub struct Sum {}\n'
+	})
+	assert !k.edges.any(it.kind == .calls && it.from == 'lib.k.use' && it.to == 'lib.k.h'), k.edges.str()
 	// container_elem looks through every array, fixed array and map
 	assert container_elem('map[string][]fn (int)') == 'fn (int)'
 	assert container_elem('[3]map[int]string') == 'string'
@@ -7517,6 +7530,18 @@ pub const host = \$if linux {
 	int(3)
 }
 
+pub const fast = \$if prod {
+	node.Node{}
+} \$else {
+	int(3)
+}
+
+pub const negated = \$if !cross ? {
+	node.Node{}
+} \$else {
+	int(3)
+}
+
 pub fn f() string {
 	return limit.str()
 }
@@ -7524,8 +7549,21 @@ pub fn f() string {
 pub fn g() string {
 	return host.str()
 }
+
+pub fn p() string {
+	return fast.str()
+}
+
+pub fn q() string {
+	return negated.str()
+}
 '
 	})
+	// `prod` needs `-prod`, as an option_terms name, so the default build's value is
+	// the `\$else`'s; `!cross ?` holds by default, so its branches differ in a build
+	// the host picks and the value stays untyped
+	assert g.edges.any(it.kind == .calls && it.from == 'lib.p' && it.to == 'vlib.builtin.int.str'), g.edges.filter(it.from == 'lib.p').str()
+	assert !g.edges.any(it.kind == .calls && it.from == 'lib.q' && it.to in ['vlib.builtin.int.str', 'node.Node.str']), g.edges.filter(it.from == 'lib.q').str()
 	assert g.edges.any(it.kind == .calls && it.from == 'lib.f' && it.to == 'vlib.builtin.int.str'), g.edges.map(it.to).str()
 	// the option's branch is a Node, so taking it would give Node.str
 	assert !g.edges.any(it.kind == .calls && it.from == 'lib.f' && it.to == 'node.Node.str')
@@ -8770,13 +8808,18 @@ fn test_a_method_v_provides_on_an_array_of_functions_or_a_literal_is_undeclared(
 	// `[a, b]` holds functions, so it is an array, and `index`, `contains` and
 	// `to_fixed_size` are methods V writes for it rather than any declared `index`
 	g := graph_of({
-		'lib/m/m.v':          'module m\n\nfn a() {}\n\nfn b() {}\n\nfn probe() {\n\tfa := [a, b]\n\t_ := fa.index(b)\n\tff := [a, b]!\n\t_ := ff.contains(a)\n\t_ := [1, 2].to_fixed_size()\n}\n'
+		'lib/m/m.v':          'module m\n\nfn a() {}\n\nfn b() {}\n\nfn probe() {\n\tfa := [a, b]\n\t_ := fa.index(b)\n\tff := [a, b]!\n\t_ := ff.contains(a)\n\t_ := [1, 2].to_fixed_size()\n}\n\nfn probe2() {\n\tys := [nope_a, nope_b]\n\t_ := ys.index(1)\n}\n'
 		'lib/other/other.v':  'module other\n\npub struct S {}\n\npub fn (s S) index(x int) int {\n\treturn x\n}\n\npub fn (s S) contains(x int) bool {\n\treturn true\n}\n\npub fn (s S) to_fixed_size() int {\n\treturn 0\n}\n'
 		'lib/other/other2.v': 'module other\n\npub struct T {}\n\npub fn (t T) index(x int) int {\n\treturn x\n}\n\npub fn (t T) contains(x int) bool {\n\treturn true\n}\n\npub fn (t T) to_fixed_size() int {\n\treturn 0\n}\n'
 	})
 	calls := g.edges.filter(it.kind == .calls && it.from == 'lib.m.probe' && it.to in ['index', 'contains', 'to_fixed_size'])
 	assert calls.len == 3, calls.str()
 	assert calls.all(it.provenance == .undeclared), calls.str()
+	// names that reach no function are no functions, so `ys` is untyped and its
+	// `index` is left to name matching, which the two declared `index` methods leave
+	// ambiguous
+	p2 := g.edges.filter(it.kind == .calls && it.from == 'lib.m.probe2' && it.to == 'index')
+	assert p2.len == 1 && p2[0].provenance != .undeclared, p2.str()
 }
 
 // `__addr(x)` and `__v3_isreftype(x)` are compiler forms that V lowers, so the calls keep no edge at all: they are not calls into the program.

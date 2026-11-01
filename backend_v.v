@@ -3419,8 +3419,9 @@ fn (f &V3File) last_value(id flat.NodeId, ctx V3CallCtx) string {
 fn (f &V3File) callee(callee_id flat.NodeId, ctx V3CallCtx) (string, bool, flat.NodeId) {
 	mut cid := callee_id
 	// a generic call, `f[int](x)`, or a call of a function an array or map holds,
-	// `h.named['a'][0](x)`, named by what is indexed
-	for f.node(cid).kind == .index {
+	// `h.list[i](x)`, named by what is indexed. One level only: a deeper index on a
+	// receiver the walk can't type would reach name matching as a method call
+	if f.node(cid).kind == .index {
 		ks := f.kids(cid)
 		if ks.len == 0 {
 			return '', false, flat.NodeId(-1)

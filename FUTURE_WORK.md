@@ -520,18 +520,22 @@ vlang `aba4d07278`, five causes with a fix of their own:
   and qualifying it with the import breaks a static call of a module whose directory
   has another name (`import zmod_foo { Foo }`), so the graph would need each file's
   selective names kept beside the call.
-- A call of a function an array or map holds, `h.list[i](x)` or `h.named['a'][0](x)`,
-  is named by the field, and linked to it (`container_elem`, in infer.v), as a call
-  through a function-typed field is. A global whose type holds functions
-  (`numberfns map[string]fn () int`), or that has no stated type, is called as a
-  constant is (7 calls). The arena hooks, `__global g_arena_alloc_hook fn (...)`, are
+- A call of a function an array or map holds, `h.list[i](x)`, is named by the field,
+  and linked to it (`container_elem`, in infer.v), as a call through a function-typed
+  field is. A deeper index, `h.named['a'][0](x)`, still names nothing: on a receiver
+  the walk can't type, the field's name would reach name matching as a method call.
+  A global whose type holds functions (`numberfns map[string]fn () int`), or that
+  has no stated type, is called as a constant is (7 calls). A global typed by a
+  named function type (`__global on_tick Hook`) is not, as resolve_edges doesn't
+  look the alias up. The arena hooks, `__global g_arena_alloc_hook fn (...)`, are
   such globals, so their 10 calls link to them instead of being undeclared.
 - vlib/builtin's `max_int` gained `$if cross ? { portable_max_int() }`, so its
-  branches' recipes differ. A branch only a `-d` option selects is not the default
+  branches' recipes differ. A branch only a command-line option selects (a `-d` flag,
+  or an `option_terms` name such as `prod`, `test` or `js`) is not the default
   build's (`default_term`), and the value is the rest's (4 calls, plus one in veb
   that had linked to `Middleware[T].str`).
 
-Unresolved calls go from 220 to 183 and undeclared from 4,716 to 4,711; no resolved
+Unresolved calls go from 220 to 183 and undeclared from 4,716 to 4,710; no resolved
 call is lost. One call changes target, from `options.named` in another test module to
 the `Handlers.named` field it calls.
 
