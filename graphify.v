@@ -735,6 +735,33 @@ fn visible_from(mod string, caller DeclSite, imports []string) bool {
 	return mod == caller.mod && (!caller.is_main || caller.solo)
 }
 
+// sees_in_module reports whether a caller at this site sees a declaration of its own
+// module (directory) at `decl`: always outside a standalone program; in one, when its
+// `main` module is one program (solo), or when the caller is a test in a directory
+// with no `fn main` and `decl` is in a `module main` file, as V builds such a test
+// with the directory's `module main` files (common.v beside vlib/wasm/tests/*_test.v),
+// not with a file of another module there (md5.v beside md5_test.v). Another test
+// file's declarations stay private to it (test_private).
+fn (site DeclSite) sees_in_module(decl DeclSite) bool {
+	return !site.is_main || site.solo || (site.no_main && is_test_file(site.file) && decl.is_main)
+}
+
+// generated_enum_mod is the module of the enum a static call names (`MyEnum` or
+// `mod.MyEnum` of `MyEnum.from_string(s)`), from a caller at `site`: with a
+// qualifier, which a selective import (`import mod { MyEnum }`) gives too (callee,
+// in backend_v.v), the one module of `mods` (those declaring an enum of that name)
+// it reaches; without, the caller's own module when it declares one. '' when no
+// module, or more than one, fits.
+fn generated_enum_mod(typ_text string, site DeclSite, enum_names map[string]bool, mods []string) string {
+	typ := typ_text.all_after_last('.')
+	if !typ_text.contains('.') {
+		return if enum_names[site.mod + '\x00' + typ] { site.mod } else { '' }
+	}
+	qual := typ_text.all_before_last('.')
+	fits := mods.filter(import_reaches(it, qual))
+	return if fits.len == 1 { fits[0] } else { '' }
+}
+
 fn disambiguate_ids(mut g Graph) {
 	kinds := [SymbolKind.function, .method, .struct_, .enum_, .interface_, .type_alias]
 	mains := main_unit_files(g)
@@ -962,6 +989,8 @@ fn resolve_edges(mut g Graph) {
 	// enum_names holds each enum by module and name, to recognise V's own zero()
 	// on a flag enum (see below).
 	mut enum_names := map[string]bool{}
+	// enum_mods holds the modules that declare an enum of each name
+	mut enum_mods := map[string][]string{}
 	// flag_here says whether an enum is a @[flag] one, in its own file; flag_in_mod says
 	// whether every enum of that name in a module is (see is_flag_enum)
 	mut flag_here := map[string]bool{}
@@ -980,6 +1009,9 @@ fn resolve_edges(mut g Graph) {
 		}
 		if s.kind == .enum_ {
 			enum_names[s.parent + '\x00' + s.name] = true
+			if s.parent !in enum_mods[s.name] {
+				enum_mods[s.name] << s.parent
+			}
 			flagged := s.signature.starts_with('@[flag]')
 			flag_here[s.parent + '\x00' + s.name + '\x00' + s.file] = flagged
 			flag_in_mod[s.parent + '\x00' + s.name] = (flag_in_mod[s.parent + '\x00' + s.name] or { true }) && flagged
@@ -1045,7 +1077,12 @@ fn resolve_edges(mut g Graph) {
 		}
 		// a constant of a literal's type (`const sys_write = 1`, recipe `t:int`) is no
 		// function, so a call of its name is some other function's
-		if s.kind == .constant && !s.recipe.starts_with('t:') {
+		// A global is called the same way, and one declared with a type is called only
+		// when that type holds functions, `numberfns['two']()` on
+		// `numberfns map[string]fn () int`
+		if (s.kind == .constant && !s.recipe.starts_with('t:'))
+			|| (s.kind == .global && (!s.recipe.starts_with('t:')
+			|| container_elem(s.recipe[2..]).starts_with('fn'))) {
 			const_calls[s.name] << CallCand{
 				id:   s.id
 				mod:  s.parent
@@ -1516,13 +1553,16 @@ fn resolve_edges(mut g Graph) {
 		if e.kind == .calls && (e.to.ends_with('__static__zero') || e.to.ends_with('__static__from')
 			|| e.to.ends_with('__static__from_string')) {
 			// V generates `T.zero()` for a @[flag] enum T, and `T.from(x)` and
-			// `T.from_string(s)` for every enum T. A call of one of them, to an enum T in
-			// the caller's module that declares no method of that name, is one V provides.
+			// `T.from_string(s)` for every enum T. A call of one of them, to an enum T
+			// that declares no method of that name, is one V provides. T is the caller's
+			// module's, or the one module its qualifier or a selective import names
+			// (`mod.MyEnum.from_string`), see generated_enum_mod.
 			if site := caller_site(e, site_of) {
-				mod := site.mod
-				typ := e.to.all_before('__static__')
+				typ_text := e.to.all_before('__static__')
+				typ := typ_text.all_after_last('.')
 				method := e.to.all_after('__static__')
-				if enum_names[mod + '\x00' + typ] && '${mod}.${typ}.${method}' !in sym_ids
+				mod := generated_enum_mod(typ_text, site, enum_names, enum_mods[typ] or { []string{} })
+				if mod != '' && '${mod}.${typ}.${method}' !in sym_ids
 					&& (method != 'zero' || (flag_here[mod + '\x00' + typ + '\x00' + site.file] or { flag_in_mod[mod + '\x00' + typ] or { false } })) {
 					resolved << Edge{...e, provenance: .undeclared}
 					continue
@@ -1870,10 +1910,11 @@ fn resolve_callee(e Edge, by_name map[string][]CallCand, site_of map[string]Decl
 	// module of every standalone program, so a repo can contain thousands of
 	// mutually unrelated `main` files; matching on it links programs that have
 	// nothing to do with each other.
-	if caller.mod != '' && (!caller.is_main || caller.solo) {
+	if caller.mod != '' && (!caller.is_main || caller.solo || caller.no_main) {
 		mut same_mod := []CallCand{}
 		for c in narrowed {
-			if c.mod == caller.mod && !test_private(c.file, caller.file) {
+			if c.mod == caller.mod && !test_private(c.file, caller.file)
+				&& caller.sees_in_module(site_of[c.id] or { DeclSite{} }) {
 				same_mod << c
 			}
 		}

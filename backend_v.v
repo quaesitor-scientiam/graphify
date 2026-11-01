@@ -2886,16 +2886,26 @@ fn (f &V3File) recipe(id flat.NodeId, ctx V3CallCtx) string {
 		}
 		.comptime_if {
 			// `$if c { a } $else { b }` as a value, as vlib/builtin's max_int is: V keeps
-			// one branch, so the value has the type of both when they agree, else none
+			// one branch, so the value has the type of both when they agree. When they
+			// don't, a branch that only an option on the command line selects
+			// (`$if cross ? { portable_max_int() }`) is not the default build's, so the
+			// value is the rest's; else none
 			mut r := ''
 			for k in kids {
 				br := f.recipe(k, ctx)
 				if br == '' || (r != '' && br != r) {
-					return ''
+					r = ''
+					break
 				}
 				r = br
 			}
-			return r
+			if r != '' {
+				return r
+			}
+			if kids.len == 2 && !default_term(f.build_cond(n)) {
+				return f.recipe(kids[1], ctx)
+			}
+			return ''
 		}
 		.block {
 			// `unsafe { x }`: the value of its last expression
@@ -3414,8 +3424,9 @@ fn (f &V3File) last_value(id flat.NodeId, ctx V3CallCtx) string {
 // method `x.foo()` as `foo`, with the receiver expression `x`.
 fn (f &V3File) callee(callee_id flat.NodeId, ctx V3CallCtx) (string, bool, flat.NodeId) {
 	mut cid := callee_id
-	if f.node(cid).kind == .index {
-		// a generic call, `f[int](x)`
+	// a generic call, `f[int](x)`, or a call of a function an array or map holds,
+	// `h.named['a'][0](x)`, named by what is indexed
+	for f.node(cid).kind == .index {
 		ks := f.kids(cid)
 		if ks.len == 0 {
 			return '', false, flat.NodeId(-1)
@@ -3462,6 +3473,11 @@ fn (f &V3File) callee(callee_id flat.NodeId, ctx V3CallCtx) (string, bool, flat.
 	}
 	if target.kind == .ident && target.value_text().len > 0 && target.value_text()[0].is_capital()
 		&& target.value_text() !in ctx.locals {
+		// a type a selective import names, `Kind` of `import mod { Kind }`, is that module's
+		// (`mod.Kind__static__from_string`), as a function it names is
+		if mod := f.selected[target.value_text()] {
+			return '${mod}.${target.value_text()}__static__${c.value_text()}', false, flat.NodeId(-1)
+		}
 		return '${target.value_text()}__static__${c.value_text()}', false, flat.NodeId(-1)
 	}
 	// a static member of a JS binding, `JS.Promise.race(p)` or `JS.Array.prototype.constructor()`,

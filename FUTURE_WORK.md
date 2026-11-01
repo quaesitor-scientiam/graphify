@@ -496,6 +496,41 @@ graphify built before this change rejects when it loads the graph (x.json2 refus
 enum value it doesn't know); a running MCP server of that build keeps serving the graph
 it had until it restarts.
 
+**Five causes of unresolved calls (November 2026).** Of the 220 unresolved calls on
+vlang `aba4d07278`, five causes with a fix of their own:
+
+- `import arrays` in vlib/v/tests named vlib/v/tests/arrays, a directory holding one
+  test. A module needs a .v file other than a test (`has_v_sources`, in
+  backend_common.v), so it is vlib's arrays (10 calls).
+- V builds a `module main` test with the `module main` files of its directory
+  (`expand_single_test_file_inputs` in V's driver), so a test in a directory with no
+  `fn main` sees them (`sees_in_module`, in graphify.v, and `find_const`): `validate`
+  in vlib/wasm/tests/common.v (9 calls). A file of another module in the directory,
+  md5.v beside md5_test.v, stays unseen. A test with no `module` line is built alone
+  by V, which the graph doesn't tell apart, so it sees them too.
+- `T.from_string()` is V's for an enum T named through its module (`mod.MyEnum`) or a
+  selective import (`import mod { MyEnum }`), which the call is now qualified with
+  (`callee`, in backend_v.v; `generated_enum_mod`, in graphify.v). Where the import
+  names no module of the tree (`import zmod_foo { Foo }` of a directory with another
+  name), a static call falls back to its bare name, as before. A function named as a
+  value is a function (`named_fn_type`, in infer.v), so `[a, b].index(b)` is an
+  array's, and `to_fixed_size()` is a method V provides (9 calls, 3 of them now
+  linked to builtin's `array.index` and `array.contains`).
+- A call of a function an array or map holds, `h.list[i](x)` or `h.named['a'][0](x)`,
+  is named by the field, and linked to it (`container_elem`, in infer.v), as a call
+  through a function-typed field is. A global whose type holds functions
+  (`numberfns map[string]fn () int`), or that has no stated type, is called as a
+  constant is (7 calls). The arena hooks, `__global g_arena_alloc_hook fn (...)`, are
+  such globals, so their 10 calls link to them instead of being undeclared.
+- vlib/builtin's `max_int` gained `$if cross ? { portable_max_int() }`, so its
+  branches' recipes differ. A branch only a `-d` option selects is not the default
+  build's (`default_term`), and the value is the rest's (4 calls, plus one in veb
+  that had linked to `Middleware[T].str`).
+
+Unresolved calls go from 220 to 181 and undeclared from 4,716 to 4,712; no resolved
+call is lost. One call changes target, from `options.named` in another test module to
+the `Handlers.named` field it calls.
+
 The raw edge is retained and `explain` reports ambiguous callers rather than
 inventing links. A future opt-in deep mode could run the checker over a whole
 project, but given the small remainder, it would need to address these

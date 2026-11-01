@@ -290,10 +290,13 @@ fn declares_module(dir string, name string) bool {
 	return false
 }
 
+// has_v_sources reports whether `dir` holds a .v file other than a test, which a
+// module needs: a directory of tests alone, such as vlib/v/tests/arrays, is no module
+// to import, and `import arrays` beside it is vlib's.
 fn has_v_sources(dir string) bool {
 	if !os.is_dir(dir) {
 		return false
 	}
 	entries := os.ls(dir) or { return false }
-	return entries.any(it.ends_with('.v'))
+	return entries.any(it.ends_with('.v') && !is_test_file(it))
 }

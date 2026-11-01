@@ -73,7 +73,7 @@ const array_elem_methods = ['first', 'last', 'pop', 'pop_left']
 // some of them, and a call of one it doesn't declare is `undeclared`.
 const array_builtins = ['filter', 'map', 'any', 'all', 'count', 'sort', 'sorted', 'sort_with_compare',
 	'sorted_with_compare', 'contains', 'index', 'last_index', 'wait', 'first', 'last', 'pop',
-	'reverse', 'clone']
+	'reverse', 'clone', 'to_fixed_size']
 
 // flag_enum_methods are the methods V provides for a `@[flag]` enum, as
 // cgen's is_flag_enum_method lists them.
@@ -107,7 +107,27 @@ fn (mut inf Infer) infer_call(e Edge) ?CallResolution {
 		if r := resolve_qualified_callee(e, inf.by_name, inf.site_of, inf.scope_of) {
 			return r
 		}
-		return resolve_qualified_callee(e, inf.const_calls, inf.site_of, inf.scope_of)
+		if r := resolve_qualified_callee(e, inf.const_calls, inf.site_of, inf.scope_of) {
+			return r
+		}
+		// a static call through a selective import is qualified with the import as
+		// written (callee, in backend_v.v), which names no module when the module's
+		// directory has another name (`import zmod_foo { Foo }` of a directory
+		// project_issue_21476): then it is the bare `Foo.new()` it was written as
+		if e.to.contains('__static__') && !e.to.starts_with('C.') {
+			prefix := e.to.all_before_last('.')
+			mut known := false
+			for _, scope in inf.scope_of {
+				if import_reaches(scope.mod, prefix) {
+					known = true
+					break
+				}
+			}
+			if !known {
+				return inf.infer_call(Edge{ ...e, to: e.to.all_after_last('.') })
+			}
+		}
+		return none
 	}
 	if e.is_method {
 		if t := inf.receiver(e) {
@@ -206,6 +226,33 @@ fn resolve_const_callee(e Edge, const_calls map[string][]CallCand, site_of map[s
 	}
 }
 
+// named_fn_type is the type of a bare name that is no variable, const or enum
+// member but the function a call of that name from e's file would reach: a
+// function, written `fn ()`, with its parameters and result left out (see
+// fn_value_type for one whose result is known). none when no one function is
+// reached.
+fn (inf &Infer) named_fn_type(name string, e Edge) ?InferredType {
+	if name.contains('.') {
+		return none
+	}
+	call := Edge{
+		from: e.from
+		to:   name
+		kind: .calls
+		file: e.file
+	}
+	r := resolve_callee(call, inf.by_name, inf.site_of, inf.imports_of)?
+	if r.id == '' {
+		return none
+	}
+	scope := inf.scope_of[e.file] or { FileScope{} }
+	return InferredType{
+		text: 'fn ()'
+		mod:  scope.mod
+		file: e.file
+	}
+}
+
 // receiver is the type of a method call's receiver: as the parser wrote it
 // (recv_type, an id-like `<module>.<Type>` or an import-qualified type), or
 // as its recipe works out.
@@ -299,7 +346,9 @@ fn (inf &Infer) no_method(t InferredType, name string, file string) ?string {
 	if ft.field_id == '' {
 		return none
 	}
-	ftext := bare_type(ft.text)
+	// a field holding functions in an array or map is called through an index,
+	// `h.list[i](x)`, which the call names by the field
+	ftext := container_elem(bare_type(ft.text))
 	if ftext.starts_with('fn ') || ftext.starts_with('fn(') {
 		return ft.field_id
 	}
@@ -314,6 +363,39 @@ fn (inf &Infer) no_method(t InferredType, name string, file string) ?string {
 		}
 	}
 	return none
+}
+
+// container_elem is the element type of an array, fixed array or map type, through
+// any nesting (`fn (int)` for `map[string][]fn (int)`), or `t` itself when it is none.
+fn container_elem(t string) string {
+	mut s := t
+	for {
+		if s.starts_with('[]') {
+			s = s[2..]
+		} else if s.starts_with('[') || s.starts_with('map[') {
+			// `[3]T` or `map[K]V`: past the bracket that closes the size or key
+			mut depth := 0
+			mut end := -1
+			for i, c in s {
+				if c == `[` {
+					depth++
+				} else if c == `]` {
+					depth--
+					if depth == 0 {
+						end = i
+						break
+					}
+				}
+			}
+			if end < 0 {
+				return s
+			}
+			s = s[end + 1..]
+		} else {
+			return s
+		}
+	}
+	return s
 }
 
 // embedded is the declarations of the types `decl` embeds.
@@ -411,9 +493,14 @@ fn (inf &Infer) follow_steps(e Edge, depth int) ?InferredType {
 				file:        c.file
 				recv_recipe: c.recipe
 			}, depth + 1)?
-		} else {
+		} else if et := inf.enum_type(start[2..], e.file) {
 			// `Colour.red` names a member of the enum Colour, a value of its type
-			t = inf.enum_type(start[2..], e.file)?
+			t = et
+		} else {
+			// a function named as a value, `fa := [a, b, c]`, is a function: with its
+			// result when it has one (fn_value_type), else as `fn ()`, which is all
+			// that what V provides on an array of them (`fa.index(b)`) needs
+			t = inf.fn_value_type(e, start) or { inf.named_fn_type(start[2..], e)? }
 		}
 	} else if start.starts_with('c:') {
 		t = inf.call_result(e, start[2..], steps) or {
@@ -834,9 +921,11 @@ fn (inf &Infer) find_const(name string, file string) ?Symbol {
 			continue
 		}
 		// a standalone program's own file, or any file of a `main` module that is one
-		// program, as call resolution takes it (DeclSite.solo)
-		if qual == '' && c.parent == scope.mod
-			&& (!scope.is_main || c.file == file || (inf.site_of[c.id] or { DeclSite{} }).solo) {
+		// program, or a `module main` file in a test's directory with no `fn main`, as
+		// call resolution takes it (sees_in_module)
+		csite := inf.site_of[c.id] or { DeclSite{} }
+		if qual == '' && c.parent == scope.mod && (!scope.is_main || c.file == file || csite.solo
+			|| (csite.no_main && csite.is_main && is_test_file(file))) {
 			own << c
 		}
 		if (qual != '' && import_reaches(c.parent, qual))

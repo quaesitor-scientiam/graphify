@@ -3226,6 +3226,38 @@ fn test_country() {}
 	assert refs == ['vlib.v.tests.generic_calls.Country'], refs.str()
 }
 
+fn test_a_test_in_a_module_main_directory_with_no_main_calls_its_siblings() {
+	// V builds a `module main` test with the `module main` files of its directory
+	// (expand_single_test_file_inputs in V's driver), so `validate` in
+	// vlib/wasm/tests/common.v is the one every test there calls. Another test's
+	// function stays its own, and a program's file, which is no test, doesn't see a
+	// sibling program's.
+	g := graph_of({
+		'vlib/wasm/tests/common.v':      'module main\n\nstruct Box {}\n\nfn (b Box) open() {}\n\nstruct Jar {}\n\nfn (j Jar) open() {}\n\nconst limit = Box{}\n\npub fn validate(code []u8) ! {}\n'
+		'vlib/wasm/tests/arith_test.v':  'module main\n\nfn test_add() {\n\tvalidate([]u8{}) or {}\n\tlimit.open()\n\tonly_in_block()\n}\n'
+		'vlib/wasm/tests/block_test.v':  'module main\n\nfn only_in_block() {}\n\nfn test_block() {\n\tvalidate([]u8{}) or {}\n}\n'
+		'examples/tools/a.v':            'module main\n\nfn helper() {}\n'
+		'examples/tools/b.v':            'module main\n\nfn other() {\n\thelper()\n}\n'
+		// the same names elsewhere, so no call resolves by a unique name
+		'vlib/x/x.v':                    'module x\n\npub struct Lid {}\n\npub fn (l Lid) open() {}\n\npub fn validate() {}\n\npub fn only_in_block() {}\n\npub fn helper() {}\n\npub fn size() int {\n\treturn 0\n}\n'
+		// a test beside another module's files isn't built with them
+		'vlib/crypto/md5/md5.v':         'module md5\n\npub fn size() int {\n\treturn 16\n}\n'
+		'vlib/crypto/md5/md5_test.v':    'module main\n\nfn test_size() {\n\t_ := size()\n}\n'
+	})
+	calls := g.edges.filter(it.kind == .calls)
+	add := calls.filter(it.from == 'vlib.wasm.tests.test_add').map(it.to)
+	assert 'vlib.wasm.tests.validate' in add, add.str()
+	// a const of the directory types its receiver too (find_const)
+	assert 'vlib.wasm.tests.Box.open' in add, add.str()
+	assert 'vlib.wasm.tests.only_in_block' !in add, add.str()
+	block := calls.filter(it.from == 'vlib.wasm.tests.test_block').map(it.to)
+	assert block == ['vlib.wasm.tests.validate'], block.str()
+	other := calls.filter(it.from == 'examples.tools.other').map(it.to)
+	assert other == ['helper'], other.str()
+	md5 := calls.filter(it.from == 'vlib.crypto.md5.test_size').map(it.to)
+	assert md5 == ['size'], md5.str()
+}
+
 fn test_a_type_declared_once_per_platform_resolves_its_field_types() {
 	// An id declared in two files has no one site, and only a function or method got
 	// one per file back, so `string` in a struct declared once per platform had no
@@ -3868,6 +3900,9 @@ fn test_imports_resolve_to_the_module_they_mean_in_the_tree() {
 		'cmd/mcp/main.v':                     'module main\n\nimport mcp\n\nfn main() {\n\tmcp.serve()\n}\n'
 		'lib/shapes/shapes.v':                 'module shapes\n\npub fn square() int {\n\treturn 4\n}\n'
 		'lib/shapes/shapes_test.v':            'module main\n\nimport shapes\n\nfn test_s() {\n\tshapes.square()\n}\n'
+		'vlib/arrays/arrays.v':                'module arrays\n\npub fn flatten() int {\n\treturn 1\n}\n'
+		'vlib/v/tests/arrays/nested_test.v':   'module main\n\nfn test_n() {}\n'
+		'vlib/v/tests/flat_test.v':            'module main\n\nimport arrays\n\nfn test_f() {\n\tarrays.flatten()\n}\n'
 	})
 	defer {
 		os.rmdir_all(root) or {}
@@ -3911,6 +3946,11 @@ fn test_imports_resolve_to_the_module_they_mean_in_the_tree() {
 	ext := imports('lib/shapes/shapes_test.v')
 	assert 'import lib.shapes as shapes' in ext, ext.str()
 	assert 'call lib.shapes.square' in ext, ext.str()
+	// a directory of tests alone is no module: `import arrays` beside
+	// vlib/v/tests/arrays is vlib's arrays
+	flat := imports('vlib/v/tests/flat_test.v')
+	assert 'import arrays' in flat, flat.str()
+	assert 'call arrays.flatten' in flat, flat.str()
 	// text has no place in a tree, so its imports stay as written
 	t := extract_v_text_result('module m\n\nimport geometry\n', 'vlib/crypto/x/m.v')
 	assert t.symbols.any(it.kind == .import_ && it.name == 'geometry')
@@ -5339,6 +5379,25 @@ pub fn (mut s Server) run() {
 	assert run.contains('^ [field] = '), run
 	// a declaration that calls no field has no note
 	assert !g.explain('Server.close').contains('^ [field]')
+}
+
+fn test_a_call_of_a_function_taken_from_an_array_or_map_is_linked_to_its_holder() {
+	// `h.list[i](x)` calls a function an array field holds, and `fns['a']()` one a
+	// global map holds: the field and the global are the declarations there are, as for
+	// `s.on_running(x)`, not some `list` method or `fns` function of another module
+	g := graph_of({
+		'lib/m/m.v':         'module m\n\nstruct Handlers {\n\tlist  []fn (int)\n\tnamed map[string][]fn (int)\n}\n\n__global fns map[string]fn () int\n\n__global count map[string]int\n\nfn (h Handlers) run(i int) {\n\th.list[i](1)\n\th.named[\'a\'][0](2)\n\t_ := fns[\'a\']()\n}\n'
+		'lib/other/other.v': 'module other\n\npub struct S {}\n\npub fn (s S) list() {}\n\npub fn (s S) named() {}\n'
+		'lib/other/two.v':   'module other\n\npub struct T {}\n\npub fn (t T) list() {}\n\npub fn (t T) named() {}\n'
+	})
+	calls := g.edges.filter(it.kind == .calls && it.from == 'lib.m.Handlers.run').map(it.to)
+	assert 'lib.m.Handlers.list' in calls, calls.str()
+	assert 'lib.m.Handlers.named' in calls, calls.str()
+	assert 'lib.m.fns' in calls, calls.str()
+	// container_elem looks through every array, fixed array and map
+	assert container_elem('map[string][]fn (int)') == 'fn (int)'
+	assert container_elem('[3]map[int]string') == 'string'
+	assert container_elem('int') == 'int'
 }
 
 fn test_index_representative_ranks_backends() {
@@ -7381,6 +7440,61 @@ pub fn f() string {
 	assert g.edges.any(it.kind == .calls && it.from == 'lib.f' && it.to == 'vlib.builtin.int.str'), g.edges.map(it.to).str()
 }
 
+fn test_a_comptime_if_value_passes_over_a_branch_only_an_option_selects() {
+	// max_int is now `$if cross ? { portable_max_int() } $else $if new_int ? && x64 {
+	// int(max_i64) } $else { int(max_i32) }`: the branches' recipes differ, but the
+	// first two need `-d`, so the default build's value is the last one's, an int. A
+	// value whose branches differ in builds a host picks by itself stays untyped.
+	g := graph_of({
+		'vlib/builtin/int.v': 'module builtin
+
+pub fn (i int) str() string {
+	return \'\'
+}
+'
+		'node/node.v': 'module node
+
+pub struct Node {}
+
+pub fn (n Node) str() string {
+	return \'\'
+}
+'
+		'lib/lib.v': 'module lib
+
+import node
+
+fn portable() int {
+	return 1
+}
+
+pub const limit = \$if cross ? {
+	portable()
+} \$else \$if new_int ? && x64 {
+	int(2)
+} \$else {
+	int(3)
+}
+
+pub const host = \$if linux {
+	node.Node{}
+} \$else {
+	int(3)
+}
+
+pub fn f() string {
+	return limit.str()
+}
+
+pub fn g() string {
+	return host.str()
+}
+'
+	})
+	assert g.edges.any(it.kind == .calls && it.from == 'lib.f' && it.to == 'vlib.builtin.int.str'), g.edges.map(it.to).str()
+	assert !g.edges.any(it.kind == .calls && it.from == 'lib.g' && it.to in ['vlib.builtin.int.str', 'node.Node.str']), g.edges.filter(it.from == 'lib.g').str()
+}
+
 fn test_shared_declaration_names_its_local() {
 	g := graph_of({
 		'other/node.v': 'module other
@@ -8566,6 +8680,51 @@ fn parse(s string) Kind {
 	calls := g.edges.filter(it.kind == .calls && it.from == 'lib.tests.parse')
 	assert calls.any(it.to == 'Kind__static__from_string' && it.provenance == .undeclared)
 	assert !calls.any(it.to == 'Kind__static__from_string' && it.provenance != .undeclared)
+}
+
+fn test_a_generated_from_string_of_an_imported_enum_is_provided_by_v() {
+	// the enum of `mod2.Kind.from_string(s)` is the one module its qualifier names, and
+	// of `Kind.from_string(s)` under `import mod { Kind }` mod's, though mod2, imported
+	// too, has a `Kind`; `Shape` is no enum, and `Kind` of `Lone.Kind` is in two modules
+	// named `lone`, so neither call is one V provides
+	g := graph_of({
+		'app/v.mod':         ''
+		'app/mod/mod.v':     'module mod\n\npub enum Kind {\n\ta\n}\n\npub struct Shape {}\n'
+		'app/mod2/mod2.v':   'module mod2\n\npub enum Kind {\n\ta\n}\n'
+		'app/a/lone/lone.v': 'module lone\n\npub enum Kind {\n\ta\n}\n'
+		'app/b/lone/lone.v': 'module lone\n\npub enum Kind {\n\ta\n}\n'
+		'app/main_test.v':   'module main\n\nimport mod { Kind, Shape }\nimport mod2\nimport lone\n\nfn test_m() {\n\t_ := Kind.from_string(\'a\') or { return }\n\t_ := mod2.Kind.from_string(\'a\') or { return }\n\t_ := lone.Kind.from_string(\'a\') or { return }\n\t_ := Shape.from_string(\'a\') or { return }\n}\n'
+	})
+	calls := g.edges.filter(it.kind == .calls && it.from == 'app.test_m')
+	und := calls.filter(it.provenance == .undeclared).map(it.to)
+	assert und.len == 2, calls.str()
+	assert 'mod.Kind__static__from_string' in und, und.str()
+	assert 'mod2.Kind__static__from_string' in und, und.str()
+	assert !calls.any(it.to.contains('Shape__static__from_string') && it.provenance == .undeclared)
+	assert !calls.any(it.to.contains('lone.Kind') && it.provenance == .undeclared)
+	// a static call through a selective import of a module whose directory has
+	// another name, which no module is named by, is the bare call it was written as
+	h := graph_of({
+		'proj/v.mod':       ''
+		'proj/odd/foo.v':   'module zmod_foo\n\npub struct Foo {}\n\npub fn Foo.new() Foo {\n\treturn Foo{}\n}\n'
+		'proj/other/bar.v': 'module other\n\npub struct Foo {}\n\npub fn Foo.new() Foo {\n\treturn Foo{}\n}\n'
+		'proj/odd/main.v':  'module main\n\nimport zmod_foo { Foo }\n\nfn main() {\n\t_ := Foo.new()\n}\n'
+	})
+	hc := h.edges.filter(it.kind == .calls && it.from == 'proj.odd.main').map(it.to)
+	assert hc == ['proj.odd.Foo__static__new'], hc.str()
+}
+
+fn test_a_method_v_provides_on_an_array_of_functions_or_a_literal_is_undeclared() {
+	// `[a, b]` holds functions, so it is an array, and `index`, `contains` and
+	// `to_fixed_size` are methods V writes for it rather than any declared `index`
+	g := graph_of({
+		'lib/m/m.v':          'module m\n\nfn a() {}\n\nfn b() {}\n\nfn probe() {\n\tfa := [a, b]\n\t_ := fa.index(b)\n\tff := [a, b]!\n\t_ := ff.contains(a)\n\t_ := [1, 2].to_fixed_size()\n}\n'
+		'lib/other/other.v':  'module other\n\npub struct S {}\n\npub fn (s S) index(x int) int {\n\treturn x\n}\n\npub fn (s S) contains(x int) bool {\n\treturn true\n}\n\npub fn (s S) to_fixed_size() int {\n\treturn 0\n}\n'
+		'lib/other/other2.v': 'module other\n\npub struct T {}\n\npub fn (t T) index(x int) int {\n\treturn x\n}\n\npub fn (t T) contains(x int) bool {\n\treturn true\n}\n\npub fn (t T) to_fixed_size() int {\n\treturn 0\n}\n'
+	})
+	calls := g.edges.filter(it.kind == .calls && it.from == 'lib.m.probe' && it.to in ['index', 'contains', 'to_fixed_size'])
+	assert calls.len == 3, calls.str()
+	assert calls.all(it.provenance == .undeclared), calls.str()
 }
 
 // `__addr(x)` and `__v3_isreftype(x)` are compiler forms that V lowers, so the calls keep no edge at all: they are not calls into the program.
