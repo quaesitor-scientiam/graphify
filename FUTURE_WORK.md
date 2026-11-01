@@ -508,7 +508,9 @@ vlang `aba4d07278`, five causes with a fix of their own:
   in vlib/wasm/tests/common.v (9 calls). A file of another module in the directory,
   md5.v beside md5_test.v, stays unseen, as does another test (`b_test.c.v`). A const
   shares its id with every file of the directory declaring that name, so whether it
-  is in a `module main` file is read from its own file. A test with no `module` line is built alone
+  is in a `module main` file is read from its own file. Not covered: a call that
+  reaches a declaration through `platform_variants` (a function declared once per
+  platform) picks the directory's copies by module alone, as it did before. A test with no `module` line is built alone
   by V, which the graph doesn't tell apart, so it sees them too.
 - `T.from_string()` is V's for an enum T named through its module (`mod.MyEnum`):
   the module the qualifier names exactly, else the one it reaches, leaving out
@@ -524,8 +526,9 @@ vlang `aba4d07278`, five causes with a fix of their own:
   and linked to it (`container_elem`, in infer.v), as a call through a function-typed
   field is. A deeper index, `h.named['a'][0](x)`, still names nothing: on a receiver
   the walk can't type, the field's name would reach name matching as a method call.
-  A global whose type holds functions (`numberfns map[string]fn () int`), or that
-  has no stated type, is called as a constant is (7 calls). A global typed by a
+  A global whose type holds functions (`numberfns map[string]fn () int`, `&[]fn ()`),
+  or that has no stated type, is called as a constant is, and so is a const typed as
+  a container of functions (`const handlers = []fn () int{}`) (`holds_fns`, 7 calls). A global typed by a
   named function type (`__global on_tick Hook`) is not, as resolve_edges doesn't
   look the alias up. The arena hooks, `__global g_arena_alloc_hook fn (...)`, are
   such globals, so their 10 calls link to them instead of being undeclared.

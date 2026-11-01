@@ -332,10 +332,10 @@ fn (inf &Infer) no_method(t InferredType, name string, file string) ?string {
 	}
 	// a field holding functions in an array or map is called through an index,
 	// `h.list[i](x)`, which the call names by the field
-	ftext := container_elem(bare_type(ft.text))
-	if ftext.starts_with('fn ') || ftext.starts_with('fn(') {
+	if holds_fns(ft.text) {
 		return ft.field_id
 	}
+	ftext := bare_type(ft.text)
 	// a field whose type is a named function type, `cb Callback`
 	if is_named_type(ftext) {
 		named := strip_generic_args(ftext)
@@ -347,6 +347,13 @@ fn (inf &Infer) no_method(t InferredType, name string, file string) ?string {
 		}
 	}
 	return none
+}
+
+// holds_fns reports whether a value of type `t` is a function or holds functions in
+// an array, fixed array or map (`?[]fn (int)`), as no_method reads a field's type.
+fn holds_fns(t string) bool {
+	e := container_elem(bare_type(t))
+	return e.starts_with('fn ') || e.starts_with('fn(')
 }
 
 // container_elem is the element type of an array, fixed array or map type, through

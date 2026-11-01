@@ -3277,6 +3277,14 @@ fn test_a_module_main_test_sees_its_directorys_main_consts_by_their_own_file() {
 		'vlib/crypto/md5/md5_test.v': 'module main\n\nfn test_key() {\n\tkey.check()\n}\n'
 		'examples/tools/a.v':     'module main\n\nstruct Pot {}\n\nfn (p Pot) check() {}\n\nconst pot = Pot{}\n'
 		'examples/tools/b.v':     'module main\n\nfn other() {\n\tpot.check()\n}\n'
+		// a test in a directory of several programs is built with none of them
+		'examples/multi/a.v':     'module main\n\nstruct Jug {}\n\nfn (j Jug) check() {}\n\nconst jug = Jug{}\n\nfn main() {}\n'
+		'examples/multi/b.v':     'module main\n\nfn main() {}\n'
+		'examples/multi/m_test.v': 'module main\n\nfn test_m() {\n\tjug.check()\n}\n'
+		// a test's own declarations are its own to call, even when they leave a call
+		// ambiguous: `x.spin()` on an untyped `x` is not common.v's one `run`
+		'vlib/r/common.v':        'module main\n\nstruct Baz {}\n\nfn (b Baz) spin() {}\n'
+		'vlib/r/r_test.v':        'module main\n\nstruct Foo {}\n\nstruct Bar {}\n\nfn (f Foo) spin() {}\n\nfn (b Bar) spin() {}\n\nfn test_r() {\n\tx := C.get_thing()\n\tx.spin()\n}\n'
 		'vlib/y/y.v':             'module y\n\npub struct Decoy {}\n\npub fn (d Decoy) check() {}\n\npub fn helper2() {}\n\npub fn plat() {}\n'
 	})
 	calls := g.edges.filter(it.kind == .calls)
@@ -3292,6 +3300,10 @@ fn test_a_module_main_test_sees_its_directorys_main_consts_by_their_own_file() {
 	assert 'vlib.crypto.md5.Key.check' !in key, key.str()
 	pot := calls.filter(it.from == 'examples.tools.other').map(it.to)
 	assert 'examples.tools.Pot.check' !in pot, pot.str()
+	jug := calls.filter(it.from == 'examples.multi.test_m').map(it.to)
+	assert 'examples.multi.Jug.check' !in jug, jug.str()
+	r := calls.filter(it.from == 'vlib.r.test_r').map(it.to)
+	assert 'vlib.r.Baz.spin' !in r, r.str()
 }
 
 fn test_a_type_declared_once_per_platform_resolves_its_field_types() {
@@ -5422,7 +5434,7 @@ fn test_a_call_of_a_function_taken_from_an_array_or_map_is_linked_to_its_holder(
 	// global map holds: the field and the global are the declarations there are, as for
 	// `s.on_running(x)`, not some `list` method or `fns` function of another module
 	g := graph_of({
-		'lib/m/m.v':         'module m\n\nstruct Handlers {\n\tlist  []fn (int)\n\tnamed map[string]fn (int)\n\tdeep  map[string][]fn (int)\n}\n\n__global fns map[string]fn () int\n\n__global count map[string]int\n\n__global made = make_fn()\n\nfn make_fn() fn () {\n\treturn fn () {}\n}\n\nfn (h Handlers) run(i int) {\n\th.list[i](1)\n\th.named[\'a\'](2)\n\th.deep[\'a\'][0](3)\n\t_ := fns[\'a\']()\n\tmade()\n\tcount()\n}\n'
+		'lib/m/m.v':         'module m\n\nstruct Handlers {\n\tlist  []fn (int)\n\tnamed map[string]fn (int)\n\tdeep  map[string][]fn (int)\n}\n\n__global fns map[string]fn () int\n\n__global count map[string]int\n\n__global made = make_fn()\n\n__global refs &[]fn ()\n\nconst handlers = []fn () int{}\n\nfn make_fn() fn () {\n\treturn fn () {}\n}\n\nfn (h Handlers) run(i int) {\n\th.list[i](1)\n\th.named[\'a\'](2)\n\th.deep[\'a\'][0](3)\n\t_ := fns[\'a\']()\n\tmade()\n\tcount()\n\trefs[0]()\n\t_ := handlers[0]()\n}\n'
 		'lib/other/other.v': 'module other\n\npub struct S {}\n\npub fn (s S) list() {}\n\npub fn (s S) named() {}\n\npub fn (s S) deep() {}\n'
 		'lib/other/two.v':   'module other\n\npub struct T {}\n\npub fn (t T) list() {}\n\npub fn (t T) named() {}\n'
 	})
@@ -5436,6 +5448,9 @@ fn test_a_call_of_a_function_taken_from_an_array_or_map_is_linked_to_its_holder(
 	// no function is never what a call names
 	assert 'lib.m.made' in calls, calls.str()
 	assert 'lib.m.count' !in calls, calls.str()
+	// a reference to functions, and a const typed as a container of them, are called too
+	assert 'lib.m.refs' in calls, calls.str()
+	assert 'lib.m.handlers' in calls, calls.str()
 	// a global whose type only starts with the letters `fn` holds no function
 	k := graph_of({
 		'lib/k/k.v':        'module k\n\nimport fnv1a\n\n__global h fnv1a.Sum\n\nfn use() {\n\th()\n}\n'

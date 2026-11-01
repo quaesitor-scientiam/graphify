@@ -738,7 +738,7 @@ fn visible_from(mod string, caller DeclSite, imports []string) bool {
 // sees_in_module reports whether a caller at this site sees a declaration of its own
 // module (directory) in `decl_file`, which is a `module main` file when `decl_main`:
 // always outside a standalone program; in one, when its `main` module is one program
-// (solo), or when the caller is a test in a directory with no `fn main` and the
+// (solo), when the declaration is in the caller's own file, or when the caller is a test in a directory with no `fn main` and the
 // declaration is in a `module main` file that is no test, as V builds such a test
 // with the directory's `module main` files (common.v beside vlib/wasm/tests/*_test.v),
 // not with a file of another module there (md5.v beside md5_test.v) nor another test
@@ -746,7 +746,7 @@ fn visible_from(mod string, caller DeclSite, imports []string) bool {
 // `decl_main` must come from the declaration's own file: a const's id is shared by
 // every file of the directory that declares it, so its site_of entry is any one's.
 fn (site DeclSite) sees_in_module(decl_file string, decl_main bool) bool {
-	return !site.is_main || site.solo
+	return !site.is_main || site.solo || decl_file == site.file
 		|| (site.no_main && is_test_file(site.file) && decl_main && !is_test_file(decl_file))
 }
 
@@ -1088,14 +1088,12 @@ fn resolve_edges(mut g Graph) {
 			}
 		}
 		// a constant of a literal's type (`const sys_write = 1`, recipe `t:int`) is no
-		// function, so a call of its name is some other function's
-		// A global is called the same way, and one declared with a type is called only
-		// when that type holds functions, `numberfns['two']()` on
+		// function, so a call of its name is some other function's, unless that type
+		// holds functions, `handlers[0]()` on `const handlers = []fn () int{...}`. A global
+		// is called the same way, a typed one too: `numberfns['two']()` on
 		// `numberfns map[string]fn () int`
-		if (s.kind == .constant && !s.recipe.starts_with('t:'))
-			|| (s.kind == .global && (!s.recipe.starts_with('t:')
-			|| container_elem(s.recipe[2..]).starts_with('fn ')
-			|| container_elem(s.recipe[2..]).starts_with('fn('))) {
+		if s.kind in [SymbolKind.constant, .global] && (!s.recipe.starts_with('t:')
+			|| holds_fns(s.recipe[2..])) {
 			const_calls[s.name] << CallCand{
 				id:   s.id
 				mod:  s.parent
