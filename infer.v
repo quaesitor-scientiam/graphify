@@ -215,7 +215,11 @@ fn resolve_const_callee(e Edge, const_calls map[string][]CallCand, site_of map[s
 	imports := imports_of[caller.file] or { []string{} }
 	mut visible := []CallCand{}
 	for c in cands {
-		if (c.file == caller.file || visible_from(c.mod, caller, imports)) && !test_private(c.file, caller.file) {
+		// a test sees a `module main` file of its directory too, as resolve_callee
+		// takes it (sees_in_module)
+		if (c.file == caller.file || visible_from(c.mod, caller, imports)
+			|| (c.mod == caller.mod && caller.sees_in_module(site_of[c.id] or { DeclSite{} })))
+			&& !test_private(c.file, caller.file) {
 			visible << c
 		}
 	}

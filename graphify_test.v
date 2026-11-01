@@ -3233,8 +3233,8 @@ fn test_a_test_in_a_module_main_directory_with_no_main_calls_its_siblings() {
 	// function stays its own, and a program's file, which is no test, doesn't see a
 	// sibling program's.
 	g := graph_of({
-		'vlib/wasm/tests/common.v':      'module main\n\nstruct Box {}\n\nfn (b Box) open() {}\n\nstruct Jar {}\n\nfn (j Jar) open() {}\n\nconst limit = Box{}\n\npub fn validate(code []u8) ! {}\n'
-		'vlib/wasm/tests/arith_test.v':  'module main\n\nfn test_add() {\n\tvalidate([]u8{}) or {}\n\tlimit.open()\n\tonly_in_block()\n}\n'
+		'vlib/wasm/tests/common.v':      'module main\n\nstruct Box {}\n\nfn (b Box) open() {}\n\nstruct Jar {}\n\nfn (j Jar) open() {}\n\nconst limit = Box{}\n\n__global hook fn ()\n\npub fn validate(code []u8) ! {}\n'
+		'vlib/wasm/tests/arith_test.v':  'module main\n\nfn test_add() {\n\tvalidate([]u8{}) or {}\n\tlimit.open()\n\tonly_in_block()\n\thook()\n}\n'
 		'vlib/wasm/tests/block_test.v':  'module main\n\nfn only_in_block() {}\n\nfn test_block() {\n\tvalidate([]u8{}) or {}\n}\n'
 		'examples/tools/a.v':            'module main\n\nfn helper() {}\n'
 		'examples/tools/b.v':            'module main\n\nfn other() {\n\thelper()\n}\n'
@@ -3249,6 +3249,8 @@ fn test_a_test_in_a_module_main_directory_with_no_main_calls_its_siblings() {
 	assert 'vlib.wasm.tests.validate' in add, add.str()
 	// a const of the directory types its receiver too (find_const)
 	assert 'vlib.wasm.tests.Box.open' in add, add.str()
+	// and a global holding a function there (resolve_const_callee)
+	assert 'vlib.wasm.tests.hook' in add, add.str()
 	assert 'vlib.wasm.tests.only_in_block' !in add, add.str()
 	block := calls.filter(it.from == 'vlib.wasm.tests.test_block').map(it.to)
 	assert block == ['vlib.wasm.tests.validate'], block.str()
