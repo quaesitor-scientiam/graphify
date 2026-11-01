@@ -181,7 +181,7 @@ fn (mut inf Infer) infer_call(e Edge) ?CallResolution {
 	if e.is_method || e.to in inf.by_name {
 		return none
 	}
-	return resolve_const_callee(e, inf.const_calls, inf.site_of, inf.imports_of)
+	return resolve_const_callee(e, inf.const_calls, inf.site_of, inf.imports_of, inf.scope_of)
 }
 
 // resolve_const_callee resolves a call of a name no function has to the one constant of
@@ -189,16 +189,16 @@ fn (mut inf Infer) infer_call(e Edge) ?CallResolution {
 // that is unique in the whole graph, it needs visibility, so a constant of an unrelated,
 // unimported module is never the callee. A constant in the caller's own file is visible
 // even in a standalone `main` program, where visible_from grants no module visibility.
-fn resolve_const_callee(e Edge, const_calls map[string][]CallCand, site_of map[string]DeclSite, imports_of map[string][]string) ?CallResolution {
+fn resolve_const_callee(e Edge, const_calls map[string][]CallCand, site_of map[string]DeclSite, imports_of map[string][]string, scope_of map[string]FileScope) ?CallResolution {
 	cands := const_calls[e.to] or { return none }
 	caller := caller_site(e, site_of) or { return none }
 	imports := imports_of[caller.file] or { []string{} }
 	mut visible := []CallCand{}
 	for c in cands {
 		// a test sees a `module main` file of its directory too, as resolve_callee
-		// takes it (sees_in_module)
+		// takes it (sees_in_module), told by the const's own file
 		if (c.file == caller.file || visible_from(c.mod, caller, imports)
-			|| (c.mod == caller.mod && caller.sees_in_module(site_of[c.id] or { DeclSite{} })))
+			|| (c.mod == caller.mod && caller.sees_in_module(c.file, (scope_of[c.file] or { FileScope{} }).is_main)))
 			&& !test_private(c.file, caller.file) {
 			visible << c
 		}
@@ -906,10 +906,20 @@ fn (inf &Infer) find_const(name string, file string) ?Symbol {
 		}
 		// a standalone program's own file, or any file of a `main` module that is one
 		// program, or a `module main` file in a test's directory with no `fn main`, as
-		// call resolution takes it (sees_in_module)
+		// call resolution takes it (sees_in_module). A const's id is shared by every
+		// file of the directory declaring it, so whether it is in a `module main` file
+		// is read from its own file; solo and no_main hold for the whole directory, so
+		// any of its sites tells them
 		csite := inf.site_of[c.id] or { DeclSite{} }
-		if qual == '' && c.parent == scope.mod && (!scope.is_main || c.file == file || csite.solo
-			|| (csite.no_main && csite.is_main && is_test_file(file))) {
+		caller := DeclSite{
+			mod:     scope.mod
+			file:    file
+			is_main: scope.is_main
+			solo:    csite.solo
+			no_main: csite.no_main
+		}
+		if qual == '' && c.parent == scope.mod && (c.file == file
+			|| caller.sees_in_module(c.file, (inf.scope_of[c.file] or { FileScope{} }).is_main)) {
 			own << c
 		}
 		if (qual != '' && import_reaches(c.parent, qual))

@@ -3260,6 +3260,35 @@ fn test_a_test_in_a_module_main_directory_with_no_main_calls_its_siblings() {
 	assert md5 == ['size'], md5.str()
 }
 
+fn test_a_module_main_test_sees_its_directorys_main_consts_by_their_own_file() {
+	// A const's id is shared by every file of its directory that declares it, so
+	// whether a test sees it is told by the const's own file: `limit` of vlib/q/a.v
+	// (module q) and of vlib/q/helper.v (module main) are one id, and the test is
+	// built with helper.v only, so `limit.check()` is Limit's. md5.v's const is of
+	// another module, a sibling test's declarations are its own (`b_test.c.v` too),
+	// and a program file, which is no test, sees no sibling program's const.
+	g := graph_of({
+		'vlib/q/a.v':             'module q\n\npub struct LimitX {}\n\npub fn (l LimitX) check() {}\n\nfn new_limit() LimitX {\n\treturn LimitX{}\n}\n\nconst limit = new_limit()\n'
+		'vlib/q/helper.v':        'module main\n\nstruct Limit {}\n\nfn (l Limit) check() {}\n\nconst limit = Limit{}\n'
+		'vlib/q/q_test.v':        'module main\n\nfn test_q() {\n\tlimit.check()\n\thelper2()\n}\n'
+		'vlib/q/b_test.c.v':      'module main\n\nfn helper2() {}\n\nfn test_b() {}\n'
+		'vlib/crypto/md5/md5.v':  'module md5\n\npub struct Key {}\n\npub fn (k Key) check() {}\n\npub const key = Key{}\n'
+		'vlib/crypto/md5/md5_test.v': 'module main\n\nfn test_key() {\n\tkey.check()\n}\n'
+		'examples/tools/a.v':     'module main\n\nstruct Pot {}\n\nfn (p Pot) check() {}\n\nconst pot = Pot{}\n'
+		'examples/tools/b.v':     'module main\n\nfn other() {\n\tpot.check()\n}\n'
+		'vlib/y/y.v':             'module y\n\npub struct Decoy {}\n\npub fn (d Decoy) check() {}\n\npub fn helper2() {}\n'
+	})
+	calls := g.edges.filter(it.kind == .calls)
+	q := calls.filter(it.from == 'vlib.q.test_q').map(it.to)
+	assert 'vlib.q.Limit.check' in q, q.str()
+	assert 'vlib.q.LimitX.check' !in q, q.str()
+	assert 'helper2' in q, q.str()
+	key := calls.filter(it.from == 'vlib.crypto.md5.test_key').map(it.to)
+	assert 'vlib.crypto.md5.Key.check' !in key, key.str()
+	pot := calls.filter(it.from == 'examples.tools.other').map(it.to)
+	assert 'examples.tools.Pot.check' !in pot, pot.str()
+}
+
 fn test_a_type_declared_once_per_platform_resolves_its_field_types() {
 	// An id declared in two files has no one site, and only a function or method got
 	// one per file back, so `string` in a struct declared once per platform had no
@@ -8717,6 +8746,15 @@ fn test_a_generated_from_string_of_an_imported_enum_is_provided_by_v() {
 	assert !calls.any(it.to.contains('Shape__static__from_string') && it.provenance == .undeclared)
 	assert !calls.any(it.to.contains('lone.Kind') && it.provenance == .undeclared)
 	assert !calls.any(it.to == 'mod2.Kind__static__zero' && it.provenance == .undeclared)
+	// an enum declared once per platform is one module's, not two
+	p := graph_of({
+		'app/v.mod':                  ''
+		'app/plat/kind_linux.c.v':    'module plat\n\npub enum Kind {\n\ta\n}\n'
+		'app/plat/kind_windows.c.v':  'module plat\n\npub enum Kind {\n\ta\n}\n'
+		'app/main_test.v':            'module main\n\nimport plat\n\nfn test_p() {\n\t_ := plat.Kind.from_string(\'a\') or { return }\n}\n'
+	})
+	pc := p.edges.filter(it.kind == .calls && it.from == 'app.test_p')
+	assert pc.any(it.to == 'plat.Kind__static__from_string' && it.provenance == .undeclared), pc.str()
 	// a static call through a selective import is named bare, as written, so one of a
 	// module whose directory has another name still resolves by its name
 	h := graph_of({

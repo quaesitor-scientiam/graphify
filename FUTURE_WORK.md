@@ -506,7 +506,9 @@ vlang `aba4d07278`, five causes with a fix of their own:
   (`expand_single_test_file_inputs` in V's driver), so a test in a directory with no
   `fn main` sees them (`sees_in_module`, in graphify.v, and `find_const`): `validate`
   in vlib/wasm/tests/common.v (9 calls). A file of another module in the directory,
-  md5.v beside md5_test.v, stays unseen. A test with no `module` line is built alone
+  md5.v beside md5_test.v, stays unseen, as does another test (`b_test.c.v`). A const
+  shares its id with every file of the directory declaring that name, so whether it
+  is in a `module main` file is read from its own file. A test with no `module` line is built alone
   by V, which the graph doesn't tell apart, so it sees them too.
 - `T.from_string()` is V's for an enum T named through its module (`mod.MyEnum`):
   the module the qualifier names exactly, else the one it reaches, leaving out

@@ -736,14 +736,18 @@ fn visible_from(mod string, caller DeclSite, imports []string) bool {
 }
 
 // sees_in_module reports whether a caller at this site sees a declaration of its own
-// module (directory) at `decl`: always outside a standalone program; in one, when its
-// `main` module is one program (solo), or when the caller is a test in a directory
-// with no `fn main` and `decl` is in a `module main` file, as V builds such a test
+// module (directory) in `decl_file`, which is a `module main` file when `decl_main`:
+// always outside a standalone program; in one, when its `main` module is one program
+// (solo), or when the caller is a test in a directory with no `fn main` and the
+// declaration is in a `module main` file that is no test, as V builds such a test
 // with the directory's `module main` files (common.v beside vlib/wasm/tests/*_test.v),
-// not with a file of another module there (md5.v beside md5_test.v). Another test
-// file's declarations stay private to it (test_private).
-fn (site DeclSite) sees_in_module(decl DeclSite) bool {
-	return !site.is_main || site.solo || (site.no_main && is_test_file(site.file) && decl.is_main)
+// not with a file of another module there (md5.v beside md5_test.v) nor another test
+// (b_test.c.v, which test_private, matching `_test.v` alone, would let through).
+// `decl_main` must come from the declaration's own file: a const's id is shared by
+// every file of the directory that declares it, so its site_of entry is any one's.
+fn (site DeclSite) sees_in_module(decl_file string, decl_main bool) bool {
+	return !site.is_main || site.solo
+		|| (site.no_main && is_test_file(site.file) && decl_main && !is_test_file(decl_file))
 }
 
 // generated_enum_mod is the module of the enum a static call names (`MyEnum` or
@@ -901,8 +905,9 @@ struct DeclSite {
 	// is one program, so its files are one another's module (see resolve_edges)
 	solo bool
 	// no_main is set when the module has no `fn main` at all: a directory of
-	// translated or test files, built together. Only a type alias's lookup
-	// (alias_conversion) takes the module as one program for this.
+	// translated or test files, built together. A type's lookup (type_in_scope)
+	// takes the module as one program for this, and a test's calls and consts see
+	// its `module main` files (sees_in_module).
 	no_main bool
 }
 
@@ -1921,7 +1926,7 @@ fn resolve_callee(e Edge, by_name map[string][]CallCand, site_of map[string]Decl
 		mut same_mod := []CallCand{}
 		for c in narrowed {
 			if c.mod == caller.mod && !test_private(c.file, caller.file)
-				&& caller.sees_in_module(site_of[c.id] or { DeclSite{} }) {
+				&& caller.sees_in_module(c.file, (site_of[c.id] or { DeclSite{} }).is_main) {
 				same_mod << c
 			}
 		}
