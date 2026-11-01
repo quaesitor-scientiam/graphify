@@ -5388,7 +5388,7 @@ fn test_a_call_of_a_function_taken_from_an_array_or_map_is_linked_to_its_holder(
 	// global map holds: the field and the global are the declarations there are, as for
 	// `s.on_running(x)`, not some `list` method or `fns` function of another module
 	g := graph_of({
-		'lib/m/m.v':         'module m\n\nstruct Handlers {\n\tlist  []fn (int)\n\tnamed map[string][]fn (int)\n}\n\n__global fns map[string]fn () int\n\n__global count map[string]int\n\nfn (h Handlers) run(i int) {\n\th.list[i](1)\n\th.named[\'a\'][0](2)\n\t_ := fns[\'a\']()\n}\n'
+		'lib/m/m.v':         'module m\n\nstruct Handlers {\n\tlist  []fn (int)\n\tnamed map[string][]fn (int)\n}\n\n__global fns map[string]fn () int\n\n__global count map[string]int\n\n__global made = make_fn()\n\nfn make_fn() fn () {\n\treturn fn () {}\n}\n\nfn (h Handlers) run(i int) {\n\th.list[i](1)\n\th.named[\'a\'][0](2)\n\t_ := fns[\'a\']()\n\tmade()\n\tcount()\n}\n'
 		'lib/other/other.v': 'module other\n\npub struct S {}\n\npub fn (s S) list() {}\n\npub fn (s S) named() {}\n'
 		'lib/other/two.v':   'module other\n\npub struct T {}\n\npub fn (t T) list() {}\n\npub fn (t T) named() {}\n'
 	})
@@ -5396,6 +5396,10 @@ fn test_a_call_of_a_function_taken_from_an_array_or_map_is_linked_to_its_holder(
 	assert 'lib.m.Handlers.list' in calls, calls.str()
 	assert 'lib.m.Handlers.named' in calls, calls.str()
 	assert 'lib.m.fns' in calls, calls.str()
+	// a global with no stated type is called as a const is; one whose stated type holds
+	// no function is never what a call names
+	assert 'lib.m.made' in calls, calls.str()
+	assert 'lib.m.count' !in calls, calls.str()
 	// container_elem looks through every array, fixed array and map
 	assert container_elem('map[string][]fn (int)') == 'fn (int)'
 	assert container_elem('[3]map[int]string') == 'string'
@@ -7466,8 +7470,8 @@ pub fn (n Node) str() string {
 
 import node
 
-fn portable() int {
-	return 1
+fn portable() node.Node {
+	return node.Node{}
 }
 
 pub const limit = \$if cross ? {
@@ -7494,6 +7498,8 @@ pub fn g() string {
 '
 	})
 	assert g.edges.any(it.kind == .calls && it.from == 'lib.f' && it.to == 'vlib.builtin.int.str'), g.edges.map(it.to).str()
+	// the option's branch is a Node, so taking it would give Node.str
+	assert !g.edges.any(it.kind == .calls && it.from == 'lib.f' && it.to == 'node.Node.str')
 	assert !g.edges.any(it.kind == .calls && it.from == 'lib.g' && it.to in ['vlib.builtin.int.str', 'node.Node.str']), g.edges.filter(it.from == 'lib.g').str()
 }
 
@@ -8685,31 +8691,37 @@ fn parse(s string) Kind {
 }
 
 fn test_a_generated_from_string_of_an_imported_enum_is_provided_by_v() {
-	// the enum of `mod2.Kind.from_string(s)` is the one module its qualifier names, and
-	// of `Kind.from_string(s)` under `import mod { Kind }` mod's, though mod2, imported
-	// too, has a `Kind`; `Shape` is no enum, and `Kind` of `Lone.Kind` is in two modules
-	// named `lone`, so neither call is one V provides
+	// the enum of `mod2.Kind.from_string(s)` is the one module its qualifier names: a
+	// standalone program's enum (app/progs/mod2) is no module an import names, and of
+	// `rand.Kind`, vlib/rand is named exactly where vlib/crypto/rand only ends like it.
+	// `Shape` is no enum, and `lone.Kind` is in two modules named `lone`, so neither
+	// call is one V provides. `mod2.Show.zero()` is V's for a flag enum, and
+	// `mod2.Kind.zero()` is not, as Kind is no flag enum.
 	g := graph_of({
-		'app/v.mod':         ''
-		'app/mod/mod.v':     'module mod\n\npub enum Kind {\n\ta\n}\n\npub struct Shape {}\n'
-		'app/mod2/mod2.v':   'module mod2\n\npub enum Kind {\n\ta\n}\n'
-		'app/a/lone/lone.v': 'module lone\n\npub enum Kind {\n\ta\n}\n'
-		'app/b/lone/lone.v': 'module lone\n\npub enum Kind {\n\ta\n}\n'
-		'app/main_test.v':   'module main\n\nimport mod { Kind, Shape }\nimport mod2\nimport lone\n\nfn test_m() {\n\t_ := Kind.from_string(\'a\') or { return }\n\t_ := mod2.Kind.from_string(\'a\') or { return }\n\t_ := lone.Kind.from_string(\'a\') or { return }\n\t_ := Shape.from_string(\'a\') or { return }\n}\n'
+		'app/v.mod':               ''
+		'app/mod/mod.v':           'module mod\n\npub struct Shape {}\n'
+		'app/mod2/mod2.v':         'module mod2\n\npub enum Kind {\n\ta\n}\n\n@[flag]\npub enum Show {\n\ta\n\tb\n}\n'
+		'app/progs/mod2/main.v':   'module main\n\nenum Kind {\n\ta\n}\n\nfn main() {}\n'
+		'app/a/lone/lone.v':       'module lone\n\npub enum Kind {\n\ta\n}\n'
+		'app/b/lone/lone.v':       'module lone\n\npub enum Kind {\n\ta\n}\n'
+		'vlib/rand/rand.v':        'module rand\n\npub enum Kind {\n\ta\n}\n'
+		'vlib/crypto/rand/rand.v': 'module rand\n\npub enum Kind {\n\ta\n}\n'
+		'app/main_test.v':         'module main\n\nimport mod { Shape }\nimport mod2\nimport lone\nimport rand\n\nfn test_m() {\n\t_ := mod2.Kind.from_string(\'a\') or { return }\n\t_ := lone.Kind.from_string(\'a\') or { return }\n\t_ := rand.Kind.from_string(\'a\') or { return }\n\t_ := Shape.from_string(\'a\') or { return }\n\t_ := mod2.Show.zero()\n\t_ := mod2.Kind.zero()\n}\n'
 	})
 	calls := g.edges.filter(it.kind == .calls && it.from == 'app.test_m')
 	und := calls.filter(it.provenance == .undeclared).map(it.to)
-	assert und.len == 2, calls.str()
-	assert 'mod.Kind__static__from_string' in und, und.str()
+	assert und.len == 3, calls.str()
 	assert 'mod2.Kind__static__from_string' in und, und.str()
+	assert 'rand.Kind__static__from_string' in und, und.str()
+	assert 'mod2.Show__static__zero' in und, und.str()
 	assert !calls.any(it.to.contains('Shape__static__from_string') && it.provenance == .undeclared)
 	assert !calls.any(it.to.contains('lone.Kind') && it.provenance == .undeclared)
-	// a static call through a selective import of a module whose directory has
-	// another name, which no module is named by, is the bare call it was written as
+	assert !calls.any(it.to == 'mod2.Kind__static__zero' && it.provenance == .undeclared)
+	// a static call through a selective import is named bare, as written, so one of a
+	// module whose directory has another name still resolves by its name
 	h := graph_of({
 		'proj/v.mod':       ''
 		'proj/odd/foo.v':   'module zmod_foo\n\npub struct Foo {}\n\npub fn Foo.new() Foo {\n\treturn Foo{}\n}\n'
-		'proj/other/bar.v': 'module other\n\npub struct Foo {}\n\npub fn Foo.new() Foo {\n\treturn Foo{}\n}\n'
 		'proj/odd/main.v':  'module main\n\nimport zmod_foo { Foo }\n\nfn main() {\n\t_ := Foo.new()\n}\n'
 	})
 	hc := h.edges.filter(it.kind == .calls && it.from == 'proj.odd.main').map(it.to)

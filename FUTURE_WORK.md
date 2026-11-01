@@ -160,7 +160,7 @@ type, which the graph doesn't name.
 
 A call in a constant's, global's or struct field's initializer (`const x = f()`, `n int = f()`) is recorded as made by that declaration. Its caller id is set after the renames that give colliding declarations their own ids (`resolve_initializer_callers`), so a constant that shares a name with a function keeps its own calls. On the V compiler's tree that adds 2,023 call edges. On a 300-name sample per group, checking the graph's caller files against the source (string literals, comments and casts excluded): names declared once 98.2% → 98.7%, names declared in several files 97.5% → 98.2%.
 
-V generates `T.zero()` for a `@[flag]` enum, and for no other enum, so an unresolved call of that form to a flag enum in the caller's module is undeclared (`enum_names` and `flag_here`, in resolve_edges). The flag is read from the attribute by `is_flag_enum` (backend_v.v) into the enum's signature. A `zero()` on an enum from another module, named through it or a selective import, is matched in the one module that name reaches (`generated_enum_mod`, November 2026); `asn1.Integer.zero()` is not one, as `Integer` is no enum.
+V generates `T.zero()` for a `@[flag]` enum, and for no other enum, so an unresolved call of that form to a flag enum in the caller's module is undeclared (`enum_names` and `flag_here`, in resolve_edges). The flag is read from the attribute by `is_flag_enum` (backend_v.v) into the enum's signature. A `zero()` on an enum from another module, named through it, is matched in the module that name names (`generated_enum_mod`, November 2026); `asn1.Integer.zero()` is not one, as `Integer` is no enum.
 A call on the result of a function declared once per platform is typed when every copy returns the same type (`same_return`, in infer.v), since the copies are renamed apart in a standalone program and no single one is the call's target. A call that reaches one copy of a function or method reaches all of them (`variants_of`, in resolve_edges), since the graph must match on every platform. A receiver's method is also found when its copy is named with its file (the base-name pass in resolve_callee). On the V compiler's tree that resolves 23 more calls and adds 39 call edges.
 
 A fixed-size array literal (`['Jan', 'Feb']!`) is a postfix node over an array literal, which the recipe code didn't read, so its elements had no type. Its recipe is now the literal's (`.postfix` in recipe). On the V compiler's tree that resolves a loop over `const month_names = [...]!` and 28 other calls.
@@ -508,14 +508,16 @@ vlang `aba4d07278`, five causes with a fix of their own:
   in vlib/wasm/tests/common.v (9 calls). A file of another module in the directory,
   md5.v beside md5_test.v, stays unseen. A test with no `module` line is built alone
   by V, which the graph doesn't tell apart, so it sees them too.
-- `T.from_string()` is V's for an enum T named through its module (`mod.MyEnum`) or a
-  selective import (`import mod { MyEnum }`), which the call is now qualified with
-  (`callee`, in backend_v.v; `generated_enum_mod`, in graphify.v). Where the import
-  names no module of the tree (`import zmod_foo { Foo }` of a directory with another
-  name), a static call falls back to its bare name, as before. A function named as a
-  value is a function (`named_fn_type`, in infer.v), so `[a, b].index(b)` is an
-  array's, and `to_fixed_size()` is a method V provides (9 calls, 3 of them now
-  linked to builtin's `array.index` and `array.contains`).
+- `T.from_string()` is V's for an enum T named through its module (`mod.MyEnum`):
+  the module the qualifier names exactly, else the one it reaches, leaving out
+  standalone programs, which no import names (`generated_enum_mod`, in graphify.v).
+  A function named as a value is a function (`named_fn_type`, in infer.v), so
+  `[a, b].index(b)` is an array's, and `to_fixed_size()` is a method V provides (7
+  calls, 3 of them now linked to builtin's `array.index` and `array.contains`). Not
+  done: `MyEnum.from_string()` under `import mod { MyEnum }`. The call is named bare,
+  and qualifying it with the import breaks a static call of a module whose directory
+  has another name (`import zmod_foo { Foo }`), so the graph would need each file's
+  selective names kept beside the call.
 - A call of a function an array or map holds, `h.list[i](x)` or `h.named['a'][0](x)`,
   is named by the field, and linked to it (`container_elem`, in infer.v), as a call
   through a function-typed field is. A global whose type holds functions
@@ -527,7 +529,7 @@ vlang `aba4d07278`, five causes with a fix of their own:
   build's (`default_term`), and the value is the rest's (4 calls, plus one in veb
   that had linked to `Middleware[T].str`).
 
-Unresolved calls go from 220 to 181 and undeclared from 4,716 to 4,712; no resolved
+Unresolved calls go from 220 to 183 and undeclared from 4,716 to 4,711; no resolved
 call is lost. One call changes target, from `options.named` in another test module to
 the `Handlers.named` field it calls.
 

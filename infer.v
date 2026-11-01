@@ -107,27 +107,7 @@ fn (mut inf Infer) infer_call(e Edge) ?CallResolution {
 		if r := resolve_qualified_callee(e, inf.by_name, inf.site_of, inf.scope_of) {
 			return r
 		}
-		if r := resolve_qualified_callee(e, inf.const_calls, inf.site_of, inf.scope_of) {
-			return r
-		}
-		// a static call through a selective import is qualified with the import as
-		// written (callee, in backend_v.v), which names no module when the module's
-		// directory has another name (`import zmod_foo { Foo }` of a directory
-		// project_issue_21476): then it is the bare `Foo.new()` it was written as
-		if e.to.contains('__static__') && !e.to.starts_with('C.') {
-			prefix := e.to.all_before_last('.')
-			mut known := false
-			for _, scope in inf.scope_of {
-				if import_reaches(scope.mod, prefix) {
-					known = true
-					break
-				}
-			}
-			if !known {
-				return inf.infer_call(Edge{ ...e, to: e.to.all_after_last('.') })
-			}
-		}
-		return none
+		return resolve_qualified_callee(e, inf.const_calls, inf.site_of, inf.scope_of)
 	}
 	if e.is_method {
 		if t := inf.receiver(e) {

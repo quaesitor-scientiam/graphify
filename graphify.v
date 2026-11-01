@@ -747,11 +747,11 @@ fn (site DeclSite) sees_in_module(decl DeclSite) bool {
 }
 
 // generated_enum_mod is the module of the enum a static call names (`MyEnum` or
-// `mod.MyEnum` of `MyEnum.from_string(s)`), from a caller at `site`: with a
-// qualifier, which a selective import (`import mod { MyEnum }`) gives too (callee,
-// in backend_v.v), the one module of `mods` (those declaring an enum of that name)
-// it reaches; without, the caller's own module when it declares one. '' when no
-// module, or more than one, fits.
+// `mod.MyEnum` of `MyEnum.from_string(s)`), from a caller at `site`: without a
+// qualifier, the caller's own module when it declares one; with one, the module of
+// `mods` (those declaring an enum of that name, standalone programs left out, as no
+// import names one) that the qualifier names exactly (import_names), else the one
+// it reaches. '' when no module, or more than one, fits.
 fn generated_enum_mod(typ_text string, site DeclSite, enum_names map[string]bool, mods []string) string {
 	typ := typ_text.all_after_last('.')
 	if !typ_text.contains('.') {
@@ -759,6 +759,10 @@ fn generated_enum_mod(typ_text string, site DeclSite, enum_names map[string]bool
 	}
 	qual := typ_text.all_before_last('.')
 	fits := mods.filter(import_reaches(it, qual))
+	exact := fits.filter(import_names(it, qual))
+	if exact.len == 1 {
+		return exact[0]
+	}
 	return if fits.len == 1 { fits[0] } else { '' }
 }
 
@@ -1009,9 +1013,6 @@ fn resolve_edges(mut g Graph) {
 		}
 		if s.kind == .enum_ {
 			enum_names[s.parent + '\x00' + s.name] = true
-			if s.parent !in enum_mods[s.name] {
-				enum_mods[s.name] << s.parent
-			}
 			flagged := s.signature.starts_with('@[flag]')
 			flag_here[s.parent + '\x00' + s.name + '\x00' + s.file] = flagged
 			flag_in_mod[s.parent + '\x00' + s.name] = (flag_in_mod[s.parent + '\x00' + s.name] or { true }) && flagged
@@ -1031,6 +1032,12 @@ fn resolve_edges(mut g Graph) {
 	mut site_of := map[string]DeclSite{}
 	mut id_count := map[string]int{}
 	mains := main_unit_files(g)
+	for s in g.symbols {
+		// a standalone program's enum is no module an import can name
+		if s.kind == .enum_ && !in_main_unit(s, mains) && s.parent !in enum_mods[s.name] {
+			enum_mods[s.name] << s.parent
+		}
+	}
 	mut id_main := map[string]bool{}
 	mut id_files := map[string][]string{}
 	// id_kind is the kind of an id's first declaration, and id_mixed is set when another
@@ -1555,8 +1562,8 @@ fn resolve_edges(mut g Graph) {
 			// V generates `T.zero()` for a @[flag] enum T, and `T.from(x)` and
 			// `T.from_string(s)` for every enum T. A call of one of them, to an enum T
 			// that declares no method of that name, is one V provides. T is the caller's
-			// module's, or the one module its qualifier or a selective import names
-			// (`mod.MyEnum.from_string`), see generated_enum_mod.
+			// module's, or the one module its qualifier names (`mod.MyEnum.from_string`),
+			// see generated_enum_mod.
 			if site := caller_site(e, site_of) {
 				typ_text := e.to.all_before('__static__')
 				typ := typ_text.all_after_last('.')

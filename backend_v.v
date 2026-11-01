@@ -2890,20 +2890,14 @@ fn (f &V3File) recipe(id flat.NodeId, ctx V3CallCtx) string {
 			// don't, a branch that only an option on the command line selects
 			// (`$if cross ? { portable_max_int() }`) is not the default build's, so the
 			// value is the rest's; else none
-			mut r := ''
-			for k in kids {
-				br := f.recipe(k, ctx)
-				if br == '' || (r != '' && br != r) {
-					r = ''
-					break
-				}
-				r = br
+			// each branch's recipe is worked out once: an `$else $if` chain nests, and
+			// working the `$else` out again would double the work at every level
+			brs := kids.map(f.recipe(it, ctx))
+			if brs.len > 0 && brs.all(it != '' && it == brs[0]) {
+				return brs[0]
 			}
-			if r != '' {
-				return r
-			}
-			if kids.len == 2 && !default_term(f.build_cond(n)) {
-				return f.recipe(kids[1], ctx)
+			if brs.len == 2 && !default_term(f.build_cond(n)) {
+				return brs[1]
 			}
 			return ''
 		}
@@ -3473,11 +3467,6 @@ fn (f &V3File) callee(callee_id flat.NodeId, ctx V3CallCtx) (string, bool, flat.
 	}
 	if target.kind == .ident && target.value_text().len > 0 && target.value_text()[0].is_capital()
 		&& target.value_text() !in ctx.locals {
-		// a type a selective import names, `Kind` of `import mod { Kind }`, is that module's
-		// (`mod.Kind__static__from_string`), as a function it names is
-		if mod := f.selected[target.value_text()] {
-			return '${mod}.${target.value_text()}__static__${c.value_text()}', false, flat.NodeId(-1)
-		}
 		return '${target.value_text()}__static__${c.value_text()}', false, flat.NodeId(-1)
 	}
 	// a static member of a JS binding, `JS.Promise.race(p)` or `JS.Array.prototype.constructor()`,
