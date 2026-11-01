@@ -18,7 +18,7 @@ module graphify
 // by resolve_edges.
 struct Infer {
 	by_name      map[string][]CallCand
-	const_calls  map[string][]CallCand // constants by name: the fallback for a call (see infer_call)
+	const_calls  map[string][]CallCand // constants and globals by name: the fallback for a call (see infer_call)
 	by_type_name map[string][]TypeCand
 	site_of      map[string]DeclSite
 	imports_of   map[string][]string
@@ -174,18 +174,18 @@ fn (mut inf Infer) infer_call(e Edge) ?CallResolution {
 	if r := resolve_callee(e, inf.by_name, inf.site_of, inf.imports_of) {
 		return r
 	}
-	// a constant holding a function is called as one (`const f = g`, then `f()`), and a
-	// method call is never one. A function of the name that resolve_callee could not pick
-	// (a platform copy, say) is the callee, not the constant, so only a name with none
-	// is a constant's
+	// a constant or global holding a function is called as one (`const f = g`, then
+	// `f()`), and a method call is never one. A function of the name that resolve_callee
+	// could not pick (a platform copy, say) is the callee, not the constant, so only a
+	// name with none is a constant's or global's
 	if e.is_method || e.to in inf.by_name {
 		return none
 	}
 	return resolve_const_callee(e, inf.const_calls, inf.site_of, inf.imports_of, inf.scope_of)
 }
 
-// resolve_const_callee resolves a call of a name no function has to the one constant of
-// that name the caller can see (see infer_call). Unlike resolve_callee, which takes a name
+// resolve_const_callee resolves a call of a name no function has to the one constant or
+// global of that name the caller can see (see infer_call). Unlike resolve_callee, which takes a name
 // that is unique in the whole graph, it needs visibility, so a constant of an unrelated,
 // unimported module is never the callee. A constant in the caller's own file is visible
 // even in a standalone `main` program, where visible_from grants no module visibility.

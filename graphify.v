@@ -989,8 +989,9 @@ fn resolve_initializer_callers(mut g Graph) {
 fn resolve_edges(mut g Graph) {
 	resolve_initializer_callers(mut g)
 	mut by_name := map[string][]CallCand{}
-	// const_calls holds the constants by name: a constant that holds a function is
-	// called as one, and it is the fallback when no function of that name fits (see infer_call)
+	// const_calls holds the constants and globals by name that may hold a function
+	// (see below): one that does is called as one, and it is the fallback when no
+	// function of that name fits (see infer_call)
 	mut const_calls := map[string][]CallCand{}
 	mut by_type_name := map[string][]TypeCand{}
 	// type aliases by name, for a bare call of one (see alias_conversion)
@@ -1013,6 +1014,8 @@ fn resolve_edges(mut g Graph) {
 	mut struct_mod := map[string]string{}
 	for s in g.symbols {
 		sym_ids[s.id] = true
+		// and by its id without the file a colliding copy carries
+		sym_ids[s.id.all_before('@')] = true
 		if (s.kind == .function || s.kind == .type_alias) && s.id.starts_with('C.') {
 			c_declared[s.id.all_before('@')] = true
 		}
@@ -1038,8 +1041,9 @@ fn resolve_edges(mut g Graph) {
 	mut id_count := map[string]int{}
 	mains := main_unit_files(g)
 	for s in g.symbols {
-		// a standalone program's enum is no module an import can name
-		if s.kind == .enum_ && !in_main_unit(s, mains) && s.parent !in enum_mods[s.name] {
+		// a standalone program's enum, or a test's, is no module's an import can name
+		if s.kind == .enum_ && !in_main_unit(s, mains) && !is_test_file(s.file)
+			&& s.parent !in enum_mods[s.name] {
 			enum_mods[s.name] << s.parent
 		}
 	}
@@ -1573,7 +1577,8 @@ fn resolve_edges(mut g Graph) {
 				typ := typ_text.all_after_last('.')
 				method := e.to.all_after('__static__')
 				mod := generated_enum_mod(typ_text, site, enum_names, enum_mods[typ] or { []string{} })
-				if mod != '' && '${mod}.${typ}.${method}' !in sym_ids
+				// a static method's id is `<mod>.<T>__static__<name>`
+				if mod != '' && '${mod}.${typ}__static__${method}' !in sym_ids
 					&& (method != 'zero' || (flag_here[mod + '\x00' + typ + '\x00' + site.file] or { flag_in_mod[mod + '\x00' + typ] or { false } })) {
 					resolved << Edge{...e, provenance: .undeclared}
 					continue

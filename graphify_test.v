@@ -8808,6 +8808,20 @@ fn test_a_generated_from_string_of_an_imported_enum_is_provided_by_v() {
 	})
 	pc := p.edges.filter(it.kind == .calls && it.from == 'app.test_p')
 	assert pc.any(it.to == 'plat.Kind__static__from_string' && it.provenance == .undeclared), pc.str()
+	// an enum that declares its own from_string (here in a test the caller can't
+	// reach) isn't V's; a test's enum is no module's an import names, so `solo.Kind`
+	// is app/d/solo's alone
+	d := graph_of({
+		'app/v.mod':                ''
+		'app/dec/dec.v':            'module dec\n\npub enum Kind {\n\ta\n}\n'
+		'app/dec/extra_test.v':     'module dec\n\nfn Kind.from_string(s string) ?Kind {\n\treturn none\n}\n'
+		'app/c/solo/solo_test.v':   'module solo\n\nenum Kind {\n\ta\n}\n'
+		'app/d/solo/solo.v':        'module solo\n\npub enum Kind {\n\ta\n}\n'
+		'app/main_test.v':          'module main\n\nimport dec\nimport solo\n\nfn test_d() {\n\t_ := dec.Kind.from_string(\'a\') or { return }\n\t_ := solo.Kind.from_string(\'a\') or { return }\n}\n'
+	})
+	dc := d.edges.filter(it.kind == .calls && it.from == 'app.test_d')
+	assert !dc.any(it.to == 'dec.Kind__static__from_string' && it.provenance == .undeclared), dc.str()
+	assert dc.any(it.to == 'solo.Kind__static__from_string' && it.provenance == .undeclared), dc.str()
 	// a static call through a selective import is named bare, as written, so one of a
 	// module whose directory has another name still resolves by its name
 	h := graph_of({
@@ -9800,6 +9814,36 @@ fn main() {}
 		vmodules: os.real_path(os.join_path(base, 'vmodules'))
 	}
 	return base, roots
+}
+
+fn test_a_library_directory_of_tests_alone_is_no_module() {
+	// module_of looks in VROOT's vlib and then VMODULES; a vlib directory holding only
+	// tests is no module, so `foo` is VMODULES' (has_v_sources). vmodules_own_import
+	// likewise skips a tests-only directory beside the v.mod.
+	base := write_tree('library_tests_only', {
+		'v/vlib/foo/foo_test.v':         'module foo\n\nfn test_f() {}\n'
+		'vmodules/foo/foo.v':            'module foo\n\npub fn f() {}\n'
+		'vmodules/pkg/v.mod':            ''
+		'vmodules/pkg/pkg.v':            'module pkg\n\nimport helpers\n'
+		'vmodules/pkg/helpers/h_test.v': 'module helpers\n\nfn test_h() {}\n'
+	})
+	defer {
+		os.rmdir_all(base) or {}
+	}
+	roots := LibraryRoots{
+		vroot:    os.real_path(os.join_path(base, 'v'))
+		vmodules: os.real_path(os.join_path(base, 'vmodules'))
+	}
+	m := roots.module_of('foo') or { panic('foo not found') }
+	assert m.rel_dir.starts_with(lib_vmodules_prefix), m.str()
+	old := os.getenv(lib_env_vmodules)
+	os.setenv(lib_env_vmodules, roots.vmodules, true)
+	defer {
+		os.setenv(lib_env_vmodules, old, true)
+	}
+	if own := vmodules_own_import('helpers', os.join_path(roots.vmodules, 'pkg', 'pkg.v')) {
+		assert false, 'a tests-only directory was taken as a module: ${own}'
+	}
 }
 
 fn test_a_project_resolves_its_calls_into_the_library() {
