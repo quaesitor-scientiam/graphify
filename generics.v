@@ -23,7 +23,7 @@ struct Flow {
 // instantiated with, at the receivers of its methods (`sources`, the edges as the
 // extraction recorded them, since a resolved edge drops its receiver) and in the types
 // of the struct fields that are generic instances (`fields`).
-fn expand_type_param_calls(edges []Edge, sources []Edge, fields []Symbol, mut inf Infer, funcs map[string]Symbol) []Edge {
+fn expand_type_param_calls(edges []Edge, sources []Edge, fields []Symbol, mut inf Infer, funcs map[string]Symbol, unaddressable map[string]bool, variants_of map[string][]string) []Edge {
 	// the types each type parameter stands for, by instance_key
 	mut instances := map[string][]InferredType{}
 	mut flows := []Flow{}
@@ -169,13 +169,42 @@ fn expand_type_param_calls(edges []Edge, sources []Edge, fields []Symbol, mut in
 			break
 		}
 	}
-	if instances.len == 0 {
+	if instances.len == 0 && !edges.any(it.is_method && has_field_any(it.recv_recipe)) {
 		return edges
 	}
 	mut out := []Edge{cap: edges.len}
+	// the edges of the calls in field loops, joined to the rest once every edge is out
+	// (see merge_call_edges)
+	mut field_edges := []Edge{}
 	for e in edges {
 		if e.kind != .calls || !e.is_method || e.to.contains('.') || e.provenance == .undeclared {
 			out << e
+			continue
+		}
+		if has_field_any(e.recv_recipe) {
+			// a call on `x.$(field.name)` in a field loop is a call on each field the loop
+			// reaches, in a function that may have no type parameters at all
+			caller := funcs[e.from] or { Symbol{} }
+			ids := field_any_ids(e, caller, generic_params(caller), instances, mut inf)
+			if ids.len == 0 {
+				field_edges << field_any_fallback(e, mut inf, unaddressable, variants_of)
+				continue
+			}
+			// each platform's copy of a method, as resolve_edges links a call that reaches one
+			for id in ids {
+				for vid in variants_of[id] or { [id] } {
+					field_edges << Edge{
+						from:       e.from
+						to:         vid
+						kind:       .calls
+						is_method:  true
+						file:       e.file
+						provenance: .comptime
+						lines:      e.lines
+						build:      e.build
+					}
+				}
+			}
 			continue
 		}
 		caller := funcs[e.from] or {
@@ -257,7 +286,76 @@ fn expand_type_param_calls(edges []Edge, sources []Edge, fields []Symbol, mut in
 			}
 		}
 	}
+	merge_call_edges(mut out, field_edges)
 	return out
+}
+
+// field_any_fallback is the edges of a call `e` on any field of a type that no field
+// answers, resolved as infer_call resolves a call on an unknown receiver: the method
+// it then names, with every platform's copy of it as resolve_edges links one, or an
+// undeclared call, or `e` itself when nothing resolves it.
+fn field_any_fallback(e Edge, mut inf Infer, unaddressable map[string]bool, variants_of map[string][]string) []Edge {
+	r := inf.infer_call(Edge{
+		...e
+		recv_recipe: ''
+	}) or { return [e] }
+	if r.undeclared {
+		return [Edge{
+			...e
+			provenance: .undeclared
+		}]
+	}
+	if r.id == '' || unaddressable[r.id] {
+		return [e]
+	}
+	mut out := []Edge{}
+	for id in variants_of[r.id] or { [r.id] } {
+		out << Edge{
+			from:       e.from
+			to:         id
+			kind:       .calls
+			is_method:  e.is_method
+			provenance: if r.inferred { .inferred } else { .extracted }
+			file:       e.file
+			lines:      e.lines
+			build:      e.build
+		}
+	}
+	return out
+}
+
+// merge_call_edges adds the calls edges `extra` to `edges`, each joining an edge of the
+// same caller and callee that is there already, as resolve_edges keeps one edge per
+// callee (and per raw name and comptime conditions, call_key): the edge there keeps its
+// provenance and takes the lines.
+fn merge_call_edges(mut edges []Edge, extra []Edge) {
+	if extra.len == 0 {
+		return
+	}
+	mut at := map[string]int{}
+	for i, e in edges {
+		if e.kind == .calls {
+			k := call_key(e)
+			if k !in at {
+				at[k] = i
+			}
+		}
+	}
+	for e in extra {
+		k := call_key(e)
+		if i := at[k] {
+			add_lines(mut edges, i, e)
+			continue
+		}
+		at[k] = edges.len
+		edges << e
+	}
+}
+
+// call_key is what resolve_edges keeps one calls edge per: its caller and callee, and
+// for an unresolved call the comptime conditions it is under.
+fn call_key(e Edge) string {
+	return if e.guards == '' { '${e.from}\x00${e.to}' } else { '${e.from}\x00${e.to}\x00${e.guards}' }
 }
 
 // instance_key is the key of the types a type parameter `tp` of the declaration
@@ -450,6 +548,340 @@ fn path_method_ids(e Edge, caller Symbol, tps []string, instances map[string][]I
 		}
 	}
 	return ids
+}
+
+// has_field_any reports whether a receiver recipe has the `fa:` step of a call on any
+// field of a type (see field_any_step).
+fn has_field_any(recipe string) bool {
+	return recipe.starts_with('fa:') || recipe.contains(recipe_sep + 'fa:')
+}
+
+// field_any_on_tparam reports whether the receiver of a call on any field of a type is
+// one of `tps`, the caller's type parameters, whose instances are known only once the
+// call sites are read (see field_any_ids).
+fn (mut inf Infer) field_any_on_tparam(e Edge, tps []string) bool {
+	_, tp, _ := inf.field_any_receiver(e, tps) or { return false }
+	return tp != ''
+}
+
+// field_any_receiver reads a receiver recipe with an `fa:` step (see field_any_step): the
+// index of the step, and what the receiver before it is, the caller's type parameter of
+// `tps` it names or else the one type it follows to. none when there is no such step or
+// the receiver can't be followed.
+fn (mut inf Infer) field_any_receiver(e Edge, tps []string) ?(int, string, InferredType) {
+	steps := e.recv_recipe.split(recipe_sep)
+	mut at := -1
+	for i, s in steps {
+		if s.starts_with('fa:') {
+			at = i
+			break
+		}
+	}
+	if at < 1 {
+		return none
+	}
+	prefix := steps[..at]
+	if prefix.len == 1 && prefix[0].starts_with('t:') {
+		if tp := plain_param(prefix[0][2..], '', tps) {
+			return at, tp, InferredType{}
+		}
+	}
+	t := inf.follow(Edge{
+		from:        e.from
+		file:        e.file
+		recv_recipe: prefix.join(recipe_sep)
+	})?
+	if tp := plain_param(t.text, t.mod, tps) {
+		return at, tp, InferredType{}
+	}
+	return at, '', t
+}
+
+// field_any_ids are the methods a call on `x.$(field.name)` reaches in a field loop that
+// no `$if` fixes to one field (the `fa:` step, see field_any_step): the method on the
+// type of each field of x's type that the step's narrowings keep, with the recipe's steps
+// after it followed from that field's type. x's type is each instance of the caller's
+// type parameter that x is, or else the one type its recipe follows to, and it must be the
+// type the loop walks (the step's `L:`), whose fields the loop names. Empty when no field
+// has the method.
+fn field_any_ids(e Edge, caller Symbol, tps []string, instances map[string][]InferredType, mut inf Infer) []string {
+	at, tp, recv_type := inf.field_any_receiver(e, tps) or { return []string{} }
+	steps := e.recv_recipe.split(recipe_sep)
+	mut loop := ''
+	mut kinds := []string{}
+	for k in steps[at][3..].split(';') {
+		if k.starts_with('L:') {
+			loop = k[2..]
+		} else if k != '' {
+			kinds << k
+		}
+	}
+	rest := steps[at + 1..]
+	mut owners := []InferredType{}
+	if tp != '' {
+		if loop != '' && bare_type(loop) != tp {
+			return []string{}
+		}
+		owners = guarded_instances(instances[instance_key(caller, tp)] or { []InferredType{} },
+			e.guards, tp, mut inf)
+	} else {
+		if loop != '' && !inf.names_same_type(recv_type, loop, e.file) {
+			return []string{}
+		}
+		owners << recv_type
+	}
+	mut ids := []string{}
+	for o in owners {
+		// the type as its own module writes it, read in the file that declares it, as
+		// path_method_ids reads an instance
+		name := own_name(o)
+		named := strip_generic_args(bare_type(name))
+		short := named.all_after_last('.')
+		qual := if named.contains('.') { named.all_before_last('.') } else { '' }
+		file := inf.declared_file(short, o.mod, o.file)
+		owner := InferredType{
+			...o
+			text: name
+			file: file
+		}
+		decl := inf.find_type(short, qual, owner, file) or { continue }
+		for fname in inf.fields_of[decl.id] or { []string{} } {
+			// field_of reads a generic instance's arguments into the field; a type written
+			// through another module (`a.S` in module b) it can miss, and the field is then
+			// its declared type, read in the struct's own module
+			ft := inf.field_of(owner, fname, file, 0) or {
+				InferredType{
+					text:     inf.field_type['${decl.id}\x00${fname}'] or { continue }
+					mod:      decl.mod
+					file:     decl.file
+					field_id: inf.field_id['${decl.id}\x00${fname}'] or { '' }
+				}
+			}
+			if !field_kind_holds(fname, ft, kinds, e.file, mut inf) {
+				continue
+			}
+			mut recv := ft
+			if rest.len > 0 {
+				recv = inf.follow_steps(Edge{
+					from:        e.from
+					file:        ft.file
+					recv_recipe: 't:' + own_name(ft) + recipe_sep + rest.join(recipe_sep)
+				}, 0) or { continue }
+			}
+			id := inf.method_on(recv, e.to, e.file, 0) or {
+				inf.platform_copy_method(recv, e.to, e.file) or { continue }
+			}
+			if id !in ids {
+				ids << id
+			}
+		}
+	}
+	return ids
+}
+
+// platform_copy_method is one copy of the method `name` of the type `t` when the method is
+// declared once per platform (`main.Doc.close@p_nix.c.v`, `...@p_windows.c.v`), which
+// method_on takes for several methods; variants_of links every copy of it. Only copies in
+// platform files count, as variants_of groups them, and not one that a `_test.v` file
+// keeps to itself, which `file`, the caller's, can't see (test_private). none when `t` has
+// no such method.
+fn (inf &Infer) platform_copy_method(t InferredType, name string, file string) ?string {
+	named := strip_generic_args(bare_type(t.text))
+	short := named.all_after_last('.')
+	qual := if named.contains('.') { named.all_before_last('.') } else { '' }
+	decl := inf.find_type(short, qual, t, t.file)?
+	want := decl.id + '.' + name
+	for c in inf.by_name[name] or { []CallCand{} } {
+		if c.is_method && c.id.contains('@') && c.id.all_before('@') == want
+			&& is_platform_file(c.file) && !test_private(c.file, file) {
+			return c.id
+		}
+	}
+	return none
+}
+
+// own_name is a type's text as its own module writes it: `Context` for
+// `vlib.veb.tests.Context` in module `vlib.veb.tests`.
+fn own_name(t InferredType) string {
+	if t.mod != '' && t.text.starts_with(t.mod + '.') {
+		return t.text[t.mod.len + 1..]
+	}
+	return t.text
+}
+
+// field_kind_holds reports whether the field `fname` of type `ft` meets every narrowing
+// in `kinds`, as field_any_step records them: a kind, `$map`, tested on the type as
+// declared, or `~$map` on the type it aliases, as V's FieldData flags are; the field
+// `n:name`; or the type `t:int`; each negated by a leading `!`. A kind that can't be told
+// keeps the field, but a primitive, array, map, channel or function type is never a
+// struct, enum, sum type or interface.
+fn field_kind_holds(fname string, ft InferredType, kinds []string, file string, mut inf Infer) bool {
+	for k in kinds {
+		negated := k.starts_with('!')
+		mut test := if negated { k[1..] } else { k }
+		mut t := ft
+		if test.starts_with('~') {
+			test = test[1..]
+			t = inf.unalias(ft, ft.file)
+		}
+		text := bare_type(t.text)
+		mut holds := false
+		if test.starts_with('n:') {
+			holds = fname == test[2..]
+		} else if test.starts_with('t:') {
+			holds = inf.same_type(t, test[2..], file) or { continue }
+		} else if test == '$array' {
+			holds = text.starts_with('[')
+		} else if test in ['$struct', '$enum', '$sumtype', '$interface'] && !is_declared_kind(text) {
+			holds = false
+		} else if test == '$struct' {
+			holds = inf.is_struct_type(t) or { continue }
+		} else {
+			holds = type_is(t, test, false, mut inf) or { continue }
+		}
+		if holds == negated {
+			return false
+		}
+	}
+	return true
+}
+
+// same_type reports whether a field of type `t` is of the type `want`, written in `file`,
+// as V's `field.typ is want` decides it: on the whole type, so `&Foo`, `?Foo` and
+// `[]Foo` are not `Foo`. The wrapping `&`, `?` and array brackets must match as written
+// (split_type_shape); inside them a primitive is its name, a named type its declaration,
+// read where each side is written, and a map, function or generic instance its text, in
+// one module only. none when that can't be told.
+fn (inf &Infer) same_type(t InferredType, want string, file string) ?bool {
+	// `&`, `?` and the array brackets are compared as written, and the type inside them as
+	// the rest of this function compares a type
+	raw_shape, raw := split_type_shape(t.text)
+	want_shape, w := split_type_shape(want)
+	if raw_shape != want_shape {
+		return false
+	}
+	if raw in primitive_types || w in primitive_types {
+		return raw == w
+	}
+	scope := inf.scope_of[file] or { FileScope{} }
+	if !is_declared_kind(raw) || !is_declared_kind(w) || raw.contains('[') || w.contains('[') {
+		// a map, a function or a generic instance: the same text names the same type only in
+		// one module, since the names inside it are each module's own
+		if t.mod != scope.mod {
+			return none
+		}
+		if raw == w {
+			return true
+		}
+		if raw.contains('.') || w.contains('.') {
+			return none
+		}
+		return false
+	}
+	t_inner := InferredType{
+		...t
+		text: raw
+	}
+	// `Foo` in the struct's module and `Foo` in the loop's can be two types: each is the
+	// declaration its own file sees, and the same text only when one has none
+	rd := inf.find_type(raw.all_after_last('.'), if raw.contains('.') {
+		raw.all_before_last('.')
+	} else {
+		''
+	}, t_inner, t.file) or {
+		if raw == w && t.mod == scope.mod {
+			return true
+		}
+		return none
+	}
+	wt := InferredType{
+		text: w
+		mod:  scope.mod
+		file: file
+	}
+	wd := inf.find_type(w.all_after_last('.'), if w.contains('.') {
+		w.all_before_last('.')
+	} else {
+		''
+	}, wt, file) or {
+		// the same text names the same type only in one module: a selectively imported
+		// `Foo` in the loop's file is another module's
+		if raw == w && t.mod == scope.mod {
+			return true
+		}
+		return none
+	}
+	return rd.id == wd.id
+}
+
+// split_type_shape splits a type text into what wraps a named type, its leading `&`, `?`
+// and `!` and array brackets (`[]`, `[4]`), and the type inside: `&[]Foo` is `&[]` and
+// `Foo`. A map, a function or a generic instance stays whole inside.
+fn split_type_shape(text string) (string, string) {
+	mut s := text.trim_space()
+	mut shape := ''
+	for s.len > 0 {
+		if s[0] in [`&`, `?`, `!`] {
+			shape += s[..1]
+			s = s[1..].trim_space()
+		} else if s.starts_with('[') {
+			end := s.index(']') or { break }
+			shape += s[..end + 1]
+			s = s[end + 1..]
+		} else {
+			break
+		}
+	}
+	return shape, s
+}
+
+// names_same_type reports whether `t`, a receiver's type, is the type `loop` that a
+// field loop in `file` walks the fields of (`$for field in Data.fields`): the same
+// declaration, a reference to it included, or the same text when neither is declared.
+fn (inf &Infer) names_same_type(t InferredType, loop string, file string) bool {
+	rt := strip_generic_args(bare_type(own_name(t)))
+	lt := strip_generic_args(bare_type(loop))
+	rd := inf.find_type(rt.all_after_last('.'), if rt.contains('.') {
+		rt.all_before_last('.')
+	} else {
+		''
+	}, t, t.file) or { return rt == lt }
+	scope := inf.scope_of[file] or { FileScope{} }
+	lw := InferredType{
+		text: lt
+		mod:  scope.mod
+		file: file
+	}
+	ld := inf.find_type(lt.all_after_last('.'), if lt.contains('.') {
+		lt.all_before_last('.')
+	} else {
+		''
+	}, lw, file) or { return rt == lt }
+	return rd.id == ld.id
+}
+
+// is_declared_kind reports whether a type text can name a struct, enum, sum type or
+// interface: a named type that is not a primitive, an array, a map, a channel or a
+// function type.
+fn is_declared_kind(text string) bool {
+	return is_named_type(text) && text !in primitive_types && !text.starts_with('map[')
+		&& !text.starts_with('chan ') && !text.starts_with('fn ') && !text.starts_with('fn(')
+		&& !text.starts_with('thread')
+}
+
+// is_struct_type reports whether `t` names a struct: a named type that is not a
+// primitive, an array, a map, an enum, a sum type, an interface or an alias. none when
+// no declaration names it.
+fn (inf &Infer) is_struct_type(t InferredType) ?bool {
+	text := bare_type(t.text)
+	if !is_declared_kind(text) {
+		return false
+	}
+	named := strip_generic_args(text)
+	short := named.all_after_last('.')
+	qual := if named.contains('.') { named.all_before_last('.') } else { '' }
+	decl := inf.find_type(short, qual, t, t.file)?
+	return !inf.enum_ids[decl.id] && !inf.dynamic_ids[decl.id] && decl.id !in inf.alias_of
 }
 
 // method_owner is the id of the struct a method belongs to, `mod.Box` for

@@ -1769,7 +1769,10 @@ mut:
 	// check (see narrowed), where its narrowed type lacks a method
 	fallbacks map[string]string
 	// pins is the type recipe that a `$if` on a `$for` loop variable fixes
-	// its selector to, keyed as comptime_pin keys it (see comptime_pin)
+	// its selector to, keyed as comptime_pin keys it (see comptime_pin); under
+	// `kind:<variable>` what the `$if`s around the block narrow a field loop's
+	// variable to (see comptime_kind_pin, field_any_step); and under
+	// `loop:<variable>` the type a field loop walks the fields of
 	pins map[string]string
 }
 
@@ -1974,6 +1977,68 @@ fn (ctx V3CallCtx) with_vars(names []string, recipes []string) V3CallCtx {
 	}
 }
 
+// comptime_kind_pin reads the condition of a `$if` as the kind of type it narrows a field
+// loop's variable to, keyed `kind:<variable>`. `field.typ is $map` gives `$map`, a test
+// of the field's type as declared; `field.unaliased_typ is $map` and V's flags
+// (`field.is_map`, is_struct, is_array, is_enum), which V computes on the unaliased type,
+// give `~$map`; `field.is_option` gives `$option`. A leading `!` negates it (`!$map`). It
+// returns none for a test that names one type (see comptime_pin), no kind
+// (`field.is_mut`), or a compound condition.
+fn comptime_kind_pin(cond string) ?(string, string) {
+	mut c := cond.trim_space()
+	negated := c.starts_with('!')
+	if negated {
+		c = c[1..].trim_space()
+	}
+	if c.contains('&&') || c.contains('||') || c.contains('(') {
+		return none
+	}
+	mut v := ''
+	mut kind := ''
+	if idx := c.index(' is ') {
+		lhs := c[..idx].trim_space()
+		rhs := c[idx + 4..].trim_space()
+		if !rhs.starts_with('$') || rhs.contains(' ') {
+			return none
+		}
+		if lhs.ends_with('.unaliased_typ') {
+			v = lhs[..lhs.len - '.unaliased_typ'.len]
+			kind = '~' + rhs
+		} else if lhs.ends_with('.typ') {
+			v = lhs[..lhs.len - 4]
+			kind = rhs
+		} else {
+			return none
+		}
+	} else {
+		dot := c.last_index('.') or { return none }
+		v = c[..dot]
+		kind = match c[dot + 1..] {
+			'is_struct' { '~$struct' }
+			'is_array' { '~$array' }
+			'is_map' { '~$map' }
+			'is_enum' { '~$enum' }
+			'is_option' { '$option' }
+			else { return none }
+		}
+	}
+	if v == '' || !v.bytes().all(it.is_alnum() || it == `_`) {
+		return none
+	}
+	return 'kind:' + v, if negated { '!' + kind } else { kind }
+}
+
+// negate_kind is the kind of a field narrowing (comptime_kind_pin) the other way round:
+// `!$map` for `$map` and `$map` for `!$map`.
+fn negate_kind(kind string) string {
+	return if kind.starts_with('!') { kind[1..] } else { '!' + kind }
+}
+
+// add_kind is the kinds `old` (`;`-separated, see field_any_step) with `kind` added.
+fn add_kind(old string, kind string) string {
+	return if old == '' { kind } else { old + ';' + kind }
+}
+
 // comptime_pin reads the condition of a `$if` as the type it fixes a `$for`
 // loop variable's selector to. `field.typ is int` fixes `x.$(field.name)` to
 // an int in its block, and `method.return_type is string` fixes `x.$method()`
@@ -2057,6 +2122,33 @@ fn (f &V3File) comptime_field_pin(sel flat.NodeId, ctx V3CallCtx) string {
 		return ''
 	}
 	return ctx.pins['field:' + f.node(ik[0]).value_text()] or { '' }
+}
+
+// field_any_step reads `x.$(field.name)`, the selector `sel`, in a `$for field in
+// X.fields` loop that no `$if` fixes to one field or type: the `;`-separated narrowings
+// of the enclosing `$if`s, each a kind (`~$struct;!$map`, see comptime_kind_pin) or a
+// field or type an earlier branch took (`!n:name`, `!t:int`), and X as the loop writes
+// it. Each iteration is another field, so a call on the selector reaches every field of X
+// that the narrowings keep (the `fa:` step, see recipe). ('', '') when the inner name is
+// not a field loop's variable.
+fn (f &V3File) field_any_step(sel flat.NodeId, ctx V3CallCtx) (string, string) {
+	ks := f.kids(sel)
+	if ks.len != 2 {
+		return '', ''
+	}
+	inner := f.node(ks[1])
+	ik := f.kids(ks[1])
+	if inner.kind != .selector || inner.value_text() != 'name' || ik.len != 1 {
+		return '', ''
+	}
+	if f.node(ik[0]).kind != .ident {
+		return '', ''
+	}
+	v := f.node(ik[0]).value_text()
+	if (ctx.vars[v] or { '' }) != 't:builtin.FieldData' {
+		return '', ''
+	}
+	return ctx.pins['kind:' + v] or { '' }, ctx.pins['loop:' + v] or { '' }
 }
 
 // is_dollar_selector reports whether `id` is a comptime selector, `x.$(...)` or
@@ -2169,7 +2261,43 @@ fn (mut f V3File) walk(id flat.NodeId, ctx V3CallCtx, mut edges []Edge, mut seen
 					mut pins := ctx.pins.clone()
 					pins[key] = recipe
 					f.walk(kids[0], V3CallCtx{ ...ctx, pins: pins }, mut edges, mut seen)
-					f.walk_list(kids[1..], ctx, mut edges, mut seen)
+					// the branches after it are the loop's other fields: not the field it
+					// names, `!n:x`, or not of the type it names, `!t:int` (see field_any_step)
+					mut rest := ctx
+					if key.starts_with('name:') || key.starts_with('field:') {
+						v := key.all_after(':')
+						neg := if key.starts_with('name:') { '!n:' } else { '!t:' }
+						mut rest_pins := ctx.pins.clone()
+						// a type as the file names it: `Foo` of `import c { Foo }` is `c.Foo`
+						named := if key.starts_with('field:') {
+							f.type_text(recipe[2..])
+						} else {
+							recipe[2..]
+						}
+						rest_pins['kind:' + v] = add_kind(ctx.pins['kind:' + v] or { '' },
+							neg + named)
+						rest = V3CallCtx{
+							...ctx
+							pins: rest_pins
+						}
+					}
+					f.walk_list(kids[1..], rest, mut edges, mut seen)
+					return ctx
+				}
+			}
+			// `$if field.is_struct { x.$(field.name).init() }` in a field loop: the block's
+			// selector is a field of that kind, and the branches after it are fields of
+			// another kind (see field_any_step)
+			if kids.len > 0 {
+				if key, kind := comptime_kind_pin(n.value_text()) {
+					old := ctx.pins[key] or { '' }
+					mut held := ctx.pins.clone()
+					held[key] = add_kind(old, kind)
+					mut failed := ctx.pins.clone()
+					failed[key] = add_kind(old, negate_kind(kind))
+					f.walk(kids[0], V3CallCtx{ ...ctx, pins: held }, mut edges, mut seen)
+					f.walk_list(kids[1..], V3CallCtx{ ...ctx, pins: failed }, mut edges, mut
+						seen)
 					return ctx
 				}
 			}
@@ -2191,8 +2319,19 @@ fn (mut f V3File) walk(id flat.NodeId, ctx V3CallCtx, mut edges []Edge, mut seen
 			parts := n.value_text().split('|')
 			if parts.len == 2 && parts[1] in ['fields', 'attributes'] {
 				typ := if parts[1] == 'fields' { 'FieldData' } else { 'VAttribute' }
-				f.walk_list(kids, ctx.with_vars([parts[0]], ['t:builtin.${typ}']), mut edges, mut
-					seen)
+				mut inner := ctx.with_vars([parts[0]], ['t:builtin.${typ}'])
+				if parts[1] == 'fields' {
+					// the type the loop walks the fields of (see field_any_step), and no
+					// narrowing yet: an outer loop's variable of the same name is another
+					mut pins := inner.pins.clone()
+					pins['loop:' + parts[0]] = f.type_text(n.typ_text())
+					pins.delete('kind:' + parts[0])
+					inner = V3CallCtx{
+						...inner
+						pins: pins
+					}
+				}
+				f.walk_list(kids, inner, mut edges, mut seen)
 				return ctx
 			}
 		}
@@ -2831,7 +2970,21 @@ fn (f &V3File) recipe(id flat.NodeId, ctx V3CallCtx) string {
 					base := f.recipe(kids[0], ctx)
 					return if base == '' { '' } else { base + recipe_sep + step }
 				}
-				return f.comptime_field_pin(id, ctx)
+				pinned := f.comptime_field_pin(id, ctx)
+				if pinned != '' {
+					return pinned
+				}
+				// otherwise it is any field the loop reaches: `fa:` with the narrowings and the
+				// loop's type, `L:Data`, which field_any_ids holds x's type to, since x of
+				// another type has fields the loop never names
+				narrowings, loop := f.field_any_step(id, ctx)
+				if loop != '' {
+					base := f.recipe(kids[0], ctx)
+					if base != '' {
+						return base + recipe_sep + 'fa:' + add_kind(narrowings, 'L:' + loop)
+					}
+				}
+				return ''
 			}
 			if n.value_text() in ['len', 'cap'] {
 				return 't:int'

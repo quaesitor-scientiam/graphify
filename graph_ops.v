@@ -1480,6 +1480,7 @@ fn (g Graph) explain_id(id string, uncertain bool) string {
 	mut referenced_by := []string{}
 	mut embeds := []string{}
 	mut any_inferred := false
+	mut any_comptime := false
 	mut any_field := false
 	for e in idx.edges_of(id) {
 		if e.from == id {
@@ -1489,6 +1490,7 @@ fn (g Graph) explain_id(id string, uncertain bool) string {
 					calls.add(label(idx, e.to) + fmark + prov_suffix(e.provenance), e.lines,
 						e.build)
 					any_inferred = any_inferred || e.provenance == .inferred
+					any_comptime = any_comptime || e.provenance == .comptime
 					any_field = any_field || fmark != ''
 				}
 				.defines { defines << label(idx, e.to) }
@@ -1508,6 +1510,7 @@ fn (g Graph) explain_id(id string, uncertain bool) string {
 				.calls {
 					called_by.add(label(idx, e.from) + prov_suffix(e.provenance), e.lines, e.build)
 					any_inferred = any_inferred || e.provenance == .inferred
+					any_comptime = any_comptime || e.provenance == .comptime
 				}
 				.defines { defined_in << label(idx, e.from) }
 				.references {
@@ -1544,6 +1547,9 @@ fn (g Graph) explain_id(id string, uncertain bool) string {
 	}
 	if any_inferred {
 		out << '  ^ [inferred] = picked among several same-named candidates by the inferred receiver type or by locality/visibility, not a name that was unambiguous outright — see the edge provenance note in README'
+	}
+	if any_comptime {
+		out << '  ^ [comptime] = a call on `x.\$(field.name)` in a `\$for field in T.fields` loop, linked to the method on each field type the loop reaches'
 	}
 	// A call whose name matches several declarations cannot be attributed to
 	// one of them, so index() drops it and the `called by` line above silently
@@ -1673,9 +1679,14 @@ fn field_mark(idx Index, id string) string {
 
 // prov_suffix marks a resolved `calls` edge that resolve_callee had to
 // disambiguate among several real candidates, rather than one whose name was
-// unambiguous outright (see EdgeProvenance).
+// unambiguous outright, and one of the edges of a call in a field loop, which
+// reaches each field type's method (see EdgeProvenance).
 fn prov_suffix(p EdgeProvenance) string {
-	return if p == .inferred { ' [inferred]' } else { '' }
+	return match p {
+		.inferred { ' [inferred]' }
+		.comptime { ' [comptime]' }
+		else { '' }
+	}
 }
 
 fn uniq(a []string) []string {

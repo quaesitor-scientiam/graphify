@@ -44,7 +44,11 @@ pub fn (g Graph) emit_graphml() string {
 		sb << '    <edge source="${xml_escape(e.from)}" target="${xml_escape(e.to)}">'
 		sb << '      <data key="e_kind">${xml_escape(edge_kind_str(e.kind))}</data>'
 		if e.kind in [EdgeKind.calls, .embeds, .references] {
-			prov := if e.provenance == .inferred { 'inferred' } else { 'extracted' }
+			prov := match e.provenance {
+				.inferred { 'inferred' }
+				.comptime { 'comptime' }
+				else { 'extracted' }
+			}
 			sb << '      <data key="e_prov">${prov}</data>'
 		}
 		sb << '    </edge>'

@@ -42,10 +42,16 @@ pub enum EdgeKind {
 // field resolves to the field instead. On a `references` or `embeds` edge,
 // `undeclared` marks a `C.` or `JS.` type that no declaration in the program
 // names (see host_type_undeclared), and the report counts it as external.
+// `comptime` marks one of the edges of a call on `x.$(field.name)` in a
+// `$for field in T.fields` loop: each iteration is another field, so the call
+// is linked to the method on every field type the loop reaches, one edge each
+// (see field_any_ids). It is appended last, so the values before it keep the
+// numbers graph.json and the cache store.
 pub enum EdgeProvenance {
 	extracted
 	inferred
 	undeclared
+	comptime
 }
 
 // Symbol is one node in the graph: a single declaration.

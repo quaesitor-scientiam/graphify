@@ -4504,6 +4504,512 @@ fn run(p lib.Plain, o lib.Owned) {
 	assert run.any(it.to == 'lib.Owned.free')
 }
 
+fn test_a_call_on_any_field_in_a_field_loop_reaches_each_field_types_method() {
+	g := graph_of({
+		'lib/lib.v': 'module lib
+
+struct Alpha {}
+
+fn (a Alpha) show() string {
+	return ""
+}
+
+struct Beta {}
+
+fn (b Beta) show() string {
+	return ""
+}
+
+struct Key {}
+
+fn (k Key) show() string {
+	return ""
+}
+
+struct Plain {}
+
+struct Box {
+	a Alpha
+	b Beta
+	p Plain
+	n int
+	m map[Key]Alpha
+}
+
+fn concrete(x Box) {
+	\$for field in Box.fields {
+		\$if field.is_struct {
+			x.\$(field.name).show()
+		}
+	}
+}
+
+fn generic[T](x T) {
+	\$for field in T.fields {
+		\$if field.is_map {
+		} \$else {
+			x.\$(field.name).show()
+		}
+	}
+}
+
+fn maps(x Box) {
+	\$for field in Box.fields {
+		\$if field.typ is \$map {
+			for k, v in x.\$(field.name) {
+				k.show()
+				v.show()
+			}
+		}
+	}
+}
+
+fn run() {
+	generic(Box{})
+}
+'
+	})
+	calls_of := fn [g] (from string) []Edge {
+		return g.edges.filter(it.kind == .calls && it.from == from)
+	}
+	// each struct field's show, one comptime edge each; the map and int fields are no structs
+	concrete := calls_of('lib.concrete')
+	assert concrete.filter(it.provenance == .comptime).map(it.to).sorted() == ['lib.Alpha.show', 'lib.Beta.show'], concrete.str()
+	// in a generic function, the fields of each instance, less the map the `\$if` leaves out
+	generic := calls_of('lib.generic')
+	assert generic.filter(it.provenance == .comptime).map(it.to).sorted() == ['lib.Alpha.show', 'lib.Beta.show'], generic.str()
+	// a map field's keys and values, each typed apart
+	maps := calls_of('lib.maps')
+	key := maps.filter(it.to == 'lib.Key.show')
+	value := maps.filter(it.to == 'lib.Alpha.show')
+	assert key.len == 1 && key[0].provenance == .comptime, maps.str()
+	assert value.len == 1 && value[0].provenance == .comptime, maps.str()
+	assert key[0].lines != value[0].lines, maps.str()
+	assert !maps.any(it.to == 'lib.Beta.show' || it.to == 'show'), maps.str()
+	assert g.report().contains('comptime 6')
+}
+
+fn test_a_field_loops_kind_narrowings_choose_the_fields_a_call_reaches() {
+	g := graph_of({
+		'lib/lib.v': 'module lib
+
+struct Alpha {}
+
+fn (a Alpha) show() string {
+	return ""
+}
+
+struct Beta {}
+
+fn (b Beta) show() string {
+	return ""
+}
+
+enum Color {
+	red
+}
+
+fn (c Color) show() string {
+	return ""
+}
+
+type Gamma = Beta
+
+fn (n int) show() string {
+	return ""
+}
+
+struct Epsilon {}
+
+fn (e Epsilon) show() string {
+	return ""
+}
+
+fn (xs []Alpha) show() string {
+	return ""
+}
+
+struct Box {
+	a Alpha
+	b Beta
+	c Color
+	g Gamma
+	n int
+	r &Epsilon
+	l []Alpha
+}
+
+struct Small {
+	a Alpha
+}
+
+fn enums(x Box) {
+	\$for field in Box.fields {
+		\$if field.is_enum {
+			x.\$(field.name).show()
+		}
+	}
+}
+
+fn not_structs(x Box) {
+	\$for field in Box.fields {
+		\$if field.is_struct {
+		} \$else {
+			x.\$(field.name).show()
+		}
+	}
+}
+
+fn negated(x Box) {
+	\$for field in Box.fields {
+		\$if !field.is_struct {
+			x.\$(field.name).show()
+		}
+	}
+}
+
+fn not_alpha(x Box) {
+	\$for field in Box.fields {
+		\$if field.typ is Alpha {
+		} \$else {
+			x.\$(field.name).show()
+		}
+	}
+}
+
+fn not_named(x Box) {
+	\$for field in Box.fields {
+		\$if field.name == \'a\' {
+		} \$else \$if field.is_enum {
+		} \$else {
+			x.\$(field.name).show()
+		}
+	}
+}
+
+fn other_loop(x Box) {
+	\$for field in Small.fields {
+		x.\$(field.name).show()
+	}
+}
+
+fn guarded[T](x T) {
+	\$if T.unaliased_typ is Small {
+		\$for field in T.fields {
+			x.\$(field.name).show()
+		}
+	}
+}
+
+fn not_epsilon(x Box) {
+	\$for field in Box.fields {
+		\$if field.typ is Epsilon {
+		} \$else {
+			x.\$(field.name).show()
+		}
+	}
+}
+
+fn unaliased_enum(x Box) {
+	\$for field in Box.fields {
+		\$if field.unaliased_typ is \$enum {
+			x.\$(field.name).show()
+		}
+	}
+}
+
+fn elems(xs []Box) {
+	for x in xs {
+		\$for field in Box.fields {
+			\$if field.is_enum {
+				x.\$(field.name).show()
+			}
+		}
+	}
+}
+
+fn gen_elems[T](xs []T) {
+	for x in xs {
+		\$for field in T.fields {
+			\$if field.is_enum {
+				x.\$(field.name).show()
+			}
+		}
+	}
+}
+
+fn two[T, U](x T, y U) {
+	\$for field in U.fields {
+		x.\$(field.name).show()
+	}
+}
+
+fn run() {
+	guarded(Box{})
+	guarded(Small{})
+	gen_elems([Box{}])
+	two(Box{}, Small{})
+}
+'
+	})
+	comptime_of := fn [g] (from string) []string {
+		return g.edges.filter(it.kind == .calls && it.from == from && it.provenance == .comptime).map(it.to).sorted()
+	}
+	// V reads is_enum and is_struct off the unaliased type: Gamma, an alias of a struct, is
+	// one, and so is the Epsilon r points to; an int or an array is neither, whatever
+	// methods it has
+	assert comptime_of('lib.enums') == ['lib.Color.show']
+	assert comptime_of('lib.unaliased_enum') == ['lib.Color.show']
+	assert comptime_of('lib.not_structs') == ['lib.Color.show', 'lib.[]Alpha.show', 'lib.int.show']
+	assert comptime_of('lib.negated') == ['lib.Color.show', 'lib.[]Alpha.show', 'lib.int.show']
+	// an `\$else` after `typ is Alpha` is every other field, the alias of Beta included
+	assert comptime_of('lib.not_alpha') == ['lib.Beta.show', 'lib.Color.show', 'lib.Epsilon.show',
+		'lib.[]Alpha.show', 'lib.int.show']
+	// `typ is Epsilon` is the whole type: r, an `&Epsilon`, is in the `\$else`
+	assert comptime_of('lib.not_epsilon') == ['lib.Alpha.show', 'lib.Beta.show', 'lib.Color.show',
+		'lib.Epsilon.show', 'lib.[]Alpha.show', 'lib.int.show']
+	// after the field `a` and the enum, b, g, n, r and l are left
+	assert comptime_of('lib.not_named') == ['lib.Beta.show', 'lib.Epsilon.show', 'lib.[]Alpha.show',
+		'lib.int.show']
+	// x is not of the type the loop walks, so its fields are not the loop's, whether x is a
+	// known type or another type parameter than the loop's
+	assert comptime_of('lib.other_loop') == []
+	assert comptime_of('lib.two') == []
+	// the guard keeps the Small instance only, not Box
+	assert comptime_of('lib.guarded') == ['lib.Alpha.show']
+	// an element of an array of the loop's type is of that type, concrete or a type parameter
+	assert comptime_of('lib.elems') == ['lib.Color.show']
+	assert comptime_of('lib.gen_elems') == ['lib.Color.show']
+}
+
+fn test_a_field_loops_type_pin_compares_declarations_not_names() {
+	g := graph_of({
+		'a/a.v': 'module a
+
+pub struct Foo {}
+
+pub fn (f Foo) show() string {
+	return ""
+}
+
+pub struct S {
+pub:
+	x Foo
+}
+
+pub struct S2 {
+pub:
+	y &Foo
+}
+'
+		'b/b.v': 'module b
+
+import a
+
+struct Foo {}
+
+fn show_all[T](s T) {
+	\$for field in T.fields {
+		\$if field.typ is Foo {
+		} \$else {
+			s.\$(field.name).show()
+		}
+	}
+}
+
+fn show_ref[T](s T) {
+	\$for field in T.fields {
+		\$if field.typ is &Foo {
+		} \$else {
+			s.\$(field.name).show()
+		}
+	}
+}
+
+fn run() {
+	show_all(a.S{})
+	show_ref(a.S2{})
+}
+'
+		'c/c.v': 'module c
+
+pub struct Foo {}
+'
+		'd/d.v': 'module d
+
+import a
+import c { Foo }
+
+fn walk[T](v T) {
+	\$for field in T.fields {
+		\$if field.typ is Foo {
+		} \$else {
+			v.\$(field.name).show()
+		}
+	}
+}
+
+fn run() {
+	walk(a.S{})
+}
+'
+	})
+	// b's Foo is not a's: the field x is in the `\$else`, so the call reaches a.Foo.show,
+	// and so does y, an `&a.Foo`, in the `\$else` of `typ is &Foo`; d's Foo is c's
+	for from in ['b.show_all', 'b.show_ref', 'd.walk'] {
+		calls := g.edges.filter(it.kind == .calls && it.from == from)
+		assert calls.len == 1 && calls[0].to == 'a.Foo.show', '${from}: ${calls}'
+		assert calls[0].provenance == .comptime, '${from}: ${calls}'
+	}
+}
+
+fn test_a_field_loops_call_reaches_every_platform_copy_of_the_method() {
+	files := {
+		'prog/main.v':      'module main
+
+struct Doc {}
+
+struct Holder {
+	d Doc
+}
+
+fn main() {
+	run(Holder{})
+}
+
+fn run(x Holder) {
+	\$for field in Holder.fields {
+		x.\$(field.name).close()
+	}
+}
+'
+		'prog/p_nix.c.v':     'module main
+
+pub fn (d Doc) close() bool {
+	return true
+}
+'
+		'prog/p_windows.c.v': 'module main
+
+pub fn (d Doc) close() bool {
+	return true
+}
+'
+	}
+	mut g := Graph{}
+	for rel, src in files {
+		syms, edges := extract_v_text(src, rel)
+		g.symbols << syms
+		g.edges << edges
+	}
+	disambiguate_ids(mut g)
+	separate_member_ids(mut g)
+	resolve_edges(mut g)
+	calls := g.edges.filter(it.kind == .calls && it.from == 'prog.run')
+	assert calls.map(it.to).sorted() == ['prog.Doc.close@prog/p_nix.c.v',
+		'prog.Doc.close@prog/p_windows.c.v'], calls.str()
+	assert calls.all(it.provenance == .comptime), calls.str()
+}
+
+fn test_a_call_on_any_field_is_linked_per_field_even_when_its_name_is_unique() {
+	g := graph_of({
+		'lib/lib.v': 'module lib
+
+struct Delta {}
+
+fn (d Delta) only_here() {
+}
+
+struct Holder {
+	d Delta
+	n int
+}
+
+fn concrete(x Holder) {
+	\$for field in Holder.fields {
+		x.\$(field.name).only_here()
+	}
+}
+
+fn generic[T](x T) {
+	\$for field in T.fields {
+		x.\$(field.name).only_here()
+	}
+}
+
+fn run() {
+	generic(Holder{})
+}
+'
+	})
+	// a name match would give the same callee as extracted; the loop makes it comptime
+	for from in ['lib.concrete', 'lib.generic'] {
+		calls := g.edges.filter(it.kind == .calls && it.from == from)
+		assert calls.len == 1 && calls[0].to == 'lib.Delta.only_here', '${from}: ${calls}'
+		assert calls[0].provenance == .comptime, '${from}: ${calls}'
+	}
+}
+
+fn test_a_call_in_a_field_loop_that_no_field_answers_resolves_as_before() {
+	g := graph_of({
+		'lib/lib.v': 'module lib
+
+struct Widget {}
+
+fn (w Widget) frob() {
+}
+
+struct Gadget {}
+
+fn (g Gadget) show() string {
+	return ""
+}
+
+struct Box {
+	n int
+	g Gadget
+}
+
+fn concrete(x Box) {
+	\$for field in Box.fields {
+		x.\$(field.name).frob()
+	}
+}
+
+fn generic[T](x T) {
+	\$for field in T.fields {
+		x.\$(field.name).frob()
+	}
+}
+
+fn both(x Box, g Gadget) {
+	g.show()
+	\$for field in Box.fields {
+		x.\$(field.name).show()
+	}
+}
+
+fn run() {
+	generic(Box{})
+}
+'
+	})
+	calls_of := fn [g] (from string) []Edge {
+		return g.edges.filter(it.kind == .calls && it.from == from)
+	}
+	// no field of Box has a frob, so the call is matched by its name, as before field loops
+	// were followed, both on a known type and on a type parameter's instances
+	for from in ['lib.concrete', 'lib.generic'] {
+		calls := calls_of(from)
+		assert calls.len == 1 && calls[0].to == 'lib.Widget.frob', '${from}: ${calls}'
+		assert calls[0].provenance != .comptime, '${from}: ${calls}'
+	}
+	// a field loop's call that reaches a method the function already calls joins that edge
+	both := calls_of('lib.both').filter(it.to == 'lib.Gadget.show')
+	assert both.len == 1, both.str()
+	assert both[0].provenance != .comptime && both[0].lines.len == 2, both.str()
+}
+
 fn test_index_leaves_undeclared_calls_unresolved() {
 	// `conv` and `on_done` are each declared exactly once, so a bare-name
 	// match would resolve the undeclared calls to them

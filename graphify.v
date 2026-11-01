@@ -1196,6 +1196,7 @@ fn resolve_edges(mut g Graph) {
 	mut sum_variants := map[string][]string{}
 	mut embeds_of := map[string][]Edge{}
 	mut field_ids := map[string]string{}
+	mut fields_of := map[string][]string{}
 	mut consts := map[string][]Symbol{}
 	mut enum_ids := map[string]bool{}
 	mut dynamic_ids := map[string]bool{}
@@ -1227,6 +1228,7 @@ fn resolve_edges(mut g Graph) {
 			.field {
 				field_type['${s.parent}\x00${s.name}'] = s.signature.all_after(' ')
 				field_ids['${s.parent}\x00${s.name}'] = s.id
+				fields_of[s.parent] << s.name
 			}
 			.constant, .global {
 				if s.recipe != '' {
@@ -1275,6 +1277,7 @@ fn resolve_edges(mut g Graph) {
 		sum_variants: sum_variants
 		embeds_of:    embeds_of
 		field_id:     field_ids
+		fields_of:    fields_of
 		consts:       consts
 		enum_ids:     enum_ids
 		dynamic_ids:  dynamic_ids
@@ -1350,7 +1353,10 @@ fn resolve_edges(mut g Graph) {
 			// (build_worlds), where that differs from what it is here
 			here := inf.infer_call(e)
 			mut in_builds := []CallResolution{}
-			if e.is_method && e.to in builds.methods {
+			// a call on any field that infer_call left to expand_type_param_calls is not one
+			// to link through another build's name match first
+			deferred := e.is_method && has_field_any(e.recv_recipe) && here == none
+			if e.is_method && e.to in builds.methods && !deferred {
 				in_builds = builds.infer_call(e, here)
 			}
 			if in_builds.len > 0 && (here or { CallResolution{
@@ -1477,7 +1483,12 @@ fn resolve_edges(mut g Graph) {
 			}
 		}
 		if e.kind == .calls {
-			key := if e.guards == '' { '${e.from}\x00${e.to}' } else { '${e.from}\x00${e.to}\x00${e.guards}' }
+			mut key := call_key(e)
+			// a call on any field of a type keeps its receiver until expand_type_param_calls
+			// links it, so `k.str()` and `v.str()` in one field loop stay apart
+			if e.is_method && has_field_any(e.recv_recipe) {
+				key += '\x00' + e.recv_recipe
+			}
 			if at := seen_call[key] {
 				add_lines(mut resolved, at, e)
 				continue
@@ -1555,7 +1566,8 @@ fn resolve_edges(mut g Graph) {
 			generic_fields << s
 		}
 	}
-	g.edges = expand_type_param_calls(resolved, g.edges, generic_fields, mut inf, generic_funcs)
+	g.edges = expand_type_param_calls(resolved, g.edges, generic_fields, mut inf, generic_funcs,
+		unaddressable, variants_of)
 }
 
 // BuildWorlds is how resolve_edges sees the builds that take another side of an
