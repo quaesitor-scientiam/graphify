@@ -8884,6 +8884,120 @@ fn emit() {
 	assert !calls.any(it.provenance != .undeclared && it.to in ['bare_print', '__malloc'])
 }
 
+// `vlibc_read_file(path)` in os: a function only V's bare builtin directories declare
+// (`module builtin` in vlib/builtin/<os>_bare, which the driver adds under -d vlibc or
+// -freestanding), one copy per OS. The call can't say which OS it is built for, so it
+// reaches every copy, as a call of a per-platform function does. A method of the name
+// is no candidate for a plain call. A name another module declares a function of too,
+// a caller inside a bare directory, a parameter of that name, and a runtime helper are
+// left as they were.
+fn test_a_call_only_bare_builtin_directories_declare_reaches_every_copy() {
+	g := graph_of({
+		'vlib/builtin/linux_bare/vlibc_d_vlibc.v':   'module builtin
+
+pub fn vlibc_read_file(path string) []u8 {
+	return []u8{}
+}
+
+pub fn shared_name() {}
+
+pub fn __malloc(n int) voidptr {
+	return unsafe { nil }
+}
+
+pub struct Rec {}
+
+pub fn (r Rec) vlibc_stat() int {
+	return 0
+}
+'
+		'vlib/builtin/linux_bare/extra_d_vlibc.v':   'module builtin
+
+pub fn not_mine() {}
+'
+		'vlib/builtin/macos_bare/vlibc_d_vlibc.v':   'module builtin
+
+pub fn vlibc_read_file(path string) []u8 {
+	return []u8{}
+}
+
+pub fn two_copies() {}
+
+pub fn vlibc_stat() int {
+	return 1
+}
+
+pub fn __malloc(n int) voidptr {
+	return unsafe { nil }
+}
+
+pub fn bare_self() {
+	not_mine()
+}
+'
+		'vlib/builtin/freebsd_bare/vlibc_d_vlibc.v': 'module builtin
+
+pub fn two_copies() {}
+
+pub fn not_mine() {}
+
+pub fn vlibc_stat() int {
+	return 2
+}
+'
+		'vlib/other/other.v':                        'module other
+
+pub fn shared_name() {}
+'
+		'vlib/os/os.c.v':                            'module os
+
+fn read_bytes(path string) {
+	\$if vlibc ? {
+		_ = vlibc_read_file(path)
+	}
+	two_copies()
+	shared_name()
+	_ = vlibc_stat()
+	_ = __malloc(8)
+}
+
+fn run(vlibc_read_file fn (string) []u8) {
+	_ = vlibc_read_file(\'x\')
+}
+'
+	})
+	calls := g.edges.filter(it.kind == .calls && it.from == 'vlib.os.read_bytes')
+	to := fn [calls] (name string) []Edge {
+		return calls.filter(it.to.ends_with('.' + name) || it.to == name)
+	}
+	// each OS's copy, with the call's own build
+	read := to('vlibc_read_file')
+	assert read.map(it.to).sorted() == ['vlib.builtin.linux_bare.vlibc_read_file',
+		'vlib.builtin.macos_bare.vlibc_read_file'], calls.str()
+	assert read.all(it.provenance == .inferred && it.build == 'vlibc ?'), read.str()
+	// copies none of which is linux_bare's are each OS's all the same
+	assert to('two_copies').map(it.to).sorted() == ['vlib.builtin.freebsd_bare.two_copies',
+		'vlib.builtin.macos_bare.two_copies'], calls.str()
+	// a method of the name is no candidate for a plain call: the two functions, not Rec's
+	assert to('vlibc_stat').map(it.to).sorted() == ['vlib.builtin.freebsd_bare.vlibc_stat',
+		'vlib.builtin.macos_bare.vlibc_stat'], calls.str()
+	// another module declares it too: not the bare builtin's
+	assert to('shared_name').map(it.to) == ['shared_name'], calls.str()
+	// a runtime helper stays one
+	assert to('__malloc').len == 1 && to('__malloc')[0].to == '__malloc'
+		&& to('__malloc')[0].provenance == .undeclared, calls.str()
+	// a parameter of that name is a function value, not the bare builtin's
+	run := g.edges.filter(it.kind == .calls && it.from == 'vlib.os.run')
+	assert run.len == 1 && run[0].to == 'vlibc_read_file' && run[0].provenance == .undeclared, run.str()
+	// a caller in a bare directory: its build compiles only that directory
+	bare := g.edges.filter(it.kind == .calls && it.from == 'vlib.builtin.macos_bare.bare_self')
+	assert bare.map(it.to) == ['not_mine'], bare.str()
+	// a graph whose root is vlib names the directories without `vlib.`
+	assert is_bare_builtin_mod('vlib.builtin.linux_bare') && is_bare_builtin_mod('builtin.macos_bare')
+	assert !is_bare_builtin_mod('vlib.builtin') && !is_bare_builtin_mod('vlib.builtin.js')
+	assert !is_bare_builtin_mod('vlib.builtin.linux_bare.sub') && !is_bare_builtin_mod('x.builtin.linux_bare')
+}
+
 // `uintptr_t(41)`, a bare call of `type uintptr_t = usize` in the caller's own module, is a conversion to that alias, so the call resolves to it instead of staying unresolved
 fn test_a_bare_call_of_a_type_alias_in_scope_is_a_conversion_to_it() {
 	g := graph_of({

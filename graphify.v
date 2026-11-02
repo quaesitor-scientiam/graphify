@@ -1606,6 +1606,21 @@ fn resolve_edges(mut g Graph) {
 				resolved << Edge{...e, to: id, is_method: true, provenance: .inferred}
 				continue
 			}
+			// a function only V's bare builtin directories declare (`vlibc_read_file`), one
+			// copy per target OS: the call reaches every copy (see bare_builtin_call)
+			ids := bare_builtin_call(e, by_name, site_of).filter(!unaddressable[it])
+			if ids.len > 0 {
+				for id in ids {
+					key := '${e.from}\x00${id}'
+					if at := seen_call[key] {
+						add_lines(mut resolved, at, e)
+						continue
+					}
+					seen_call[key] = resolved.len
+					resolved << Edge{...e, to: id, provenance: .inferred}
+				}
+				continue
+			}
 		}
 		resolved << e
 	}
@@ -1747,6 +1762,43 @@ fn implicit_receiver_call(e Edge, by_name map[string][]CallCand) ?string {
 		}
 	}
 	return none
+}
+
+// bare_builtin_call is the declarations a plain call means when only V's bare builtin
+// directories declare a function of its name. Those files say `module builtin`, but V's
+// driver adds one directory of them to builtin, picked by target OS, under -freestanding
+// (vlib/v/driver/driver.v, where it reads `bare_builtin_dir`) or -d vlibc
+// (append_hosted_vlibc_files there), so graphify keeps each directory as its own module
+// (`vlib.builtin.macos_bare`) and the builtin tier of resolve_callee never finds them.
+// A call can't say which OS it is built for, and the graph is the same on every OS, so
+// it reaches every directory's copy, as a call of a per-platform function reaches each
+// copy (platform_variants). A method of that name is no candidate, a plain call naming
+// no method. Empty when a function of the name is declared outside the bare directories,
+// or the caller is in one: its build compiles no other bare directory.
+fn bare_builtin_call(e Edge, by_name map[string][]CallCand, site_of map[string]DeclSite) []string {
+	fns := (by_name[e.to] or { return [] }).filter(!it.is_method)
+	if fns.len == 0 || fns.any(!is_bare_builtin_mod(it.mod)) {
+		return []
+	}
+	caller := caller_site(e, site_of) or { return [] }
+	if is_bare_builtin_mod(caller.mod) {
+		return []
+	}
+	mut ids := []string{}
+	for c in fns {
+		if c.id !in ids {
+			ids << c.id
+		}
+	}
+	return ids
+}
+
+// is_bare_builtin_mod reports whether a module is one of V's bare builtin directories,
+// vlib/builtin/<os>_bare: `vlib.builtin.linux_bare` in a graph of the V tree, and
+// `builtin.linux_bare` in one whose root is vlib itself (as import_names takes both).
+fn is_bare_builtin_mod(mod string) bool {
+	m := mod.trim_string_left('vlib.')
+	return m.starts_with('builtin.') && m.ends_with('_bare') && m.count('.') == 1
 }
 
 // runtime_helpers are the names of V's runtime helpers, as the bare builtin declares
