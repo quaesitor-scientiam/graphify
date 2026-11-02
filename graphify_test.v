@@ -9019,6 +9019,7 @@ fn test_a_call_into_the_bare_builtin_keeps_its_copies_alike_and_yields_to_nearer
 	g := graph_of({
 		'vlib/builtin/linux_bare/vlibc_d_vlibc.v': 'module builtin\n\n' + bare
 		'vlib/builtin/macos_bare/vlibc_d_vlibc.v': 'module builtin\n\n' + bare + '\npub fn uniq_x() {}\n\npub fn lone_x() {}\n'
+		'vlib/builtin/linux_bare/uniq_d_vlibc.v':  'module builtin\n\npub fn uniq_x() {}\n'
 		'vlib/builtin/linux_bare/a_test.v':        'module builtin\n\nfn uniq_x() {}\n'
 		'vlib/builtin/linux_bare/b_test.v':        'module builtin\n\nfn uniq_x() {}\n\nfn lone_x() {}\n'
 		// a test helper of the name in os, which no file but its own sees
@@ -9054,7 +9055,8 @@ fn test_a_call_into_the_bare_builtin_keeps_its_copies_alike_and_yields_to_nearer
 	assert calls_of('vlib.os.B.go').map(it.to) == ['vlib.os.B.describe'], calls_of('vlib.os.B.go').str()
 	// a conversion to the module's alias, not a call of the bare builtin's function
 	assert calls_of('vlib.os.use_alias').map(it.to) == ['vlib.os.vlibc_alias'], calls_of('vlib.os.use_alias').str()
-	// linux_bare's uniq_x is declared by two tests, an id for no one declaration
+	// linux_bare's uniq_x is declared by a file of it and by two tests, an id for no one
+	// declaration
 	assert calls_of('vlib.os.use_uniq').map(it.to) == ['vlib.builtin.macos_bare.uniq_x'], calls_of('vlib.os.use_uniq').str()
 	// a test file in a bare directory is its own program, not one of builtin's copies
 	assert calls_of('vlib.os.use_lone').map(it.to) == ['vlib.builtin.macos_bare.lone_x'], calls_of('vlib.os.use_lone').str()

@@ -1773,8 +1773,9 @@ fn implicit_receiver_call(e Edge, by_name map[string][]CallCand) ?string {
 // bare_builtin_call is the declarations a plain call means when only V's bare builtin
 // directories declare a function of its name. Those files say `module builtin`, but V's
 // driver adds them to builtin only for some builds (vlib/v/driver/driver.v): under
-// -freestanding every file of one directory, picked by target OS or named with
-// -bare-builtin-dir, and under -d vlibc alone just that OS directory's syscall and
+// -freestanding the files of one directory, picked by target OS or named with
+// -bare-builtin-dir, that the target and defines select (so its `*_d_vlibc.v` files only
+// with -d vlibc too), and under -d vlibc alone just that OS directory's syscall and
 // `*_d_vlibc.v` files (append_hosted_vlibc_files). So graphify keeps each directory as
 // its own module (`vlib.builtin.macos_bare`) and the builtin tier of resolve_callee
 // never finds them.
@@ -1783,9 +1784,10 @@ fn implicit_receiver_call(e Edge, by_name map[string][]CallCand) ?string {
 // copy (platform_variants). A method of that name is no candidate, a plain call naming
 // no method, and neither is a function only a test file declares, which the caller's file
 // can't see (test_private): a `_test.v` in a bare directory is its own program, not part
-// of builtin, and a test helper of the name elsewhere doesn't stop the call. Empty when a
-// function of the name the caller can see is declared outside the bare directories, or
-// the caller is in one: its build compiles no other bare directory.
+// of builtin, and a test helper of the name elsewhere doesn't stop the call. Empty when
+// any other module declares a function of the name, whether the caller sees it or not
+// (the call is then left as it was), or the caller is in a bare directory: its build
+// compiles no other.
 fn bare_builtin_call(e Edge, by_name map[string][]CallCand, site_of map[string]DeclSite) []string {
 	cands := by_name[e.to] or { return [] }
 	caller := caller_site(e, site_of) or { return [] }

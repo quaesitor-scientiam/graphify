@@ -544,9 +544,11 @@ the `Handlers.named` field it calls.
 
 **Calls into V's bare builtin (November 2026).** The files in vlib/builtin/<os>_bare
 say `module builtin`, but V's driver (vlib/v/driver/driver.v) adds them to builtin only
-for some builds: under `-freestanding` every file of one directory, picked by target OS
-or named with `-bare-builtin-dir`, and under `-d vlibc` alone just that OS directory's
-syscall and `*_d_vlibc.v` files (`append_hosted_vlibc_files`). graphify names a module
+for some builds: under `-freestanding` the files of one directory, picked by target OS
+or named with `-bare-builtin-dir`, that the target and defines select (its `*_d_vlibc.v`
+files, which hold the `vlibc_*` functions, only with `-d vlibc` too), and under `-d vlibc`
+alone just that OS directory's syscall and `*_d_vlibc.v` files
+(`append_hosted_vlibc_files`). graphify names a module
 by its directory, so each stays its own module (`vlib.builtin.macos_bare`, or
 `builtin.macos_bare` in a graph whose root is vlib). A name one directory declares
 resolves by its unique name already; one that several declare, `vlibc_read_file` in os,
@@ -559,7 +561,8 @@ to every copy. A method of the name is no candidate, since a plain call names no
 neither is a function only a test file declares, which the caller can't see
 (`test_private`): a `_test.v` in a bare directory is its own program, and a test helper of
 the name elsewhere doesn't stop the call. Not
-linked: a name another module declares a function of too, a caller inside a bare
+linked: a name another module declares a function of too, even one the caller doesn't
+see (a standalone program's), a caller inside a bare
 directory (its build compiles no other), a runtime helper (undeclared), the receiver's
 own method of that name, an alias conversion, and the call written
 `builtin.vlibc_read_file(...)`, which no rule resolves through the module name
