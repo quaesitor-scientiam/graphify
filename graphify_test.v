@@ -8884,6 +8884,184 @@ fn emit() {
 	assert !calls.any(it.provenance != .undeclared && it.to in ['bare_print', '__malloc'])
 }
 
+// `vlibc_read_file(path)` in os: a function only V's bare builtin directories declare
+// (`module builtin` in vlib/builtin/<os>_bare, which the driver adds under -d vlibc or
+// -freestanding), one copy per OS. The call can't say which OS it is built for, so it
+// reaches every copy, as a call of a per-platform function does. A method of the name
+// is no candidate for a plain call, and a method call of the name is not linked to the
+// functions. A name another module declares a function of too, a caller inside a bare
+// directory, a parameter of that name, and a runtime helper are left as they were.
+fn test_a_call_only_bare_builtin_directories_declare_reaches_every_copy() {
+	g := graph_of({
+		'vlib/builtin/linux_bare/vlibc_d_vlibc.v':   'module builtin
+
+pub fn vlibc_read_file(path string) []u8 {
+	return []u8{}
+}
+
+pub fn shared_name() {}
+
+pub fn __malloc(n int) voidptr {
+	return unsafe { nil }
+}
+
+pub struct Rec {}
+
+pub fn (r Rec) vlibc_stat() int {
+	return 0
+}
+'
+		'vlib/builtin/linux_bare/extra_d_vlibc.v':   'module builtin
+
+pub fn not_mine() {}
+'
+		'vlib/builtin/macos_bare/vlibc_d_vlibc.v':   'module builtin
+
+pub fn vlibc_read_file(path string) []u8 {
+	return []u8{}
+}
+
+pub fn two_copies() {}
+
+pub fn vlibc_stat() int {
+	return 1
+}
+
+pub fn __malloc(n int) voidptr {
+	return unsafe { nil }
+}
+
+pub fn bare_self() {
+	not_mine()
+}
+'
+		'vlib/builtin/freebsd_bare/vlibc_d_vlibc.v': 'module builtin
+
+pub fn two_copies() {}
+
+pub fn not_mine() {}
+
+pub fn vlibc_stat() int {
+	return 2
+}
+'
+		'vlib/other/other.v':                        'module other
+
+pub fn shared_name() {}
+'
+		'vlib/os/os.c.v':                            'module os
+
+fn read_bytes(path string) {
+	\$if vlibc ? {
+		_ = vlibc_read_file(path)
+	}
+	two_copies()
+	shared_name()
+	_ = vlibc_stat()
+	_ = __malloc(8)
+}
+
+fn run(vlibc_read_file fn (string) []u8) {
+	_ = vlibc_read_file(\'x\')
+}
+
+fn via_value(x Unknown) {
+	_ = x.vlibc_read_file(\'p\')
+}
+'
+	})
+	calls := g.edges.filter(it.kind == .calls && it.from == 'vlib.os.read_bytes')
+	to := fn [calls] (name string) []Edge {
+		return calls.filter(it.to.ends_with('.' + name) || it.to == name)
+	}
+	// each OS's copy, with the call's own build
+	read := to('vlibc_read_file')
+	assert read.map(it.to).sorted() == ['vlib.builtin.linux_bare.vlibc_read_file',
+		'vlib.builtin.macos_bare.vlibc_read_file'], calls.str()
+	assert read.all(it.provenance == .inferred && it.build == 'vlibc ?'), read.str()
+	// copies none of which is linux_bare's are each OS's all the same
+	assert to('two_copies').map(it.to).sorted() == ['vlib.builtin.freebsd_bare.two_copies',
+		'vlib.builtin.macos_bare.two_copies'], calls.str()
+	// a method of the name is no candidate for a plain call: the two functions, not Rec's
+	assert to('vlibc_stat').map(it.to).sorted() == ['vlib.builtin.freebsd_bare.vlibc_stat',
+		'vlib.builtin.macos_bare.vlibc_stat'], calls.str()
+	// another module declares it too: not the bare builtin's
+	assert to('shared_name').map(it.to) == ['shared_name'], calls.str()
+	// a runtime helper stays one
+	assert to('__malloc').len == 1 && to('__malloc')[0].to == '__malloc'
+		&& to('__malloc')[0].provenance == .undeclared, calls.str()
+	// a parameter of that name is a function value, not the bare builtin's
+	run := g.edges.filter(it.kind == .calls && it.from == 'vlib.os.run')
+	assert run.len == 1 && run[0].to == 'vlibc_read_file' && run[0].provenance == .undeclared, run.str()
+	// a method call of the name, on a receiver of no known type, names no function of it
+	value := g.edges.filter(it.kind == .calls && it.from == 'vlib.os.via_value')
+	assert value.len == 1 && value[0].to == 'vlibc_read_file' && value[0].is_method, value.str()
+	// a caller in a bare directory: its build compiles only that directory
+	bare := g.edges.filter(it.kind == .calls && it.from == 'vlib.builtin.macos_bare.bare_self')
+	assert bare.map(it.to) == ['not_mine'], bare.str()
+	// a graph whose root is vlib names the directories without `vlib.`
+	assert is_bare_builtin_mod('vlib.builtin.linux_bare') && is_bare_builtin_mod('builtin.macos_bare')
+	assert !is_bare_builtin_mod('vlib.builtin') && !is_bare_builtin_mod('vlib.builtin.js')
+	assert !is_bare_builtin_mod('vlib.builtin.linux_bare.sub') && !is_bare_builtin_mod('x.builtin.linux_bare')
+	// each check on its own: not under builtin, and not directly in it
+	assert !is_bare_builtin_mod('vlib.other.linux_bare') && !is_bare_builtin_mod('vlib.builtin.x.linux_bare')
+}
+
+// The copies of a bare builtin function stay alike: a caller declared once per platform
+// calls it in each file, and every copy gets both call sites and their builds together; a
+// function value of the same name in the caller is its own undeclared edge, whichever
+// comes first. A nearer rule keeps what it answers: the receiver's own method, an alias
+// conversion. A method of the name outside the bare directories, or a test helper of it,
+// doesn't stop the call linking; a copy whose id names no one declaration, and one a test
+// file in a bare directory declares, are left out.
+fn test_a_call_into_the_bare_builtin_keeps_its_copies_alike_and_yields_to_nearer_rules() {
+	bare := 'pub fn vlibc_x(p string) []u8 {\n\treturn []u8{}\n}\n\npub fn describe() {}\n\npub fn vlibc_alias(n int) int {\n\treturn n\n}\n'
+	g := graph_of({
+		'vlib/builtin/linux_bare/vlibc_d_vlibc.v': 'module builtin\n\n' + bare
+		'vlib/builtin/macos_bare/vlibc_d_vlibc.v': 'module builtin\n\n' + bare + '\npub fn uniq_x() {}\n\npub fn lone_x() {}\n'
+		'vlib/builtin/linux_bare/uniq_d_vlibc.v':  'module builtin\n\npub fn uniq_x() {}\n'
+		'vlib/builtin/linux_bare/a_test.v':        'module builtin\n\nfn uniq_x() {}\n'
+		'vlib/builtin/linux_bare/b_test.v':        'module builtin\n\nfn uniq_x() {}\n\nfn lone_x() {}\n'
+		// a test helper of the name in os, which no file but its own sees
+		'vlib/os/helper_test.v':                   'module os\n\nfn vlibc_x(p string) []u8 {\n\treturn []u8{}\n}\n'
+		'vlib/other/other.v':                      'module other\n\npub struct Obj {}\n\npub fn (o Obj) vlibc_x() {}\n'
+		// read2 in two platform files, the call on line 5 under `$if vlibc ?` and on line 4
+		'vlib/os/rb_nix.c.v':                      'module os\n\nfn read2(p string) {\n\t\$if vlibc ? {\n\t\t_ = vlibc_x(p)\n\t}\n}\n'
+		'vlib/os/rb_windows.c.v':                  'module os\n\nfn read2(p string) {\n\t_ = vlibc_x(p)\n}\n'
+		// the real call on line 4 and the parameter's call on line 6, then the other way round
+		'vlib/os/real_first.v':                    'module os\n\nfn real_first(p string) {\n\t_ = vlibc_x(p)\n\tf := fn (vlibc_x fn (string) []u8) {\n\t\t_ = vlibc_x(\'x\')\n\t}\n\t_ = f\n}\n'
+		'vlib/os/value_first.v':                   'module os\n\nfn value_first(p string) {\n\tf := fn (vlibc_x fn (string) []u8) {\n\t\t_ = vlibc_x(\'x\')\n\t}\n\t_ = f\n\t_ = vlibc_x(p)\n}\n'
+		'vlib/os/b.v':                             'module os\n\nstruct B {}\n\nfn (b B) describe() {}\n\nfn (b B) go() {\n\tdescribe()\n}\n\ntype vlibc_alias = int\n\nfn use_alias() {\n\t_ = vlibc_alias(1)\n}\n\nfn use_uniq() {\n\tuniq_x()\n}\n\nfn use_lone() {\n\tlone_x()\n}\n'
+	})
+	calls_of := fn [g] (from string) []Edge {
+		return g.edges.filter(it.kind == .calls && it.from == from)
+	}
+	copies := ['vlib.builtin.linux_bare.vlibc_x', 'vlib.builtin.macos_bare.vlibc_x']
+	// both files' calls on every copy, with the build either makes them in; a method of
+	// the name in vlib/other doesn't stop it
+	read2 := calls_of('vlib.os.read2')
+	assert read2.map(it.to).sorted() == copies, read2.str()
+	assert read2.all(it.lines == [4, 5] && it.build == ''), read2.str()
+	// the parameter's call is its own, undeclared, in either order
+	for row in [['vlib.os.real_first', '4', '6'], ['vlib.os.value_first', '8', '5']] {
+		cs := calls_of(row[0])
+		real, value := row[1].int(), row[2].int()
+		linked := cs.filter(it.to in copies)
+		assert linked.map(it.to).sorted() == copies, cs.str()
+		assert linked.all(it.lines == [real]), cs.str()
+		assert cs.any(it.to == 'vlibc_x' && it.provenance == .undeclared && it.lines == [value]), cs.str()
+	}
+	// the receiver's own method, not the bare builtin's
+	assert calls_of('vlib.os.B.go').map(it.to) == ['vlib.os.B.describe'], calls_of('vlib.os.B.go').str()
+	// a conversion to the module's alias, not a call of the bare builtin's function
+	assert calls_of('vlib.os.use_alias').map(it.to) == ['vlib.os.vlibc_alias'], calls_of('vlib.os.use_alias').str()
+	// linux_bare's uniq_x is declared by a file of it and by two tests, an id for no one
+	// declaration
+	assert calls_of('vlib.os.use_uniq').map(it.to) == ['vlib.builtin.macos_bare.uniq_x'], calls_of('vlib.os.use_uniq').str()
+	// a test file in a bare directory is its own program, not one of builtin's copies
+	assert calls_of('vlib.os.use_lone').map(it.to) == ['vlib.builtin.macos_bare.lone_x'], calls_of('vlib.os.use_lone').str()
+}
+
 // `uintptr_t(41)`, a bare call of `type uintptr_t = usize` in the caller's own module, is a conversion to that alias, so the call resolves to it instead of staying unresolved
 fn test_a_bare_call_of_a_type_alias_in_scope_is_a_conversion_to_it() {
 	g := graph_of({

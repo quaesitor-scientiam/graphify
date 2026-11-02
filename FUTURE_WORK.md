@@ -542,6 +542,37 @@ Unresolved calls go from 220 to 183 and undeclared from 4,716 to 4,710; no resol
 call is lost. One call changes target, from `options.named` in another test module to
 the `Handlers.named` field it calls.
 
+**Calls into V's bare builtin (November 2026).** The files in vlib/builtin/<os>_bare
+say `module builtin`, but V's driver (vlib/v/driver/driver.v) adds them to builtin only
+for some builds: under `-freestanding` the files of one directory, picked by target OS
+or named with `-bare-builtin-dir`, that the target and defines select (its `*_d_vlibc.v`
+files, which hold the `vlibc_*` functions, only with `-d vlibc` too), and under `-d vlibc`
+alone just that OS directory's syscall and `*_d_vlibc.v` files
+(`append_hosted_vlibc_files`). graphify names a module
+by its directory, so each stays its own module (`vlib.builtin.macos_bare`, or
+`builtin.macos_bare` in a graph whose root is vlib). A name one directory declares
+resolves by its unique name already; one that several declare, `vlibc_read_file` in os,
+was left unresolved. A plain call whose every candidate function is in a bare directory
+now links to every directory's copy (`bare_builtin_call`): the call can't say which OS
+it is built for, and the graph is the same on every OS, as for a per-platform function.
+The rule runs beside `platform_variants`, so each copy keeps its own key and a repeat of
+the call (the same function declared in another platform file) adds its lines and build
+to every copy. A method of the name is no candidate, since a plain call names none, and
+neither is a function only a test file declares, which the caller can't see
+(`test_private`): a `_test.v` in a bare directory is its own program, and a test helper of
+the name elsewhere doesn't stop the call. Not
+linked: a name another module declares a function of too, even one the caller doesn't
+see (a standalone program's), a caller inside a bare
+directory (its build compiles no other), a runtime helper (undeclared), the receiver's
+own method of that name, an alias conversion, and the call written
+`builtin.vlibc_read_file(...)`, which no rule resolves through the module name
+`builtin`. Every bare directory counts, `wasm_bare` too, which only
+`-bare-builtin-dir` selects. On vlang `e999c32b44`: unresolved calls 183 to 178, the
+five `vlibc_*` calls in os, each now 7 edges (35 in all); nothing else changed. Giving
+these files the id `vlib.builtin` instead was ruled out: 30 of their function names
+are also core builtin's (`println`, `panic`, `malloc`), which would turn those into
+per-OS variants.
+
 The raw edge is retained and `explain` reports ambiguous callers rather than
 inventing links. A future opt-in deep mode could run the checker over a whole
 project, but given the small remainder, it would need to address these
