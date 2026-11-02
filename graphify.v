@@ -1336,6 +1336,7 @@ fn resolve_edges(mut g Graph) {
 		iface_ids:    iface_ids
 		generics_of:  generics_of
 		tparams_of:   tparams_of
+		alias_by_name: alias_by_name
 	}
 	// a comptime-narrowed type parameter is settled now that the interfaces are known (see
 	// comptime_recipe), before any edge is followed, the expansion's sources included

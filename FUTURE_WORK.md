@@ -576,7 +576,11 @@ per-OS variants.
 The value of such a call has the type its copies return, when they all return the same
 one (`call_result`, in infer.v, as for a per-platform function's copies, `same_return`):
 `mut data, e := vlibc_read_file(path)` in os.read_bytes makes `data` a `[]u8`, so its
-`data.free()` is the array's `free`. Copies that return different types give no type. On
+`data.free()` is the array's `free`. Copies that return different types give no type, and
+neither does a call resolve_edges links elsewhere: to the receiver's own method of the
+name, or an alias the call converts to. The type is read in core builtin, the module the
+files declare, so a type each directory declares for itself (`VlibcErrno`) names no one
+OS's copy and stays untyped, where `e.code()` on it would otherwise go to one OS's. On
 vlang `78869311b5`: unresolved calls 179 to 177, the `free` in os.read_bytes and in
 os.read_file; nothing else changed.
 

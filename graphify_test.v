@@ -9064,22 +9064,32 @@ fn test_a_call_into_the_bare_builtin_keeps_its_copies_alike_and_yields_to_nearer
 
 // `mut data, e := vlibc_read_file(path)` in os.read_bytes: every bare builtin copy returns
 // `([]u8, Errno)`, so `data` is a `[]u8` and `data.bytestr()` is that type's, though
-// another `bytestr` is in reach. Copies that return different types give no type.
+// another `bytestr` is in reach. Copies that return different types give no type, and
+// neither does a call the receiver's own method or an alias conversion answers, which
+// resolve_edges doesn't link to the copies. `Errno`, which each directory declares for
+// itself, names no one OS's copy.
 fn test_a_call_into_the_bare_builtin_has_the_type_its_copies_return() {
-	same := 'pub enum Errno {\n\tok\n}\n\npub fn read_all(p string) ([]u8, Errno) {\n\treturn []u8{}, .ok\n}\n'
+	same := 'pub enum Errno {\n\tok\n}\n\npub fn (e Errno) code() int {\n\treturn 0\n}\n\npub fn read_all(p string) ([]u8, Errno) {\n\treturn []u8{}, .ok\n}\n\npub fn rd(p string) []u8 {\n\treturn []u8{}\n}\n\npub fn myb(p int) []u8 {\n\treturn []u8{}\n}\n'
 	g := graph_of({
-		'vlib/builtin/array.v':                    'module builtin\n\npub fn (b []u8) bytestr() string {\n\treturn \'\'\n}\n'
+		'vlib/builtin/array.v':                    'module builtin\n\npub fn (b []u8) bytestr() string {\n\treturn \'\'\n}\n\npub fn (s string) bytestr() string {\n\treturn s\n}\n'
 		'vlib/builtin/linux_bare/vlibc_d_vlibc.v': 'module builtin\n\n' + same + '\npub fn differ() []u8 {\n\treturn []u8{}\n}\n'
 		'vlib/builtin/macos_bare/vlibc_d_vlibc.v': 'module builtin\n\n' + same + '\npub fn differ() string {\n\treturn \'\'\n}\n'
 		'vlib/net/http/response.v':                'module http\n\npub struct Response {}\n\npub fn (r Response) bytestr() string {\n\treturn \'\'\n}\n'
-		'vlib/os/os.c.v':                          'module os\n\nimport net.http\n\nfn read_bytes(p string) string {\n\t_ = http.Response{}\n\tmut data, e := read_all(p)\n\t_ = e\n\treturn data.bytestr()\n}\n\nfn read_differ() string {\n\t_ = http.Response{}\n\tx := differ()\n\treturn x.bytestr()\n}\n'
+		'vlib/os/os.c.v':                          'module os\n\nimport net.http\n\nfn read_bytes(p string) string {\n\t_ = http.Response{}\n\tmut data, e := read_all(p)\n\t_ = e\n\treturn data.bytestr()\n}\n\nfn read_differ() string {\n\t_ = http.Response{}\n\tx := differ()\n\treturn x.bytestr()\n}\n\nfn read_errno(p string) int {\n\tmut data, e := read_all(p)\n\t_ = data\n\treturn e.code()\n}\n\nstruct Reader {}\n\nfn (r Reader) rd(p string) string {\n\treturn p\n}\n\nfn (r Reader) go() string {\n\tdata := rd(\'x\')\n\treturn data.bytestr()\n}\n\ntype myb = string\n\nfn use_alias() string {\n\tx := myb(\'q\')\n\treturn x.bytestr()\n}\n'
 	})
-	calls := g.edges.filter(it.kind == .calls && it.from == 'vlib.os.read_bytes')
-	assert calls.any(it.to == 'vlib.builtin.[]u8.bytestr'), calls.str()
-	assert !calls.any(it.to == 'vlib.net.http.Response.bytestr'), calls.str()
-	// a []u8 on one OS and a string on another: no one type, so no method of one
-	differ := g.edges.filter(it.kind == .calls && it.from == 'vlib.os.read_differ' && it.to.ends_with('bytestr'))
-	assert !differ.any(it.to == 'vlib.builtin.[]u8.bytestr'), differ.str()
+	bytestr := fn [g] (from string) []string {
+		return g.edges.filter(it.kind == .calls && it.from == from && it.to.ends_with('bytestr')).map(it.to)
+	}
+	assert bytestr('vlib.os.read_bytes') == ['vlib.builtin.[]u8.bytestr'], bytestr('vlib.os.read_bytes').str()
+	// a []u8 on one OS and a string on another: no one type, so the call stays unresolved
+	assert bytestr('vlib.os.read_differ') == ['bytestr'], bytestr('vlib.os.read_differ').str()
+	// `rd` is the receiver's method, a string, and `myb(...)` a conversion to the alias:
+	// neither value has the copies' []u8
+	assert !bytestr('vlib.os.Reader.go').contains('vlib.builtin.[]u8.bytestr'), bytestr('vlib.os.Reader.go').str()
+	assert !bytestr('vlib.os.use_alias').contains('vlib.builtin.[]u8.bytestr'), bytestr('vlib.os.use_alias').str()
+	// each OS's Errno is its own type: e.code() is not linked to one OS's copy alone
+	codes := g.edges.filter(it.kind == .calls && it.from == 'vlib.os.read_errno' && it.to.ends_with('code'))
+	assert codes.map(it.to) == ['code'], codes.str()
 }
 
 // `uintptr_t(41)`, a bare call of `type uintptr_t = usize` in the caller's own module, is a conversion to that alias, so the call resolves to it instead of staying unresolved
