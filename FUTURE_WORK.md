@@ -555,7 +555,10 @@ now links to every directory's copy (`bare_builtin_call`): the call can't say wh
 it is built for, and the graph is the same on every OS, as for a per-platform function.
 The rule runs beside `platform_variants`, so each copy keeps its own key and a repeat of
 the call (the same function declared in another platform file) adds its lines and build
-to every copy. A method of the name is no candidate, since a plain call names none. Not
+to every copy. A method of the name is no candidate, since a plain call names none, and
+neither is a function only a test file declares, which the caller can't see
+(`test_private`): a `_test.v` in a bare directory is its own program, and a test helper of
+the name elsewhere doesn't stop the call. Not
 linked: a name another module declares a function of too, a caller inside a bare
 directory (its build compiles no other), a runtime helper (undeclared), the receiver's
 own method of that name, an alias conversion, and the call written

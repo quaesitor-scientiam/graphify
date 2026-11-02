@@ -9003,21 +9003,26 @@ fn via_value(x Unknown) {
 	assert is_bare_builtin_mod('vlib.builtin.linux_bare') && is_bare_builtin_mod('builtin.macos_bare')
 	assert !is_bare_builtin_mod('vlib.builtin') && !is_bare_builtin_mod('vlib.builtin.js')
 	assert !is_bare_builtin_mod('vlib.builtin.linux_bare.sub') && !is_bare_builtin_mod('x.builtin.linux_bare')
+	// each check on its own: not under builtin, and not directly in it
+	assert !is_bare_builtin_mod('vlib.other.linux_bare') && !is_bare_builtin_mod('vlib.builtin.x.linux_bare')
 }
 
 // The copies of a bare builtin function stay alike: a caller declared once per platform
 // calls it in each file, and every copy gets both call sites and their builds together; a
 // function value of the same name in the caller is its own undeclared edge, whichever
 // comes first. A nearer rule keeps what it answers: the receiver's own method, an alias
-// conversion. A method of the name outside the bare directories doesn't stop the call
-// linking, and a copy whose id names no one declaration is left out.
+// conversion. A method of the name outside the bare directories, or a test helper of it,
+// doesn't stop the call linking; a copy whose id names no one declaration, and one a test
+// file in a bare directory declares, are left out.
 fn test_a_call_into_the_bare_builtin_keeps_its_copies_alike_and_yields_to_nearer_rules() {
 	bare := 'pub fn vlibc_x(p string) []u8 {\n\treturn []u8{}\n}\n\npub fn describe() {}\n\npub fn vlibc_alias(n int) int {\n\treturn n\n}\n'
 	g := graph_of({
 		'vlib/builtin/linux_bare/vlibc_d_vlibc.v': 'module builtin\n\n' + bare
-		'vlib/builtin/macos_bare/vlibc_d_vlibc.v': 'module builtin\n\n' + bare + '\npub fn uniq_x() {}\n'
+		'vlib/builtin/macos_bare/vlibc_d_vlibc.v': 'module builtin\n\n' + bare + '\npub fn uniq_x() {}\n\npub fn lone_x() {}\n'
 		'vlib/builtin/linux_bare/a_test.v':        'module builtin\n\nfn uniq_x() {}\n'
-		'vlib/builtin/linux_bare/b_test.v':        'module builtin\n\nfn uniq_x() {}\n'
+		'vlib/builtin/linux_bare/b_test.v':        'module builtin\n\nfn uniq_x() {}\n\nfn lone_x() {}\n'
+		// a test helper of the name in os, which no file but its own sees
+		'vlib/os/helper_test.v':                   'module os\n\nfn vlibc_x(p string) []u8 {\n\treturn []u8{}\n}\n'
 		'vlib/other/other.v':                      'module other\n\npub struct Obj {}\n\npub fn (o Obj) vlibc_x() {}\n'
 		// read2 in two platform files, the call on line 5 under `$if vlibc ?` and on line 4
 		'vlib/os/rb_nix.c.v':                      'module os\n\nfn read2(p string) {\n\t\$if vlibc ? {\n\t\t_ = vlibc_x(p)\n\t}\n}\n'
@@ -9025,7 +9030,7 @@ fn test_a_call_into_the_bare_builtin_keeps_its_copies_alike_and_yields_to_nearer
 		// the real call on line 4 and the parameter's call on line 6, then the other way round
 		'vlib/os/real_first.v':                    'module os\n\nfn real_first(p string) {\n\t_ = vlibc_x(p)\n\tf := fn (vlibc_x fn (string) []u8) {\n\t\t_ = vlibc_x(\'x\')\n\t}\n\t_ = f\n}\n'
 		'vlib/os/value_first.v':                   'module os\n\nfn value_first(p string) {\n\tf := fn (vlibc_x fn (string) []u8) {\n\t\t_ = vlibc_x(\'x\')\n\t}\n\t_ = f\n\t_ = vlibc_x(p)\n}\n'
-		'vlib/os/b.v':                             'module os\n\nstruct B {}\n\nfn (b B) describe() {}\n\nfn (b B) go() {\n\tdescribe()\n}\n\ntype vlibc_alias = int\n\nfn use_alias() {\n\t_ = vlibc_alias(1)\n}\n\nfn use_uniq() {\n\tuniq_x()\n}\n'
+		'vlib/os/b.v':                             'module os\n\nstruct B {}\n\nfn (b B) describe() {}\n\nfn (b B) go() {\n\tdescribe()\n}\n\ntype vlibc_alias = int\n\nfn use_alias() {\n\t_ = vlibc_alias(1)\n}\n\nfn use_uniq() {\n\tuniq_x()\n}\n\nfn use_lone() {\n\tlone_x()\n}\n'
 	})
 	calls_of := fn [g] (from string) []Edge {
 		return g.edges.filter(it.kind == .calls && it.from == from)
@@ -9051,6 +9056,8 @@ fn test_a_call_into_the_bare_builtin_keeps_its_copies_alike_and_yields_to_nearer
 	assert calls_of('vlib.os.use_alias').map(it.to) == ['vlib.os.vlibc_alias'], calls_of('vlib.os.use_alias').str()
 	// linux_bare's uniq_x is declared by two tests, an id for no one declaration
 	assert calls_of('vlib.os.use_uniq').map(it.to) == ['vlib.builtin.macos_bare.uniq_x'], calls_of('vlib.os.use_uniq').str()
+	// a test file in a bare directory is its own program, not one of builtin's copies
+	assert calls_of('vlib.os.use_lone').map(it.to) == ['vlib.builtin.macos_bare.lone_x'], calls_of('vlib.os.use_lone').str()
 }
 
 // `uintptr_t(41)`, a bare call of `type uintptr_t = usize` in the caller's own module, is a conversion to that alias, so the call resolves to it instead of staying unresolved

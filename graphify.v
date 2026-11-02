@@ -1781,14 +1781,18 @@ fn implicit_receiver_call(e Edge, by_name map[string][]CallCand) ?string {
 // A call can't say which OS it is built for, and the graph is the same on every OS, so
 // it reaches every directory's copy, as a call of a per-platform function reaches each
 // copy (platform_variants). A method of that name is no candidate, a plain call naming
-// no method. Empty when a function of the name is declared outside the bare directories,
-// or the caller is in one: its build compiles no other bare directory.
+// no method, and neither is a function only a test file declares, which the caller's file
+// can't see (test_private): a `_test.v` in a bare directory is its own program, not part
+// of builtin, and a test helper of the name elsewhere doesn't stop the call. Empty when a
+// function of the name the caller can see is declared outside the bare directories, or
+// the caller is in one: its build compiles no other bare directory.
 fn bare_builtin_call(e Edge, by_name map[string][]CallCand, site_of map[string]DeclSite) []string {
-	fns := (by_name[e.to] or { return [] }).filter(!it.is_method)
+	cands := by_name[e.to] or { return [] }
+	caller := caller_site(e, site_of) or { return [] }
+	fns := cands.filter(!it.is_method && !test_private(it.file, caller.file))
 	if fns.len == 0 || fns.any(!is_bare_builtin_mod(it.mod)) {
 		return []
 	}
-	caller := caller_site(e, site_of) or { return [] }
 	if is_bare_builtin_mod(caller.mod) {
 		return []
 	}
