@@ -37,6 +37,8 @@ struct Infer {
 	generics_of  map[string][]string // free function id -> its type parameters
 	tparams_of   map[string][]string // method id -> its own type parameters
 	iface_ids    map[string]bool     // ids of interfaces
+	// type aliases by name, for a bare call that converts to one (alias_conversion)
+	alias_by_name map[string][]TypeCand
 mut:
 	memo map[string]InferredType
 }
@@ -701,12 +703,29 @@ fn (inf &Infer) call_result(e Edge, to string, steps []string) ?InferredType {
 	} else if res := resolve_callee(call, inf.by_name, inf.site_of, inf.imports_of) {
 		id = res.id
 		t = inf.returns(id)?
-	} else {
+	} else if variants := platform_variants(call, inf.by_name, inf.site_of) {
 		// one function declared once per platform: its variants must all return
 		// the same type, which is then the call's type
-		variants := platform_variants(call, inf.by_name, inf.site_of)?
 		ids := variants.map(it.id)
 		t = inf.same_return(ids)?
+		id = ids[0]
+	} else {
+		// a function V's bare builtin directories declare once per OS, when resolve_edges
+		// links the call to its copies (bare_builtin_call), and not to the receiver's own
+		// method or an alias the call converts to. The copies must return the same type,
+		// read in core builtin, the module their files declare: a type each directory
+		// declares for itself (`VlibcErrno`) names no one declaration there, so it stays
+		// untyped rather than becoming one OS's copy.
+		ids := bare_builtin_call(call, inf.by_name, inf.site_of)
+		if ids.len == 0 || implicit_receiver_call(call, inf.by_name) != none
+			|| alias_conversion(call, inf.alias_by_name, inf.site_of, inf.imports_of) != none {
+			return none
+		}
+		shared := inf.same_return(ids)?
+		t = InferredType{
+			text: shared.text
+			mod:  shared.mod.all_before_last('.')
+		}
 		id = ids[0]
 	}
 	// the type arguments of a generic call (`p:` steps) stand for the
