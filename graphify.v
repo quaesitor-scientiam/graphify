@@ -1508,6 +1508,27 @@ fn resolve_edges(mut g Graph) {
 				}
 				continue
 			}
+			// a function only V's bare builtin directories declare (`vlibc_read_file`), one
+			// copy per target OS: the call reaches every copy (see bare_builtin_call). It is
+			// here, with platform_variants, so each copy keeps its own key and a repeat of the
+			// call adds its lines and build to every copy. What the later tiers answer stays
+			// theirs: a runtime helper, the receiver's own method, an alias conversion.
+			if !e.is_method && !e.to.contains('.') && e.to !in runtime_helpers {
+				ids := bare_builtin_call(e, by_name, site_of).filter(!unaddressable[it])
+				if ids.len > 0 && implicit_receiver_call(e, by_name) == none
+					&& alias_conversion(e, alias_by_name, site_of, imports_of) == none {
+					for id in ids {
+						key := '${e.from}\x00${id}'
+						if at := seen_call[key] {
+							add_lines(mut resolved, at, e)
+							continue
+						}
+						seen_call[key] = resolved.len
+						resolved << Edge{...e, to: id, provenance: .inferred}
+					}
+					continue
+				}
+			}
 		}
 		if e.kind == .embeds || e.kind == .references {
 			// Same refusal as above, generalized to type ids: a struct named
@@ -1604,21 +1625,6 @@ fn resolve_edges(mut g Graph) {
 		if e.kind == .calls && !e.is_method && !e.to.contains('.') {
 			if id := implicit_receiver_call(e, by_name) {
 				resolved << Edge{...e, to: id, is_method: true, provenance: .inferred}
-				continue
-			}
-			// a function only V's bare builtin directories declare (`vlibc_read_file`), one
-			// copy per target OS: the call reaches every copy (see bare_builtin_call)
-			ids := bare_builtin_call(e, by_name, site_of).filter(!unaddressable[it])
-			if ids.len > 0 {
-				for id in ids {
-					key := '${e.from}\x00${id}'
-					if at := seen_call[key] {
-						add_lines(mut resolved, at, e)
-						continue
-					}
-					seen_call[key] = resolved.len
-					resolved << Edge{...e, to: id, provenance: .inferred}
-				}
 				continue
 			}
 		}
@@ -1766,10 +1772,12 @@ fn implicit_receiver_call(e Edge, by_name map[string][]CallCand) ?string {
 
 // bare_builtin_call is the declarations a plain call means when only V's bare builtin
 // directories declare a function of its name. Those files say `module builtin`, but V's
-// driver adds one directory of them to builtin, picked by target OS, under -freestanding
-// (vlib/v/driver/driver.v, where it reads `bare_builtin_dir`) or -d vlibc
-// (append_hosted_vlibc_files there), so graphify keeps each directory as its own module
-// (`vlib.builtin.macos_bare`) and the builtin tier of resolve_callee never finds them.
+// driver adds them to builtin only for some builds (vlib/v/driver/driver.v): under
+// -freestanding every file of one directory, picked by target OS or named with
+// -bare-builtin-dir, and under -d vlibc alone just that OS directory's syscall and
+// `*_d_vlibc.v` files (append_hosted_vlibc_files). So graphify keeps each directory as
+// its own module (`vlib.builtin.macos_bare`) and the builtin tier of resolve_callee
+// never finds them.
 // A call can't say which OS it is built for, and the graph is the same on every OS, so
 // it reaches every directory's copy, as a call of a per-platform function reaches each
 // copy (platform_variants). A method of that name is no candidate, a plain call naming

@@ -8998,6 +8998,54 @@ fn run(vlibc_read_file fn (string) []u8) {
 	assert !is_bare_builtin_mod('vlib.builtin.linux_bare.sub') && !is_bare_builtin_mod('x.builtin.linux_bare')
 }
 
+// The copies of a bare builtin function stay alike: a caller declared once per platform
+// calls it in each file, and every copy gets both call sites and their builds together; a
+// function value of the same name in the caller is its own undeclared edge, whichever
+// comes first. A nearer rule keeps what it answers: the receiver's own method, an alias
+// conversion. A method of the name outside the bare directories doesn't stop the call
+// linking, and a copy whose id names no one declaration is left out.
+fn test_a_call_into_the_bare_builtin_keeps_its_copies_alike_and_yields_to_nearer_rules() {
+	bare := 'pub fn vlibc_x(p string) []u8 {\n\treturn []u8{}\n}\n\npub fn describe() {}\n\npub fn vlibc_alias(n int) int {\n\treturn n\n}\n'
+	g := graph_of({
+		'vlib/builtin/linux_bare/vlibc_d_vlibc.v': 'module builtin\n\n' + bare
+		'vlib/builtin/macos_bare/vlibc_d_vlibc.v': 'module builtin\n\n' + bare + '\npub fn uniq_x() {}\n'
+		'vlib/builtin/linux_bare/a_test.v':        'module builtin\n\nfn uniq_x() {}\n'
+		'vlib/builtin/linux_bare/b_test.v':        'module builtin\n\nfn uniq_x() {}\n'
+		'vlib/other/other.v':                      'module other\n\npub struct Obj {}\n\npub fn (o Obj) vlibc_x() {}\n'
+		// read2 in two platform files, the call on line 5 under `$if vlibc ?` and on line 4
+		'vlib/os/rb_nix.c.v':                      'module os\n\nfn read2(p string) {\n\t\$if vlibc ? {\n\t\t_ = vlibc_x(p)\n\t}\n}\n'
+		'vlib/os/rb_windows.c.v':                  'module os\n\nfn read2(p string) {\n\t_ = vlibc_x(p)\n}\n'
+		// the real call on line 4 and the parameter's call on line 6, then the other way round
+		'vlib/os/real_first.v':                    'module os\n\nfn real_first(p string) {\n\t_ = vlibc_x(p)\n\tf := fn (vlibc_x fn (string) []u8) {\n\t\t_ = vlibc_x(\'x\')\n\t}\n\t_ = f\n}\n'
+		'vlib/os/value_first.v':                   'module os\n\nfn value_first(p string) {\n\tf := fn (vlibc_x fn (string) []u8) {\n\t\t_ = vlibc_x(\'x\')\n\t}\n\t_ = f\n\t_ = vlibc_x(p)\n}\n'
+		'vlib/os/b.v':                             'module os\n\nstruct B {}\n\nfn (b B) describe() {}\n\nfn (b B) go() {\n\tdescribe()\n}\n\ntype vlibc_alias = int\n\nfn use_alias() {\n\t_ = vlibc_alias(1)\n}\n\nfn use_uniq() {\n\tuniq_x()\n}\n'
+	})
+	calls_of := fn [g] (from string) []Edge {
+		return g.edges.filter(it.kind == .calls && it.from == from)
+	}
+	copies := ['vlib.builtin.linux_bare.vlibc_x', 'vlib.builtin.macos_bare.vlibc_x']
+	// both files' calls on every copy, with the build either makes them in; a method of
+	// the name in vlib/other doesn't stop it
+	read2 := calls_of('vlib.os.read2')
+	assert read2.map(it.to).sorted() == copies, read2.str()
+	assert read2.all(it.lines == [4, 5] && it.build == ''), read2.str()
+	// the parameter's call is its own, undeclared, in either order
+	for row in [['vlib.os.real_first', '4', '6'], ['vlib.os.value_first', '8', '5']] {
+		cs := calls_of(row[0])
+		real, value := row[1].int(), row[2].int()
+		linked := cs.filter(it.to in copies)
+		assert linked.map(it.to).sorted() == copies, cs.str()
+		assert linked.all(it.lines == [real]), cs.str()
+		assert cs.any(it.to == 'vlibc_x' && it.provenance == .undeclared && it.lines == [value]), cs.str()
+	}
+	// the receiver's own method, not the bare builtin's
+	assert calls_of('vlib.os.B.go').map(it.to) == ['vlib.os.B.describe'], calls_of('vlib.os.B.go').str()
+	// a conversion to the module's alias, not a call of the bare builtin's function
+	assert calls_of('vlib.os.use_alias').map(it.to) == ['vlib.os.vlibc_alias'], calls_of('vlib.os.use_alias').str()
+	// linux_bare's uniq_x is declared by two tests, an id for no one declaration
+	assert calls_of('vlib.os.use_uniq').map(it.to) == ['vlib.builtin.macos_bare.uniq_x'], calls_of('vlib.os.use_uniq').str()
+}
+
 // `uintptr_t(41)`, a bare call of `type uintptr_t = usize` in the caller's own module, is a conversion to that alias, so the call resolves to it instead of staying unresolved
 fn test_a_bare_call_of_a_type_alias_in_scope_is_a_conversion_to_it() {
 	g := graph_of({
