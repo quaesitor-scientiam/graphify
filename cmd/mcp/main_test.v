@@ -462,13 +462,17 @@ fn test_a_lookup_waits_for_the_extract_when_the_graph_served_is_from_before_an_u
 		ready:    true
 		running:  true
 		stale:    true
-		state_at: time.now().unix()
 		done:     chan string{cap: 1}
 	}
 	// the extract publishes the worktree's graph as it is now, with helper moved down
 	os.write_file(lib, 'module lib\n\nfn first() {}\n\npub fn helper() int {\n\treturn 1\n}\n') or {
 		panic(err)
 	}
+	// and took the worktree's state as it started, as Worktree.extract does, so that
+	// refresh, which looks again after it (always, with state_at long ago), finds
+	// nothing changed: with no state, a run slower than two seconds extracted again
+	app.wt.state = graphify.worktree_state(src)
+	app.wt.state_at = 0
 	done := app.wt.done
 	extract := spawn fn [src, store, done] () {
 		time.sleep(200 * time.millisecond)
