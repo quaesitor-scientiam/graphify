@@ -37,8 +37,8 @@ if (-not [string]::IsNullOrWhiteSpace($raw)) {
     }
 }
 
-if ($file -match 'SKILL\.md|detect_.*\.sh') {
-    Write-HookResult "REMINDER: SKILL.md or detector changed - update C:\Users\john3\Documents\code-review-reference.html before continuing (Detectors tab + Miss Corpus table + subtitle date)."
+if ($file -match 'SKILL\.md|detect_.*\.(sh|v)$') {
+    Write-HookResult "REMINDER: SKILL.md or detector changed - update S:\repo\review-tools\reference\code-review-reference.html (and code-review-misses-data.js for corpus rows) before continuing (Detectors tab + Miss Corpus table + subtitle date). Never edit the S:\Code Review\ mirror."
 } else {
     Write-HookResult
 }
