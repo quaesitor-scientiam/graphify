@@ -18,7 +18,7 @@ module graphify
 // by resolve_edges.
 struct Infer {
 	by_name      map[string][]CallCand
-	const_calls  map[string][]CallCand // constants by name: the fallback for a call (see infer_call)
+	const_calls  map[string][]CallCand // constants and globals by name: the fallback for a call (see infer_call)
 	by_type_name map[string][]TypeCand
 	site_of      map[string]DeclSite
 	imports_of   map[string][]string
@@ -73,7 +73,7 @@ const array_elem_methods = ['first', 'last', 'pop', 'pop_left']
 // some of them, and a call of one it doesn't declare is `undeclared`.
 const array_builtins = ['filter', 'map', 'any', 'all', 'count', 'sort', 'sorted', 'sort_with_compare',
 	'sorted_with_compare', 'contains', 'index', 'last_index', 'wait', 'first', 'last', 'pop',
-	'reverse', 'clone']
+	'reverse', 'clone', 'to_fixed_size']
 
 // flag_enum_methods are the methods V provides for a `@[flag]` enum, as
 // cgen's is_flag_enum_method lists them.
@@ -174,28 +174,32 @@ fn (mut inf Infer) infer_call(e Edge) ?CallResolution {
 	if r := resolve_callee(e, inf.by_name, inf.site_of, inf.imports_of) {
 		return r
 	}
-	// a constant holding a function is called as one (`const f = g`, then `f()`), and a
-	// method call is never one. A function of the name that resolve_callee could not pick
-	// (a platform copy, say) is the callee, not the constant, so only a name with none
-	// is a constant's
+	// a constant or global holding a function is called as one (`const f = g`, then
+	// `f()`), and a method call is never one. A function of the name that resolve_callee
+	// could not pick (a platform copy, say) is the callee, not the constant, so only a
+	// name with none is a constant's or global's
 	if e.is_method || e.to in inf.by_name {
 		return none
 	}
-	return resolve_const_callee(e, inf.const_calls, inf.site_of, inf.imports_of)
+	return resolve_const_callee(e, inf.const_calls, inf.site_of, inf.imports_of, inf.scope_of)
 }
 
-// resolve_const_callee resolves a call of a name no function has to the one constant of
-// that name the caller can see (see infer_call). Unlike resolve_callee, which takes a name
+// resolve_const_callee resolves a call of a name no function has to the one constant or
+// global of that name the caller can see (see infer_call). Unlike resolve_callee, which takes a name
 // that is unique in the whole graph, it needs visibility, so a constant of an unrelated,
 // unimported module is never the callee. A constant in the caller's own file is visible
 // even in a standalone `main` program, where visible_from grants no module visibility.
-fn resolve_const_callee(e Edge, const_calls map[string][]CallCand, site_of map[string]DeclSite, imports_of map[string][]string) ?CallResolution {
+fn resolve_const_callee(e Edge, const_calls map[string][]CallCand, site_of map[string]DeclSite, imports_of map[string][]string, scope_of map[string]FileScope) ?CallResolution {
 	cands := const_calls[e.to] or { return none }
 	caller := caller_site(e, site_of) or { return none }
 	imports := imports_of[caller.file] or { []string{} }
 	mut visible := []CallCand{}
 	for c in cands {
-		if (c.file == caller.file || visible_from(c.mod, caller, imports)) && !test_private(c.file, caller.file) {
+		// a test sees a `module main` file of its directory too, as resolve_callee
+		// takes it (sees_in_module), told by the const's own file
+		if (c.file == caller.file || visible_from(c.mod, caller, imports)
+			|| (c.mod == caller.mod && caller.sees_in_module(c.file, (scope_of[c.file] or { FileScope{} }).is_main)))
+			&& !test_private(c.file, caller.file) {
 			visible << c
 		}
 	}
@@ -203,6 +207,33 @@ fn resolve_const_callee(e Edge, const_calls map[string][]CallCand, site_of map[s
 	return CallResolution{
 		id:       id
 		inferred: true
+	}
+}
+
+// named_fn_type is the type of a bare name that is no variable, const or enum
+// member but the function a call of that name from e's file would reach: a
+// function, written `fn ()`, with its parameters and result left out (see
+// fn_value_type for one whose result is known). none when no one function is
+// reached.
+fn (inf &Infer) named_fn_type(name string, e Edge) ?InferredType {
+	if name.contains('.') {
+		return none
+	}
+	call := Edge{
+		from: e.from
+		to:   name
+		kind: .calls
+		file: e.file
+	}
+	r := resolve_callee(call, inf.by_name, inf.site_of, inf.imports_of)?
+	if r.id == '' {
+		return none
+	}
+	scope := inf.scope_of[e.file] or { FileScope{} }
+	return InferredType{
+		text: 'fn ()'
+		mod:  scope.mod
+		file: e.file
 	}
 }
 
@@ -299,10 +330,12 @@ fn (inf &Infer) no_method(t InferredType, name string, file string) ?string {
 	if ft.field_id == '' {
 		return none
 	}
-	ftext := bare_type(ft.text)
-	if ftext.starts_with('fn ') || ftext.starts_with('fn(') {
+	// a field holding functions in an array or map is called through an index,
+	// `h.list[i](x)`, which the call names by the field
+	if holds_fns(ft.text) {
 		return ft.field_id
 	}
+	ftext := bare_type(ft.text)
 	// a field whose type is a named function type, `cb Callback`
 	if is_named_type(ftext) {
 		named := strip_generic_args(ftext)
@@ -314,6 +347,46 @@ fn (inf &Infer) no_method(t InferredType, name string, file string) ?string {
 		}
 	}
 	return none
+}
+
+// holds_fns reports whether a value of type `t` is a function or holds functions in
+// an array, fixed array or map (`?[]fn (int)`), as no_method reads a field's type.
+fn holds_fns(t string) bool {
+	e := container_elem(bare_type(t))
+	return e.starts_with('fn ') || e.starts_with('fn(')
+}
+
+// container_elem is the element type of an array, fixed array or map type, through
+// any nesting (`fn (int)` for `map[string][]fn (int)`), or `t` itself when it is none.
+fn container_elem(t string) string {
+	mut s := t
+	for {
+		if s.starts_with('[]') {
+			s = s[2..]
+		} else if s.starts_with('[') || s.starts_with('map[') {
+			// `[3]T` or `map[K]V`: past the bracket that closes the size or key
+			mut depth := 0
+			mut end := -1
+			for i, c in s {
+				if c == `[` {
+					depth++
+				} else if c == `]` {
+					depth--
+					if depth == 0 {
+						end = i
+						break
+					}
+				}
+			}
+			if end < 0 {
+				return s
+			}
+			s = s[end + 1..]
+		} else {
+			return s
+		}
+	}
+	return s
 }
 
 // embedded is the declarations of the types `decl` embeds.
@@ -411,9 +484,14 @@ fn (inf &Infer) follow_steps(e Edge, depth int) ?InferredType {
 				file:        c.file
 				recv_recipe: c.recipe
 			}, depth + 1)?
-		} else {
+		} else if et := inf.enum_type(start[2..], e.file) {
 			// `Colour.red` names a member of the enum Colour, a value of its type
-			t = inf.enum_type(start[2..], e.file)?
+			t = et
+		} else {
+			// a function named as a value, `fa := [a, b, c]`, is a function: with its
+			// result when it has one (fn_value_type), else as `fn ()`, which is all
+			// that what V provides on an array of them (`fa.index(b)`) needs
+			t = inf.fn_value_type(e, start) or { inf.named_fn_type(start[2..], e)? }
 		}
 	} else if start.starts_with('c:') {
 		t = inf.call_result(e, start[2..], steps) or {
@@ -834,9 +912,21 @@ fn (inf &Infer) find_const(name string, file string) ?Symbol {
 			continue
 		}
 		// a standalone program's own file, or any file of a `main` module that is one
-		// program, as call resolution takes it (DeclSite.solo)
-		if qual == '' && c.parent == scope.mod
-			&& (!scope.is_main || c.file == file || (inf.site_of[c.id] or { DeclSite{} }).solo) {
+		// program, or a `module main` file in a test's directory with no `fn main`, as
+		// call resolution takes it (sees_in_module). A const's id is shared by every
+		// file of the directory declaring it, so whether it is in a `module main` file
+		// is read from its own file; solo and no_main hold for the whole directory, so
+		// any of its sites tells them
+		csite := inf.site_of[c.id] or { DeclSite{} }
+		caller := DeclSite{
+			mod:     scope.mod
+			file:    file
+			is_main: scope.is_main
+			solo:    csite.solo
+			no_main: csite.no_main
+		}
+		if qual == '' && c.parent == scope.mod && (c.file == file
+			|| caller.sees_in_module(c.file, (inf.scope_of[c.file] or { FileScope{} }).is_main)) {
 			own << c
 		}
 		if (qual != '' && import_reaches(c.parent, qual))

@@ -2886,16 +2886,20 @@ fn (f &V3File) recipe(id flat.NodeId, ctx V3CallCtx) string {
 		}
 		.comptime_if {
 			// `$if c { a } $else { b }` as a value, as vlib/builtin's max_int is: V keeps
-			// one branch, so the value has the type of both when they agree, else none
-			mut r := ''
-			for k in kids {
-				br := f.recipe(k, ctx)
-				if br == '' || (r != '' && br != r) {
-					return ''
-				}
-				r = br
+			// one branch, so the value has the type of both when they agree. When they
+			// don't, a branch that only an option on the command line selects
+			// (`$if cross ? { portable_max_int() }`) is not the default build's, so the
+			// value is the rest's; else none
+			// each branch's recipe is worked out once: an `$else $if` chain nests, and
+			// working the `$else` out again would double the work at every level
+			brs := kids.map(f.recipe(it, ctx))
+			if brs.len > 0 && brs.all(it != '' && it == brs[0]) {
+				return brs[0]
 			}
-			return r
+			if brs.len == 2 && !default_term(f.build_cond(n)) {
+				return brs[1]
+			}
+			return ''
 		}
 		.block {
 			// `unsafe { x }`: the value of its last expression
@@ -3414,8 +3418,10 @@ fn (f &V3File) last_value(id flat.NodeId, ctx V3CallCtx) string {
 // method `x.foo()` as `foo`, with the receiver expression `x`.
 fn (f &V3File) callee(callee_id flat.NodeId, ctx V3CallCtx) (string, bool, flat.NodeId) {
 	mut cid := callee_id
+	// a generic call, `f[int](x)`, or a call of a function an array or map holds,
+	// `h.list[i](x)`, named by what is indexed. One level only: a deeper index on a
+	// receiver the walk can't type would reach name matching as a method call
 	if f.node(cid).kind == .index {
-		// a generic call, `f[int](x)`
 		ks := f.kids(cid)
 		if ks.len == 0 {
 			return '', false, flat.NodeId(-1)

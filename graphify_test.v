@@ -3226,6 +3226,86 @@ fn test_country() {}
 	assert refs == ['vlib.v.tests.generic_calls.Country'], refs.str()
 }
 
+fn test_a_test_in_a_module_main_directory_with_no_main_calls_its_siblings() {
+	// V builds a `module main` test with the `module main` files of its directory
+	// (expand_single_test_file_inputs in V's driver), so `validate` in
+	// vlib/wasm/tests/common.v is the one every test there calls. Another test's
+	// function stays its own, and a program's file, which is no test, doesn't see a
+	// sibling program's.
+	g := graph_of({
+		'vlib/wasm/tests/common.v':      'module main\n\nstruct Box {}\n\nfn (b Box) open() {}\n\nstruct Jar {}\n\nfn (j Jar) open() {}\n\nconst limit = Box{}\n\n__global hook fn ()\n\npub fn validate(code []u8) ! {}\n'
+		'vlib/wasm/tests/arith_test.v':  'module main\n\nfn test_add() {\n\tvalidate([]u8{}) or {}\n\tlimit.open()\n\tonly_in_block()\n\thook()\n}\n'
+		'vlib/wasm/tests/block_test.v':  'module main\n\nfn only_in_block() {}\n\nfn test_block() {\n\tvalidate([]u8{}) or {}\n}\n'
+		'examples/tools/a.v':            'module main\n\nfn helper() {}\n'
+		'examples/tools/b.v':            'module main\n\nfn other() {\n\thelper()\n}\n'
+		// the same names elsewhere, so no call resolves by a unique name
+		'vlib/x/x.v':                    'module x\n\npub struct Lid {}\n\npub fn (l Lid) open() {}\n\npub fn validate() {}\n\npub fn only_in_block() {}\n\npub fn helper() {}\n\npub fn size() int {\n\treturn 0\n}\n'
+		// a test beside another module's files isn't built with them
+		'vlib/crypto/md5/md5.v':         'module md5\n\npub fn size() int {\n\treturn 16\n}\n'
+		'vlib/crypto/md5/md5_test.v':    'module main\n\nfn test_size() {\n\t_ := size()\n}\n'
+	})
+	calls := g.edges.filter(it.kind == .calls)
+	add := calls.filter(it.from == 'vlib.wasm.tests.test_add').map(it.to)
+	assert 'vlib.wasm.tests.validate' in add, add.str()
+	// a const of the directory types its receiver too (find_const)
+	assert 'vlib.wasm.tests.Box.open' in add, add.str()
+	// and a global holding a function there (resolve_const_callee)
+	assert 'vlib.wasm.tests.hook' in add, add.str()
+	assert 'vlib.wasm.tests.only_in_block' !in add, add.str()
+	block := calls.filter(it.from == 'vlib.wasm.tests.test_block').map(it.to)
+	assert block == ['vlib.wasm.tests.validate'], block.str()
+	other := calls.filter(it.from == 'examples.tools.other').map(it.to)
+	assert other == ['helper'], other.str()
+	md5 := calls.filter(it.from == 'vlib.crypto.md5.test_size').map(it.to)
+	assert md5 == ['size'], md5.str()
+}
+
+fn test_a_module_main_test_sees_its_directorys_main_consts_by_their_own_file() {
+	// A const's id is shared by every file of its directory that declares it, so
+	// whether a test sees it is told by the const's own file: `limit` of vlib/q/a.v
+	// (module q) and of vlib/q/helper.v (module main) are one id, and the test is
+	// built with helper.v only, so `limit.check()` is Limit's. md5.v's const is of
+	// another module, a sibling test's declarations are its own (`b_test.c.v` too),
+	// and a program file, which is no test, sees no sibling program's const.
+	g := graph_of({
+		// helper.v comes first, so the shared ids' site_of entries are a.v's
+		'vlib/q/helper.v':        'module main\n\nstruct Limit {}\n\nfn (l Limit) check() {}\n\nconst limit = Limit{}\n\nfn make_b() fn () {\n\treturn fn () {}\n}\n\nconst run = make_b()\n\n\$if windows {\n\tfn plat() {}\n} \$else {\n\tfn plat() {}\n}\n'
+		'vlib/q/a.v':             'module q\n\npub struct LimitX {}\n\npub fn (l LimitX) check() {}\n\nfn new_limit() LimitX {\n\treturn LimitX{}\n}\n\nconst limit = new_limit()\n\nfn make_a() fn () {\n\treturn fn () {}\n}\n\nconst run = make_a()\n'
+		'vlib/q/q_test.v':        'module main\n\nfn test_q() {\n\tlimit.check()\n\thelper2()\n\trun()\n\tplat()\n}\n'
+		'vlib/q/b_test.c.v':      'module main\n\nfn helper2() {}\n\nfn test_b() {}\n'
+		'vlib/crypto/md5/md5.v':  'module md5\n\npub struct Key {}\n\npub fn (k Key) check() {}\n\npub const key = Key{}\n'
+		'vlib/crypto/md5/md5_test.v': 'module main\n\nfn test_key() {\n\tkey.check()\n}\n'
+		'examples/tools/a.v':     'module main\n\nstruct Pot {}\n\nfn (p Pot) check() {}\n\nconst pot = Pot{}\n'
+		'examples/tools/b.v':     'module main\n\nfn other() {\n\tpot.check()\n}\n'
+		// a test in a directory of several programs is built with none of them
+		'examples/multi/a.v':     'module main\n\nstruct Jug {}\n\nfn (j Jug) check() {}\n\nconst jug = Jug{}\n\nfn main() {}\n'
+		'examples/multi/b.v':     'module main\n\nfn main() {}\n'
+		'examples/multi/m_test.v': 'module main\n\nfn test_m() {\n\tjug.check()\n}\n'
+		// a test's own declarations are its own to call, even when they leave a call
+		// ambiguous: `x.spin()` on an untyped `x` is not common.v's one `run`
+		'vlib/r/common.v':        'module main\n\nstruct Baz {}\n\nfn (b Baz) spin() {}\n'
+		'vlib/r/r_test.v':        'module main\n\nstruct Foo {}\n\nstruct Bar {}\n\nfn (f Foo) spin() {}\n\nfn (b Bar) spin() {}\n\nfn test_r() {\n\tx := C.get_thing()\n\tx.spin()\n}\n'
+		'vlib/y/y.v':             'module y\n\npub struct Decoy {}\n\npub fn (d Decoy) check() {}\n\npub fn helper2() {}\n\npub fn plat() {}\n'
+	})
+	calls := g.edges.filter(it.kind == .calls)
+	q := calls.filter(it.from == 'vlib.q.test_q').map(it.to)
+	assert 'vlib.q.Limit.check' in q, q.str()
+	// a const holding a function, called, and a function declared once per build
+	// branch, whose id site_of keeps only per file
+	assert 'vlib.q.run' in q, q.str()
+	assert q.any(it.starts_with('vlib.q.plat')), q.str()
+	assert 'vlib.q.LimitX.check' !in q, q.str()
+	assert 'helper2' in q, q.str()
+	key := calls.filter(it.from == 'vlib.crypto.md5.test_key').map(it.to)
+	assert 'vlib.crypto.md5.Key.check' !in key, key.str()
+	pot := calls.filter(it.from == 'examples.tools.other').map(it.to)
+	assert 'examples.tools.Pot.check' !in pot, pot.str()
+	jug := calls.filter(it.from == 'examples.multi.test_m').map(it.to)
+	assert 'examples.multi.Jug.check' !in jug, jug.str()
+	r := calls.filter(it.from == 'vlib.r.test_r').map(it.to)
+	assert 'vlib.r.Baz.spin' !in r, r.str()
+}
+
 fn test_a_type_declared_once_per_platform_resolves_its_field_types() {
 	// An id declared in two files has no one site, and only a function or method got
 	// one per file back, so `string` in a struct declared once per platform had no
@@ -3868,6 +3948,9 @@ fn test_imports_resolve_to_the_module_they_mean_in_the_tree() {
 		'cmd/mcp/main.v':                     'module main\n\nimport mcp\n\nfn main() {\n\tmcp.serve()\n}\n'
 		'lib/shapes/shapes.v':                 'module shapes\n\npub fn square() int {\n\treturn 4\n}\n'
 		'lib/shapes/shapes_test.v':            'module main\n\nimport shapes\n\nfn test_s() {\n\tshapes.square()\n}\n'
+		'vlib/arrays/arrays.v':                'module arrays\n\npub fn flatten() int {\n\treturn 1\n}\n'
+		'vlib/v/tests/arrays/nested_test.v':   'module main\n\nfn test_n() {}\n'
+		'vlib/v/tests/flat_test.v':            'module main\n\nimport arrays\n\nfn test_f() {\n\tarrays.flatten()\n}\n'
 	})
 	defer {
 		os.rmdir_all(root) or {}
@@ -3911,6 +3994,11 @@ fn test_imports_resolve_to_the_module_they_mean_in_the_tree() {
 	ext := imports('lib/shapes/shapes_test.v')
 	assert 'import lib.shapes as shapes' in ext, ext.str()
 	assert 'call lib.shapes.square' in ext, ext.str()
+	// a directory of tests alone is no module: `import arrays` beside
+	// vlib/v/tests/arrays is vlib's arrays
+	flat := imports('vlib/v/tests/flat_test.v')
+	assert 'import arrays' in flat, flat.str()
+	assert 'call arrays.flatten' in flat, flat.str()
 	// text has no place in a tree, so its imports stay as written
 	t := extract_v_text_result('module m\n\nimport geometry\n', 'vlib/crypto/x/m.v')
 	assert t.symbols.any(it.kind == .import_ && it.name == 'geometry')
@@ -5339,6 +5427,40 @@ pub fn (mut s Server) run() {
 	assert run.contains('^ [field] = '), run
 	// a declaration that calls no field has no note
 	assert !g.explain('Server.close').contains('^ [field]')
+}
+
+fn test_a_call_of_a_function_taken_from_an_array_or_map_is_linked_to_its_holder() {
+	// `h.list[i](x)` calls a function an array field holds, and `fns['a']()` one a
+	// global map holds: the field and the global are the declarations there are, as for
+	// `s.on_running(x)`, not some `list` method or `fns` function of another module
+	g := graph_of({
+		'lib/m/m.v':         'module m\n\nstruct Handlers {\n\tlist  []fn (int)\n\tnamed map[string]fn (int)\n\tdeep  map[string][]fn (int)\n}\n\n__global fns map[string]fn () int\n\n__global count map[string]int\n\n__global made = make_fn()\n\n__global refs &[]fn ()\n\nconst handlers = []fn () int{}\n\nfn make_fn() fn () {\n\treturn fn () {}\n}\n\nfn (h Handlers) run(i int) {\n\th.list[i](1)\n\th.named[\'a\'](2)\n\th.deep[\'a\'][0](3)\n\t_ := fns[\'a\']()\n\tmade()\n\tcount()\n\trefs[0]()\n\t_ := handlers[0]()\n}\n'
+		'lib/other/other.v': 'module other\n\npub struct S {}\n\npub fn (s S) list() {}\n\npub fn (s S) named() {}\n\npub fn (s S) deep() {}\n'
+		'lib/other/two.v':   'module other\n\npub struct T {}\n\npub fn (t T) list() {}\n\npub fn (t T) named() {}\n'
+	})
+	calls := g.edges.filter(it.kind == .calls && it.from == 'lib.m.Handlers.run').map(it.to)
+	assert 'lib.m.Handlers.list' in calls, calls.str()
+	assert 'lib.m.Handlers.named' in calls, calls.str()
+	// a deeper index names nothing, so the only `deep` method is never what it calls
+	assert !calls.any(it.contains('deep')), calls.str()
+	assert 'lib.m.fns' in calls, calls.str()
+	// a global with no stated type is called as a const is; one whose stated type holds
+	// no function is never what a call names
+	assert 'lib.m.made' in calls, calls.str()
+	assert 'lib.m.count' !in calls, calls.str()
+	// a reference to functions, and a const typed as a container of them, are called too
+	assert 'lib.m.refs' in calls, calls.str()
+	assert 'lib.m.handlers' in calls, calls.str()
+	// a global whose type only starts with the letters `fn` holds no function
+	k := graph_of({
+		'lib/k/k.v':        'module k\n\nimport fnv1a\n\n__global h fnv1a.Sum\n\nfn use() {\n\th()\n}\n'
+		'lib/fnv1a/sum.v':  'module fnv1a\n\npub struct Sum {}\n'
+	})
+	assert !k.edges.any(it.kind == .calls && it.from == 'lib.k.use' && it.to == 'lib.k.h'), k.edges.str()
+	// container_elem looks through every array, fixed array and map
+	assert container_elem('map[string][]fn (int)') == 'fn (int)'
+	assert container_elem('[3]map[int]string') == 'string'
+	assert container_elem('int') == 'int'
 }
 
 fn test_index_representative_ranks_backends() {
@@ -7381,6 +7503,88 @@ pub fn f() string {
 	assert g.edges.any(it.kind == .calls && it.from == 'lib.f' && it.to == 'vlib.builtin.int.str'), g.edges.map(it.to).str()
 }
 
+fn test_a_comptime_if_value_passes_over_a_branch_only_an_option_selects() {
+	// max_int is now `$if cross ? { portable_max_int() } $else $if new_int ? && x64 {
+	// int(max_i64) } $else { int(max_i32) }`: the branches' recipes differ, but the
+	// first two need `-d`, so the default build's value is the last one's, an int. A
+	// value whose branches differ in builds a host picks by itself stays untyped.
+	g := graph_of({
+		'vlib/builtin/int.v': 'module builtin
+
+pub fn (i int) str() string {
+	return \'\'
+}
+'
+		'node/node.v': 'module node
+
+pub struct Node {}
+
+pub fn (n Node) str() string {
+	return \'\'
+}
+'
+		'lib/lib.v': 'module lib
+
+import node
+
+fn portable() node.Node {
+	return node.Node{}
+}
+
+pub const limit = \$if cross ? {
+	portable()
+} \$else \$if new_int ? && x64 {
+	int(2)
+} \$else {
+	int(3)
+}
+
+pub const host = \$if linux {
+	node.Node{}
+} \$else {
+	int(3)
+}
+
+pub const fast = \$if prod {
+	node.Node{}
+} \$else {
+	int(3)
+}
+
+pub const negated = \$if !cross ? {
+	node.Node{}
+} \$else {
+	int(3)
+}
+
+pub fn f() string {
+	return limit.str()
+}
+
+pub fn g() string {
+	return host.str()
+}
+
+pub fn p() string {
+	return fast.str()
+}
+
+pub fn q() string {
+	return negated.str()
+}
+'
+	})
+	// `prod` needs `-prod`, as an option_terms name, so the default build's value is
+	// the `\$else`'s; `!cross ?` holds by default, so its branches differ in a build
+	// the host picks and the value stays untyped
+	assert g.edges.any(it.kind == .calls && it.from == 'lib.p' && it.to == 'vlib.builtin.int.str'), g.edges.filter(it.from == 'lib.p').str()
+	assert !g.edges.any(it.kind == .calls && it.from == 'lib.q' && it.to in ['vlib.builtin.int.str', 'node.Node.str']), g.edges.filter(it.from == 'lib.q').str()
+	assert g.edges.any(it.kind == .calls && it.from == 'lib.f' && it.to == 'vlib.builtin.int.str'), g.edges.map(it.to).str()
+	// the option's branch is a Node, so taking it would give Node.str
+	assert !g.edges.any(it.kind == .calls && it.from == 'lib.f' && it.to == 'node.Node.str')
+	assert !g.edges.any(it.kind == .calls && it.from == 'lib.g' && it.to in ['vlib.builtin.int.str', 'node.Node.str']), g.edges.filter(it.from == 'lib.g').str()
+}
+
 fn test_shared_declaration_names_its_local() {
 	g := graph_of({
 		'other/node.v': 'module other
@@ -8568,6 +8772,85 @@ fn parse(s string) Kind {
 	assert !calls.any(it.to == 'Kind__static__from_string' && it.provenance != .undeclared)
 }
 
+fn test_a_generated_from_string_of_an_imported_enum_is_provided_by_v() {
+	// the enum of `mod2.Kind.from_string(s)` is the one module its qualifier names: a
+	// standalone program's enum (app/progs/mod2) is no module an import names, and of
+	// `rand.Kind`, vlib/rand is named exactly where vlib/crypto/rand only ends like it.
+	// `Shape` is no enum, and `lone.Kind` is in two modules named `lone`, so neither
+	// call is one V provides. `mod2.Show.zero()` is V's for a flag enum, and
+	// `mod2.Kind.zero()` is not, as Kind is no flag enum.
+	g := graph_of({
+		'app/v.mod':               ''
+		'app/mod/mod.v':           'module mod\n\npub struct Shape {}\n'
+		'app/mod2/mod2.v':         'module mod2\n\npub enum Kind {\n\ta\n}\n\n@[flag]\npub enum Show {\n\ta\n\tb\n}\n'
+		'app/progs/mod2/main.v':   'module main\n\nenum Kind {\n\ta\n}\n\nfn main() {}\n'
+		'app/a/lone/lone.v':       'module lone\n\npub enum Kind {\n\ta\n}\n'
+		'app/b/lone/lone.v':       'module lone\n\npub enum Kind {\n\ta\n}\n'
+		'vlib/rand/rand.v':        'module rand\n\npub enum Kind {\n\ta\n}\n'
+		'vlib/crypto/rand/rand.v': 'module rand\n\npub enum Kind {\n\ta\n}\n'
+		'app/main_test.v':         'module main\n\nimport mod { Shape }\nimport mod2\nimport lone\nimport rand\n\nfn test_m() {\n\t_ := mod2.Kind.from_string(\'a\') or { return }\n\t_ := lone.Kind.from_string(\'a\') or { return }\n\t_ := rand.Kind.from_string(\'a\') or { return }\n\t_ := Shape.from_string(\'a\') or { return }\n\t_ := mod2.Show.zero()\n\t_ := mod2.Kind.zero()\n}\n'
+	})
+	calls := g.edges.filter(it.kind == .calls && it.from == 'app.test_m')
+	und := calls.filter(it.provenance == .undeclared).map(it.to)
+	assert und.len == 3, calls.str()
+	assert 'mod2.Kind__static__from_string' in und, und.str()
+	assert 'rand.Kind__static__from_string' in und, und.str()
+	assert 'mod2.Show__static__zero' in und, und.str()
+	assert !calls.any(it.to.contains('Shape__static__from_string') && it.provenance == .undeclared)
+	assert !calls.any(it.to.contains('lone.Kind') && it.provenance == .undeclared)
+	assert !calls.any(it.to == 'mod2.Kind__static__zero' && it.provenance == .undeclared)
+	// an enum declared once per platform is one module's, not two
+	p := graph_of({
+		'app/v.mod':                  ''
+		'app/plat/kind_linux.c.v':    'module plat\n\npub enum Kind {\n\ta\n}\n'
+		'app/plat/kind_windows.c.v':  'module plat\n\npub enum Kind {\n\ta\n}\n'
+		'app/main_test.v':            'module main\n\nimport plat\n\nfn test_p() {\n\t_ := plat.Kind.from_string(\'a\') or { return }\n}\n'
+	})
+	pc := p.edges.filter(it.kind == .calls && it.from == 'app.test_p')
+	assert pc.any(it.to == 'plat.Kind__static__from_string' && it.provenance == .undeclared), pc.str()
+	// an enum that declares its own from_string (here in a test the caller can't
+	// reach) isn't V's; a test's enum is no module's an import names, so `solo.Kind`
+	// is app/d/solo's alone
+	d := graph_of({
+		'app/v.mod':                ''
+		'app/dec/dec.v':            'module dec\n\npub enum Kind {\n\ta\n}\n'
+		'app/dec/extra_test.v':     'module dec\n\nfn Kind.from_string(s string) ?Kind {\n\treturn none\n}\n'
+		'app/c/solo/solo_test.v':   'module solo\n\nenum Kind {\n\ta\n}\n'
+		'app/d/solo/solo.v':        'module solo\n\npub enum Kind {\n\ta\n}\n'
+		'app/main_test.v':          'module main\n\nimport dec\nimport solo\n\nfn test_d() {\n\t_ := dec.Kind.from_string(\'a\') or { return }\n\t_ := solo.Kind.from_string(\'a\') or { return }\n}\n'
+	})
+	dc := d.edges.filter(it.kind == .calls && it.from == 'app.test_d')
+	assert !dc.any(it.to == 'dec.Kind__static__from_string' && it.provenance == .undeclared), dc.str()
+	assert dc.any(it.to == 'solo.Kind__static__from_string' && it.provenance == .undeclared), dc.str()
+	// a static call through a selective import is named bare, as written, so one of a
+	// module whose directory has another name still resolves by its name
+	h := graph_of({
+		'proj/v.mod':       ''
+		'proj/odd/foo.v':   'module zmod_foo\n\npub struct Foo {}\n\npub fn Foo.new() Foo {\n\treturn Foo{}\n}\n'
+		'proj/odd/main.v':  'module main\n\nimport zmod_foo { Foo }\n\nfn main() {\n\t_ := Foo.new()\n}\n'
+	})
+	hc := h.edges.filter(it.kind == .calls && it.from == 'proj.odd.main').map(it.to)
+	assert hc == ['proj.odd.Foo__static__new'], hc.str()
+}
+
+fn test_a_method_v_provides_on_an_array_of_functions_or_a_literal_is_undeclared() {
+	// `[a, b]` holds functions, so it is an array, and `index`, `contains` and
+	// `to_fixed_size` are methods V writes for it rather than any declared `index`
+	g := graph_of({
+		'lib/m/m.v':          'module m\n\nfn a() {}\n\nfn b() {}\n\nfn probe() {\n\tfa := [a, b]\n\t_ := fa.index(b)\n\tff := [a, b]!\n\t_ := ff.contains(a)\n\t_ := [1, 2].to_fixed_size()\n}\n\nfn probe2() {\n\tys := [nope_a, nope_b]\n\t_ := ys.index(1)\n}\n'
+		'lib/other/other.v':  'module other\n\npub struct S {}\n\npub fn (s S) index(x int) int {\n\treturn x\n}\n\npub fn (s S) contains(x int) bool {\n\treturn true\n}\n\npub fn (s S) to_fixed_size() int {\n\treturn 0\n}\n'
+		'lib/other/other2.v': 'module other\n\npub struct T {}\n\npub fn (t T) index(x int) int {\n\treturn x\n}\n\npub fn (t T) contains(x int) bool {\n\treturn true\n}\n\npub fn (t T) to_fixed_size() int {\n\treturn 0\n}\n'
+	})
+	calls := g.edges.filter(it.kind == .calls && it.from == 'lib.m.probe' && it.to in ['index', 'contains', 'to_fixed_size'])
+	assert calls.len == 3, calls.str()
+	assert calls.all(it.provenance == .undeclared), calls.str()
+	// names that reach no function are no functions, so `ys` is untyped and its
+	// `index` is left to name matching, which the two declared `index` methods leave
+	// ambiguous
+	p2 := g.edges.filter(it.kind == .calls && it.from == 'lib.m.probe2' && it.to == 'index')
+	assert p2.len == 1 && p2[0].provenance != .undeclared, p2.str()
+}
+
 // `__addr(x)` and `__v3_isreftype(x)` are compiler forms that V lowers, so the calls keep no edge at all: they are not calls into the program.
 fn test_a_compiler_intrinsic_call_keeps_no_edge() {
 	g := graph_of({
@@ -9531,6 +9814,36 @@ fn main() {}
 		vmodules: os.real_path(os.join_path(base, 'vmodules'))
 	}
 	return base, roots
+}
+
+fn test_a_library_directory_of_tests_alone_is_no_module() {
+	// module_of looks in VROOT's vlib and then VMODULES; a vlib directory holding only
+	// tests is no module, so `foo` is VMODULES' (has_v_sources). vmodules_own_import
+	// likewise skips a tests-only directory beside the v.mod.
+	base := write_tree('library_tests_only', {
+		'v/vlib/foo/foo_test.v':         'module foo\n\nfn test_f() {}\n'
+		'vmodules/foo/foo.v':            'module foo\n\npub fn f() {}\n'
+		'vmodules/pkg/v.mod':            ''
+		'vmodules/pkg/pkg.v':            'module pkg\n\nimport helpers\n'
+		'vmodules/pkg/helpers/h_test.v': 'module helpers\n\nfn test_h() {}\n'
+	})
+	defer {
+		os.rmdir_all(base) or {}
+	}
+	roots := LibraryRoots{
+		vroot:    os.real_path(os.join_path(base, 'v'))
+		vmodules: os.real_path(os.join_path(base, 'vmodules'))
+	}
+	m := roots.module_of('foo') or { panic('foo not found') }
+	assert m.rel_dir.starts_with(lib_vmodules_prefix), m.str()
+	old := os.getenv(lib_env_vmodules)
+	os.setenv(lib_env_vmodules, roots.vmodules, true)
+	defer {
+		os.setenv(lib_env_vmodules, old, true)
+	}
+	if own := vmodules_own_import('helpers', os.join_path(roots.vmodules, 'pkg', 'pkg.v')) {
+		assert false, 'a tests-only directory was taken as a module: ${own}'
+	}
 }
 
 fn test_a_project_resolves_its_calls_into_the_library() {
