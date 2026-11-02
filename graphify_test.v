@@ -8888,9 +8888,9 @@ fn emit() {
 // (`module builtin` in vlib/builtin/<os>_bare, which the driver adds under -d vlibc or
 // -freestanding), one copy per OS. The call can't say which OS it is built for, so it
 // reaches every copy, as a call of a per-platform function does. A method of the name
-// is no candidate for a plain call. A name another module declares a function of too,
-// a caller inside a bare directory, a parameter of that name, and a runtime helper are
-// left as they were.
+// is no candidate for a plain call, and a method call of the name is not linked to the
+// functions. A name another module declares a function of too, a caller inside a bare
+// directory, a parameter of that name, and a runtime helper are left as they were.
 fn test_a_call_only_bare_builtin_directories_declare_reaches_every_copy() {
 	g := graph_of({
 		'vlib/builtin/linux_bare/vlibc_d_vlibc.v':   'module builtin
@@ -8964,6 +8964,10 @@ fn read_bytes(path string) {
 fn run(vlibc_read_file fn (string) []u8) {
 	_ = vlibc_read_file(\'x\')
 }
+
+fn via_value(x Unknown) {
+	_ = x.vlibc_read_file(\'p\')
+}
 '
 	})
 	calls := g.edges.filter(it.kind == .calls && it.from == 'vlib.os.read_bytes')
@@ -8989,6 +8993,9 @@ fn run(vlibc_read_file fn (string) []u8) {
 	// a parameter of that name is a function value, not the bare builtin's
 	run := g.edges.filter(it.kind == .calls && it.from == 'vlib.os.run')
 	assert run.len == 1 && run[0].to == 'vlibc_read_file' && run[0].provenance == .undeclared, run.str()
+	// a method call of the name, on a receiver of no known type, names no function of it
+	value := g.edges.filter(it.kind == .calls && it.from == 'vlib.os.via_value')
+	assert value.len == 1 && value[0].to == 'vlibc_read_file' && value[0].is_method, value.str()
 	// a caller in a bare directory: its build compiles only that directory
 	bare := g.edges.filter(it.kind == .calls && it.from == 'vlib.builtin.macos_bare.bare_self')
 	assert bare.map(it.to) == ['not_mine'], bare.str()
