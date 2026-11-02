@@ -9062,6 +9062,26 @@ fn test_a_call_into_the_bare_builtin_keeps_its_copies_alike_and_yields_to_nearer
 	assert calls_of('vlib.os.use_lone').map(it.to) == ['vlib.builtin.macos_bare.lone_x'], calls_of('vlib.os.use_lone').str()
 }
 
+// `mut data, e := vlibc_read_file(path)` in os.read_bytes: every bare builtin copy returns
+// `([]u8, Errno)`, so `data` is a `[]u8` and `data.bytestr()` is that type's, though
+// another `bytestr` is in reach. Copies that return different types give no type.
+fn test_a_call_into_the_bare_builtin_has_the_type_its_copies_return() {
+	same := 'pub enum Errno {\n\tok\n}\n\npub fn read_all(p string) ([]u8, Errno) {\n\treturn []u8{}, .ok\n}\n'
+	g := graph_of({
+		'vlib/builtin/array.v':                    'module builtin\n\npub fn (b []u8) bytestr() string {\n\treturn \'\'\n}\n'
+		'vlib/builtin/linux_bare/vlibc_d_vlibc.v': 'module builtin\n\n' + same + '\npub fn differ() []u8 {\n\treturn []u8{}\n}\n'
+		'vlib/builtin/macos_bare/vlibc_d_vlibc.v': 'module builtin\n\n' + same + '\npub fn differ() string {\n\treturn \'\'\n}\n'
+		'vlib/net/http/response.v':                'module http\n\npub struct Response {}\n\npub fn (r Response) bytestr() string {\n\treturn \'\'\n}\n'
+		'vlib/os/os.c.v':                          'module os\n\nimport net.http\n\nfn read_bytes(p string) string {\n\t_ = http.Response{}\n\tmut data, e := read_all(p)\n\t_ = e\n\treturn data.bytestr()\n}\n\nfn read_differ() string {\n\t_ = http.Response{}\n\tx := differ()\n\treturn x.bytestr()\n}\n'
+	})
+	calls := g.edges.filter(it.kind == .calls && it.from == 'vlib.os.read_bytes')
+	assert calls.any(it.to == 'vlib.builtin.[]u8.bytestr'), calls.str()
+	assert !calls.any(it.to == 'vlib.net.http.Response.bytestr'), calls.str()
+	// a []u8 on one OS and a string on another: no one type, so no method of one
+	differ := g.edges.filter(it.kind == .calls && it.from == 'vlib.os.read_differ' && it.to.ends_with('bytestr'))
+	assert !differ.any(it.to == 'vlib.builtin.[]u8.bytestr'), differ.str()
+}
+
 // `uintptr_t(41)`, a bare call of `type uintptr_t = usize` in the caller's own module, is a conversion to that alias, so the call resolves to it instead of staying unresolved
 fn test_a_bare_call_of_a_type_alias_in_scope_is_a_conversion_to_it() {
 	g := graph_of({

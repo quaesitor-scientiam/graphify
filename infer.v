@@ -702,10 +702,18 @@ fn (inf &Infer) call_result(e Edge, to string, steps []string) ?InferredType {
 		id = res.id
 		t = inf.returns(id)?
 	} else {
-		// one function declared once per platform: its variants must all return
-		// the same type, which is then the call's type
-		variants := platform_variants(call, inf.by_name, inf.site_of)?
-		ids := variants.map(it.id)
+		// one function declared once per platform, or once per OS by V's bare builtin
+		// directories (bare_builtin_call): its copies must all return the same type, which
+		// is then the call's type
+		mut ids := []string{}
+		if variants := platform_variants(call, inf.by_name, inf.site_of) {
+			ids = variants.map(it.id)
+		} else {
+			ids = bare_builtin_call(call, inf.by_name, inf.site_of)
+		}
+		if ids.len == 0 {
+			return none
+		}
 		t = inf.same_return(ids)?
 		id = ids[0]
 	}

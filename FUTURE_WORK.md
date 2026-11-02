@@ -573,6 +573,13 @@ these files the id `vlib.builtin` instead was ruled out: 30 of their function na
 are also core builtin's (`println`, `panic`, `malloc`), which would turn those into
 per-OS variants.
 
+The value of such a call has the type its copies return, when they all return the same
+one (`call_result`, in infer.v, as for a per-platform function's copies, `same_return`):
+`mut data, e := vlibc_read_file(path)` in os.read_bytes makes `data` a `[]u8`, so its
+`data.free()` is the array's `free`. Copies that return different types give no type. On
+vlang `78869311b5`: unresolved calls 179 to 177, the `free` in os.read_bytes and in
+os.read_file; nothing else changed.
+
 The raw edge is retained and `explain` reports ambiguous callers rather than
 inventing links. A future opt-in deep mode could run the checker over a whole
 project, but given the small remainder, it would need to address these
