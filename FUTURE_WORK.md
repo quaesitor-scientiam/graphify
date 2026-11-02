@@ -584,6 +584,56 @@ OS's copy and stays untyped, where `e.code()` on it would otherwise go to one OS
 vlang `78869311b5`: unresolved calls 179 to 177, the `free` in os.read_bytes and in
 os.read_file; nothing else changed.
 
+**Five more causes, from a gap review (November 2026).** Of the vlib calls left
+unresolved outside tests, these had a cause the recipes could settle:
+- A method with type parameters of its own, `fn (e Encoder) encode_value[T](val T)` in
+  json2, `pack[T]` in cbor, `number_int[T]` in i18n, `set_session_id[X]` in x.sessions,
+  was never expanded: only a receiver's type parameters made a method generic, and only a
+  free function's call recorded its argument recipes. A method call now keeps them too
+  (`arg_sites`), including when two raw edges resolve to one method and merge (add_lines),
+  and a method's own parameters (`own_params`, from its tparams) take their types from its
+  call sites as a generic function's do, keyed by the method (`instance_key`); a
+  receiver's still come from its receivers. The walk sees them as a generic function's
+  (V3CallCtx.tparams), so `$if T is X` narrows a value of T in its block and guards the
+  calls after it: json2's `val.to_json()` under `$if T.unaliased_typ is time.Time` reaches
+  only `time.Time.to_json`. A field loop on one (`val.$(field.name)`) waits for those
+  types too (`caller_tparams`, in infer_call).
+- `T.name` on a type parameter is a string, `T.typ`, `T.unaliased_typ` and `T.idx` ints
+  and `T.indirections` a u8, as V's checker types them, beside `typeof(x).name` (`.selector`
+  in recipe): `table_name.to_lower()` in orm.
+- A method a module declares on a C struct, `fn (mut p C.sg_pipeline) free()`, is found
+  through the alias that names the struct, `type Pipeline = C.sg_pipeline`: in the
+  alias's file, then its module, then, as a C struct is one name for the program
+  (c_struct), the one module that declares it (method_on): `pip.free()` in gg.
+- builtin's `clone()` returns plain `map` (and an array's same-type methods `array`); on an
+  alias of a map or array, `type OpenApiSchema = map[string]json2.Any`, the value keeps the
+  alias, so an index into it and the element's methods are typed (follow_steps): veb's
+  openapi schema.
+- `if x := opt { x } else { ... }` used as a value has the type of what the option holds:
+  the first branch sees the guard's `x`, and the rest `err` (`.if_expr` in recipe):
+  `prepared_markused.release()` in v.driver.
+
+On vlang `8636a8fe6c`: unresolved calls 177 to 149, 56 call edges added and 41 removed.
+Six calls that resolved before now resolve elsewhere, each checked against the source and
+each a correction: `expr_str.contains` in cleanc is string's, not
+`DirectArrayAccessFns`'; two `convert[int]` calls on a C struct are the C struct's method,
+not an alias's; field-loop `?.str()` calls reach the fields' own types; openapi's `.str()`
+on a `json2.Any` is Any's, not `veb.Middleware[T]`'s; and cbor's `val.bytes()` under
+`$if T is string` is the string's, not `Packer.bytes`. Two `v.type_name()` calls in redis's
+`hgetall`, unresolved on master too, now show as such: their edges carry the `$if T is`
+guards they are under, so they no longer share a key with the undeclared `type_name()`
+edge they were hidden in. resolve_edges took about 1.3 s longer on vlang (median of five
+runs, 5.7 s to 7.0 s, measured before the guard and merge fixes above), for the method
+calls' argument recipes; extraction as a whole moved less than the run-to-run noise.
+
+Still unresolved, looked at and left: migration's `db.execute` on a `T` whose only
+instances in the tree are test types, whose methods a non-test file doesn't see; a
+generic function's result typed by its argument (`rand.element(app.commands)`); a field
+of a match branch with two types (`OptionType, ResultType { typ.base_type }`); veb
+examples' implicit `ctx`; and `drop_owned`'s `free` and `drop`, whose comptime guards no
+instance in the tree passes. A generic struct instantiated from another module,
+`codec.Store[codec.Paper]{}` in app, gives its methods no instance: the owner is keyed
+as written (`codec.Store`), not by its module's id.
 The raw edge is retained and `explain` reports ambiguous callers rather than
 inventing links. A future opt-in deep mode could run the checker over a whole
 project, but given the small remainder, it would need to address these

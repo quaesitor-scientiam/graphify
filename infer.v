@@ -94,7 +94,7 @@ fn (mut inf Infer) infer_call(e Edge) ?CallResolution {
 	// parameter waits for the parameter's instances; one that no field of a known type
 	// answers is resolved as a call on an unknown receiver, as before the step existed
 	if e.is_method && has_field_any(e.recv_recipe) {
-		if inf.field_any_on_tparam(e, inf.generics_of[e.from] or { []string{} }) {
+		if inf.field_any_on_tparam(e, inf.caller_tparams(e.from)) {
 			return none
 		}
 		if field_any_ids(e, Symbol{}, []string{}, map[string][]InferredType{}, mut inf).len > 0 {
@@ -580,6 +580,18 @@ fn (inf &Infer) follow_steps(e Edge, depth int) ?InferredType {
 						ret.text = '[]'
 					} else if name == 'repeat' {
 						ret.text = t.text
+					}
+				}
+				// the same untyped result for one of those methods on an alias of an array or map,
+				// `clone()` on `type Schema = map[string]Any`: the value is the alias's own
+				if (ret.text == 'array' && name in array_same_type) || (ret.text == 'map' && name == 'clone') {
+					u := inf.unalias(t, e.file)
+					if u.text.starts_with(if ret.text == 'map' { 'map[' } else { '[' }) {
+						ret = InferredType{
+							text: t.text
+							mod:  t.mod
+							file: t.file
+						}
 					}
 				}
 				// `Queue[int].pop()` returns the `T` of `Queue[T]`, here `int`
@@ -1091,6 +1103,14 @@ fn fn_return(t string) ?string {
 	return ret
 }
 
+// caller_tparams are the type parameters the declaration `id` can name: a generic function's,
+// or a method's receiver type parameters and its own.
+fn (inf &Infer) caller_tparams(id string) []string {
+	mut out := (inf.generics_of[id] or { []string{} }).clone()
+	out << inf.tparams_of[id] or { []string{} }
+	return out
+}
+
 // same_return is the return type shared by every id, or none when they differ.
 fn (inf &Infer) same_return(ids []string) ?InferredType {
 	first := inf.returns(ids[0])?
@@ -1175,6 +1195,24 @@ fn (inf &Infer) method_on(t InferredType, name string, file string, depth int) ?
 	}
 	if id := inf.pick_method(cands, name, short, qual, t, file) {
 		return id
+	}
+	// a method a module declares on a C struct, `fn (mut p C.sg_pipeline) free()`, has the owner
+	// `C.sg_pipeline`: found in t's file, then its module, then, as a C struct is one name for
+	// the whole program (c_struct), the one module that declares it
+	if qual == 'C' {
+		if id := inf.pick_method(cands, name, 'C.' + short, '', t, file) {
+			return id
+		}
+		mut ids := []string{}
+		for c in cands {
+			if c.is_method && !test_private(c.file, file)
+				&& c.id.all_before('@') == '${c.mod}.C.${short}.${name}' && c.id !in ids {
+				ids << c.id
+			}
+		}
+		if ids.len == 1 {
+			return ids[0]
+		}
 	}
 	if depth >= embed_depth {
 		return none

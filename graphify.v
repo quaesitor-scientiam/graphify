@@ -1633,11 +1633,13 @@ fn resolve_edges(mut g Graph) {
 	}
 	// a method call on a type parameter is linked to the methods of the types its
 	// generic function, or its generic struct, is instantiated with (generics.v); only
-	// functions and methods with type parameters carry a recipe
+	// functions and methods with type parameters carry a recipe, or for a method's own
+	// type parameters tparams
 	mut generic_funcs := map[string]Symbol{}
 	mut generic_fields := []Symbol{}
 	for s in g.symbols {
-		if (s.kind == .function || s.kind == .method || s.kind == .struct_) && s.recipe != '' {
+		if (s.kind == .function || s.kind == .method || s.kind == .struct_)
+			&& (s.recipe != '' || s.tparams != '') {
 			generic_funcs[s.id] = s
 		}
 		if s.kind == .field && s.signature.contains('[') {
@@ -2372,11 +2374,13 @@ fn rel_path(root string, path string) string {
 }
 
 // add_lines adds the call sites of `e`, another raw edge that resolved to the same
-// call, to the resolved edge at `at`: their lines, and the builds that make them.
+// call, to the resolved edge at `at`: their lines, the builds that make them, and their
+// argument recipes, which a generic callee's instances come from (expand_type_param_calls).
 fn add_lines(mut edges []Edge, at int, e Edge) {
 	edges[at] = Edge{
 		...edges[at]
-		lines: merge_lines(edges[at].lines, e.lines)
-		build: either_build(edges[at].build, e.build)
+		lines:     merge_lines(edges[at].lines, e.lines)
+		build:     either_build(edges[at].build, e.build)
+		arg_sites: edges[at].arg_sites + e.arg_sites
 	}
 }

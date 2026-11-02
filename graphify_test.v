@@ -11942,3 +11942,432 @@ fn probe() int {
 	assert g.copy_holding(probes, [20]) == none
 	assert g.copy_holding(probes[..1], [4]) == none
 }
+
+// a method with type parameters of its own, `fn (e Encoder) encode[T](val T)`, is called on the
+// types its call sites pass, as a generic function is: directly, through another generic method,
+// and through a generic function. A method of a generic struct with its own `X` finds a field's
+// method on each instance of X, and an instance of the struct's T is not one of X's
+fn test_a_method_with_its_own_type_parameters_is_expanded_by_its_call_sites() {
+	g := graph_of({
+		'lib/codec/codec.v': 'module codec
+
+pub struct Pen {}
+
+pub fn (p Pen) describe() string {
+	return \'\'
+}
+
+pub struct Ink {}
+
+pub fn (i Ink) describe() string {
+	return \'\'
+}
+
+pub struct Paper {}
+
+pub fn (p Paper) describe() string {
+	return \'\'
+}
+
+pub struct Encoder {}
+
+pub fn (e Encoder) encode[T](val T) string {
+	return val.describe()
+}
+
+pub fn (e Encoder) wrap[T](val T) string {
+	return e.encode(val)
+}
+
+pub fn encode_all[T](val T) string {
+	e := Encoder{}
+	return e.wrap(val)
+}
+
+pub struct Res {}
+
+pub fn (r Res) add() {}
+
+pub struct Ctx {
+pub:
+	res Res
+}
+
+pub struct Store[T] {}
+
+pub fn (s Store[T]) touch[X](ctx X) {
+	ctx.res.add()
+}
+
+pub fn (s Store[T]) show(v T) string {
+	return v.describe()
+}
+
+fn keep() {
+	s := Store[Paper]{}
+	s.touch(Ctx{})
+}
+'
+		'lib/app/app.v':     'module app
+
+import codec
+
+fn run() {
+	e := codec.Encoder{}
+	e.encode(codec.Pen{})
+	codec.encode_all(codec.Ink{})
+}
+'
+	})
+	targets := fn [g] (from string, name string) []string {
+		mut out := g.edges.filter(it.kind == .calls && it.from == from && it.to.ends_with(name)).map(it.to)
+		out.sort()
+		return out
+	}
+	assert targets('lib.codec.Encoder.encode', 'describe') == ['lib.codec.Ink.describe',
+		'lib.codec.Pen.describe'], targets('lib.codec.Encoder.encode', 'describe').str()
+	assert targets('lib.codec.Store[T].touch', 'add') == ['lib.codec.Res.add'], targets('lib.codec.Store[T].touch',
+		'add').str()
+	// the struct's own T is still read from its instance, and X's instance is none of T's
+	assert targets('lib.codec.Store[T].show', 'describe') == ['lib.codec.Paper.describe'], targets('lib.codec.Store[T].show',
+		'describe').str()
+}
+
+// `T.name` on a type parameter is the type's name, a string, so a call on it is the string's
+fn test_a_type_parameters_name_is_a_string() {
+	g := graph_of({
+		'vlib/builtin/string.v': 'module builtin
+
+pub fn (s string) index(p string) ?int {
+	return none
+}
+
+pub fn (s string) to_lower() string {
+	return s
+}
+
+pub fn (r rune) to_lower() rune {
+	return r
+}
+
+pub fn (r rune) index(p string) ?int {
+	return none
+}
+
+pub fn (i int) str() string {
+	return \'\'
+}
+
+pub fn (b u8) str() string {
+	return \'\'
+}
+'
+		'lib/orm/orm.v':         'module orm
+
+fn table_from_struct[T]() string {
+	mut table_name := T.name
+	if pos := table_name.index(\'[\') {
+		table_name = table_name[..pos]
+	}
+	println(T.typ.str())
+	println(T.indirections.str())
+	return table_name.to_lower()
+}
+'
+	})
+	calls := g.edges.filter(it.kind == .calls && it.from == 'lib.orm.table_from_struct').map(it.to)
+	assert 'vlib.builtin.string.index' in calls, calls.str()
+	assert 'vlib.builtin.string.to_lower' in calls, calls.str()
+	// `T.typ` is an int and `T.indirections` a u8, as V's checker types them
+	assert 'vlib.builtin.int.str' in calls, calls.str()
+	assert 'vlib.builtin.u8.str' in calls, calls.str()
+}
+
+// a method declared on a C struct, `fn (mut p C.sg_pipeline) free()`, is a method of the alias
+// that names the struct, `type Pipeline = C.sg_pipeline`, here on a fixed array's element
+fn test_a_method_on_a_c_struct_is_found_through_its_alias() {
+	g := graph_of({
+		'vlib/builtin/array.v': 'module builtin
+
+pub fn (a &array) free() {}
+
+pub fn (s &string) free() {}
+'
+		'lib/gfx/structs.c.v':  'module gfx
+
+@[typedef]
+pub struct C.sg_pipeline {}
+
+pub type Pipeline = C.sg_pipeline
+
+pub fn (mut p C.sg_pipeline) free() {}
+'
+		'lib/render/render.v':  'module render
+
+import gfx
+
+pub struct Pipe {
+	pips [3]gfx.Pipeline
+}
+
+fn destroy(p Pipe) {
+	mut pip := p.pips[0]
+	pip.free()
+}
+'
+		'lib/app/app.v':        'module app
+
+import gfx
+
+fn make() {
+	mut raw := C.sg_pipeline{}
+	raw.free()
+}
+'
+	})
+	calls := g.edges.filter(it.kind == .calls && it.from == 'lib.render.destroy').map(it.to)
+	assert calls == ['lib.gfx.C.sg_pipeline.free'], calls.str()
+	// a C struct is one name for the whole program: written in another module, its method is
+	// still the one module's that declares it
+	raw := g.edges.filter(it.kind == .calls && it.from == 'lib.app.make').map(it.to)
+	assert raw == ['lib.gfx.C.sg_pipeline.free'], raw.str()
+}
+
+// builtin's `clone()` on an alias of a map returns plain `map`, but the value is the alias's
+// own map: an index into it, and a method of the element, are still typed
+fn test_a_clone_of_a_map_alias_keeps_its_type() {
+	g := graph_of({
+		'vlib/builtin/map.v': 'module builtin
+
+pub fn (m &map) clone() map {
+	return *m
+}
+
+pub fn (a &array) clone() array {
+	return *a
+}
+'
+		'lib/json2/any.v':    'module json2
+
+pub type Any = string | int | map[string]Any
+
+pub fn (f Any) as_map() map[string]Any {
+	return map[string]Any{}
+}
+
+pub struct Other {}
+
+pub fn (o Other) as_map() map[string]Any {
+	return map[string]Any{}
+}
+'
+		'lib/veb/doc.v':      'module veb
+
+import json2
+
+pub type Schema = map[string]json2.Any
+
+pub struct Doc {}
+
+fn (d &Doc) resolve(s Schema) Schema {
+	return s
+}
+
+fn (d &Doc) variant(base Schema) {
+	mut choice := d.resolve(base).clone()
+	props := (choice[\'p\'] or { json2.Any(0) }).as_map().clone()
+	println(props)
+}
+'
+	})
+	calls := g.edges.filter(it.kind == .calls && it.from == 'lib.veb.Doc.variant').map(it.to)
+	assert 'lib.json2.Any.as_map' in calls, calls.str()
+	assert !calls.contains('clone'), calls.str()
+}
+
+// `if x := opt { x } else { ... }` as a value has the type of what the option holds: the first
+// branch sees `x`, declared by the guard
+fn test_an_if_guard_value_has_the_options_type() {
+	g := graph_of({
+		'lib/drv/drv.v': 'module drv
+
+pub struct Prepared {}
+
+pub fn (mut p Prepared) release() {}
+
+pub struct Other {}
+
+pub fn (mut o Other) release() {}
+
+fn get() ?&Prepared {
+	return none
+}
+
+fn run() {
+	w := get()
+	mut prepared := if x := w {
+		x
+	} else {
+		panic(\'none\')
+	}
+	prepared.release()
+}
+'
+	})
+	calls := g.edges.filter(it.kind == .calls && it.from == 'lib.drv.run').map(it.to)
+	assert 'lib.drv.Prepared.release' in calls, calls.str()
+}
+
+// a call on each field of a method's own type parameter, `val.$(field.name).show()` in
+// `fn (e Enc) encode[T](val T)`, waits for T's instances as a generic function's does: it
+// reaches the show of the field the call site's struct has, as a field-loop edge, and is not
+// taken by name first for the one `show` there is
+fn test_a_field_loop_on_a_methods_own_type_parameter_reaches_each_field() {
+	g := graph_of({
+		'lib/enc/enc.v': 'module enc
+
+struct Alpha {}
+
+fn (a Alpha) show() {}
+
+struct Box {
+	a Alpha
+	n int
+}
+
+struct Enc {}
+
+fn (e Enc) encode[T](val T) {
+	\$for field in T.fields {
+		val.\$(field.name).show()
+	}
+}
+
+fn run() {
+	e := Enc{}
+	e.encode(Box{})
+}
+'
+	})
+	shows := g.edges.filter(it.kind == .calls && it.from == 'lib.enc.Enc.encode')
+	assert shows.map(it.to) == ['lib.enc.Alpha.show'], shows.str()
+	assert shows.all(it.provenance == .comptime), shows.str()
+}
+// two calls of one generic method through different receivers in one function are two raw
+// edges that resolve to the same method: both call sites' arguments are its instances
+fn test_every_call_site_of_a_generic_method_gives_it_instances() {
+	g := graph_of({
+		'lib/codec/codec.v': 'module codec
+
+pub struct Pen {}
+
+pub fn (p Pen) describe() string {
+	return \'\'
+}
+
+pub struct Ink {}
+
+pub fn (i Ink) describe() string {
+	return \'\'
+}
+
+pub struct Encoder {}
+
+pub fn (e Encoder) encode[T](val T) string {
+	return val.describe()
+}
+
+fn first() Encoder {
+	return Encoder{}
+}
+
+fn second() Encoder {
+	return Encoder{}
+}
+
+fn run() {
+	a := first()
+	b := second()
+	a.encode(Pen{})
+	b.encode(Ink{})
+}
+'
+	})
+	mut d := g.edges.filter(it.kind == .calls && it.from == 'lib.codec.Encoder.encode').map(it.to)
+	d.sort()
+	assert d == ['lib.codec.Ink.describe', 'lib.codec.Pen.describe'], d.str()
+}
+
+// `$if T is Pen { val.describe() }` in a method with its own T is compiled only for Pen, as
+// in a generic function: Ink, the other instance, is not linked from that block
+fn test_a_comptime_check_on_a_methods_own_type_parameter_narrows_it() {
+	g := graph_of({
+		'lib/codec/codec.v': 'module codec
+
+pub struct Pen {}
+
+pub fn (p Pen) describe() string {
+	return \'\'
+}
+
+pub struct Ink {}
+
+pub fn (i Ink) describe() string {
+	return \'\'
+}
+
+pub struct Encoder {}
+
+pub fn (e Encoder) encode[T](val T) string {
+	\$if T is Pen {
+		return val.describe()
+	}
+	return \'\'
+}
+
+fn run() {
+	e := Encoder{}
+	e.encode(Pen{})
+	e.encode(Ink{})
+}
+'
+	})
+	d := g.edges.filter(it.kind == .calls && it.from == 'lib.codec.Encoder.encode').map(it.to)
+	assert d == ['lib.codec.Pen.describe'], d.str()
+}
+
+// two modules that each declare a method on one C struct: the receiver's own module's is the
+// one, found before the program-wide fallback, which two declarations leave undecided
+fn test_a_c_struct_method_in_the_receivers_module_comes_first() {
+	g := graph_of({
+		'lib/gfx/structs.c.v':   'module gfx
+
+@[typedef]
+pub struct C.sg_pipeline {}
+
+pub type Pipeline = C.sg_pipeline
+
+pub fn (mut p C.sg_pipeline) free() {}
+'
+		'lib/other/structs.c.v': 'module other
+
+pub fn (mut p C.sg_pipeline) free() {}
+'
+		'lib/render/render.v':   'module render
+
+import gfx
+import other
+
+pub struct Pipe {
+	pips [3]gfx.Pipeline
+}
+
+fn destroy(p Pipe) {
+	mut pip := p.pips[0]
+	pip.free()
+}
+'
+	})
+	calls := g.edges.filter(it.kind == .calls && it.from == 'lib.render.destroy').map(it.to)
+	assert calls == ['lib.gfx.C.sg_pipeline.free'], calls.str()
+}

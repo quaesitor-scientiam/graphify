@@ -30,20 +30,27 @@ fn expand_type_param_calls(edges []Edge, sources []Edge, fields []Symbol, mut in
 	// the types a generic function's type parameter is given at its call sites, from
 	// the argument recipes
 	for e in edges {
-		if e.kind != .calls || e.is_method || e.arg_sites == '' {
+		if e.kind != .calls || e.arg_sites == '' {
 			continue
 		}
 		callee := funcs[e.to] or { continue }
-		if callee.kind != .function {
+		if callee.kind != .function && callee.kind != .method {
 			continue
 		}
-		tps := generic_params(callee)
+		// a method's receiver type parameters come from its receivers (below), its own from
+		// its arguments
+		tps := own_params(callee)
 		if tps.len == 0 {
 			continue
 		}
 		caller := funcs[e.from] or { Symbol{} }
 		caller_tps := generic_params(caller)
-		ptypes := param_types(callee.signature)
+		// a method's parameters are read past its receiver, `fn (e Encoder) encode(val T)`
+		ptypes := param_types(if callee.kind == .method {
+			callee.signature.all_after(') ')
+		} else {
+			callee.signature
+		})
 		sites := e.arg_sites.split(arg_site_end)
 		for si, site in sites {
 			if si == sites.len - 1 || site == '' {
@@ -361,9 +368,10 @@ fn call_key(e Edge) string {
 // instance_key is the key of the types a type parameter `tp` of the declaration
 // `caller` stands for: `<function id>\x00<tp>` for a generic function, and
 // `<struct id>\x00<position of tp>` for a type parameter of a generic struct, which a
-// method or a field of the struct has. `tp` must be one of the caller's parameters.
+// method or a field of the struct has, and `<method id>\x00<tp>` for a method's own.
+// `tp` must be one of the caller's parameters.
 fn instance_key(caller Symbol, tp string) string {
-	if caller.kind == .function {
+	if caller.kind == .function || (caller.kind == .method && tp in own_params(caller)) {
 		return caller.id + '\x00' + tp
 	}
 	mut pos := 0
@@ -479,12 +487,26 @@ fn put_instance(mut instances map[string][]InferredType, key string, t InferredT
 
 // generic_params are a generic function's type parameters, a method's receiver type
 // parameters, `T` in `fn (b Box[T]) show()`, or a generic struct's own, which the
-// symbol records comma-separated in its recipe; none for one that has none.
+// symbol records comma-separated in its recipe, and then a method's own, `X` in
+// `fn (b Box[T]) put[X]()`, from its tparams; none for one that has none.
 fn generic_params(s Symbol) []string {
-	if (s.kind != .function && s.kind != .method && s.kind != .struct_) || s.recipe == '' {
+	if s.kind != .function && s.kind != .method && s.kind != .struct_ {
 		return []string{}
 	}
-	return s.recipe.split(',')
+	mut out := if s.recipe == '' { []string{} } else { s.recipe.split(',') }
+	if s.kind == .method && s.tparams != '' {
+		out << s.tparams.split(',')
+	}
+	return out
+}
+
+// own_params are a method's own type parameters, `X` in `fn (b Box[T]) put[X]()`, which
+// its call sites give types as a generic function's do; a free function's are all its own.
+fn own_params(s Symbol) []string {
+	if s.kind == .method {
+		return if s.tparams == '' { []string{} } else { s.tparams.split(',') }
+	}
+	return generic_params(s)
 }
 
 // chained_call_ids are the methods a call reaches on the result of a method call on a
@@ -897,8 +919,8 @@ fn is_type_param_text(t string) bool {
 	return t.len > 0 && t.len <= 2 && t[0] >= u8(`A`) && t[0] <= u8(`Z`)
 }
 
-// param_types are the type texts of a free function's parameters, read from its
-// signature: `pub fn f(a int, b []T) R` gives int and []T. A `mut` parameter is
+// param_types are the type texts of a function's parameters, read from its signature
+// (a method's from past its receiver): `pub fn f(a int, b []T) R` gives int and []T. A `mut` parameter is
 // written with a leading `&` (`mut b []T` is `b &[]T`), which is not part of its type.
 fn param_types(sig string) []string {
 	open := sig.index('(') or { return []string{} }
