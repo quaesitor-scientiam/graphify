@@ -598,9 +598,10 @@ unresolved outside tests, these had a cause the recipes could settle:
   calls after it: json2's `val.to_json()` under `$if T.unaliased_typ is time.Time` reaches
   only `time.Time.to_json`. A field loop on one (`val.$(field.name)`) waits for those
   types too (`caller_tparams`, in infer_call). A call the expansion itself links,
-  `t.put(Pen{})` on a `t T`, keeps its argument recipes, and the expansion runs again
-  with them while a pass links such a call (expand_type_param_calls); on vlang one more
-  pass, for 10 calls.
+  `t.put(Pen{})` on a `t T`, keeps its argument recipes, and while they give a method a
+  type not known before the expansion is done again from the start with every type known
+  (expand_type_param_calls), so a call an earlier pass linked, or resolved by name for
+  want of an instance, takes the new ones too; on vlang one more pass, for 10 calls.
 - `T.name` on a type parameter is a string, `T.typ`, `T.unaliased_typ` and `T.idx` ints
   and `T.indirections` a u8, as V's checker types them, beside `typeof(x).name` (`.selector`
   in recipe): `table_name.to_lower()` in orm.

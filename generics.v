@@ -25,8 +25,9 @@ struct Flow {
 // of the struct fields that are generic instances (`fields`).
 // A call the expansion links, `t.put(Pen{})` on a `t T`, can reach a method with type
 // parameters of its own, which the call's arguments give types; those are known only once
-// the call is linked, so the expansion runs again while a pass links such a call (a chain
-// of them is short, so a few passes reach the end).
+// the call is linked, so the expansion is done again from the start, over `edges`, while
+// such calls give a type not known before (a chain of them is short, so a few passes reach
+// the end).
 fn expand_type_param_calls(edges []Edge, sources []Edge, fields []Symbol, mut inf Infer, funcs map[string]Symbol, unaddressable map[string]bool, variants_of map[string][]string) []Edge {
 	// the types each type parameter stands for, by instance_key
 	mut instances := map[string][]InferredType{}
@@ -40,15 +41,28 @@ fn expand_type_param_calls(edges []Edge, sources []Edge, fields []Symbol, mut in
 	mut out, mut reached := expand_edges(edges, instances, funcs, mut inf, unaddressable,
 		variants_of)
 	for _ in 0 .. 4 {
-		if reached.len == 0 {
-			break
-		}
-		// only the calls just linked give new types; the rest are in `instances` already
+		// the calls just linked give types to the methods they reach; when they give a new
+		// one, the expansion is done again from the start, so a call it already linked, or
+		// resolved by name for want of an instance, is linked with every type known now
+		before := instance_count(instances)
 		collect_call_sites(reached, funcs, mut inf, mut instances, mut flows)
 		settle_flows(mut instances, flows)
-		out, reached = expand_edges(out, instances, funcs, mut inf, unaddressable, variants_of)
+		if instance_count(instances) == before {
+			break
+		}
+		out, reached = expand_edges(edges, instances, funcs, mut inf, unaddressable, variants_of)
 	}
 	return out
+}
+
+// instance_count is how many types `instances` records in all, which only grows
+// (put_instance), so a change in it is a new type.
+fn instance_count(instances map[string][]InferredType) int {
+	mut n := 0
+	for _, ts in instances {
+		n += ts.len
+	}
+	return n
 }
 
 // collect_call_sites records the types a generic function's type parameters, or a method's

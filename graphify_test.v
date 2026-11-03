@@ -12601,3 +12601,102 @@ fn keep() {
 	calls := g.edges.filter(it.kind == .calls && it.from == 'lib.codec.Enc.put').map(it.to)
 	assert calls == ['lib.codec.Pen.describe'], calls.str()
 }
+
+// a method with its own type parameter that a direct call already gives an instance, and
+// the expansion reaches with another: its call on X is linked to both, not only the first
+fn test_a_late_instance_joins_the_ones_a_generic_method_had() {
+	g := graph_of({
+		'lib/codec/codec.v': 'module codec
+
+pub struct Pen {}
+
+pub fn (p Pen) describe() string {
+	return \'\'
+}
+
+pub struct Ink {}
+
+pub fn (i Ink) describe() string {
+	return \'\'
+}
+
+pub struct Enc {}
+
+pub fn (e Enc) put[X](x X) string {
+	return x.describe()
+}
+
+pub struct Other {}
+
+pub fn (o Other) put[X](x X) string {
+	return \'\'
+}
+
+pub fn run[T](t T) string {
+	return t.put(Pen{})
+}
+
+fn keep() {
+	run(Enc{})
+	e := Enc{}
+	e.put(Ink{})
+}
+'
+	})
+	mut calls := g.edges.filter(it.kind == .calls && it.from == 'lib.codec.Enc.put').map(it.to)
+	calls.sort()
+	assert calls == ['lib.codec.Ink.describe', 'lib.codec.Pen.describe'], calls.str()
+}
+
+// a field loop on a method's own type parameter, in a method the expansion reaches: the call
+// is linked to each field's method as a direct call would be, whether a plain call of the
+// same name sits beside it or another module's method is the only one by that name nearby
+fn test_a_field_loop_in_a_generic_method_the_expansion_reaches_is_linked() {
+	g := graph_of({
+		'lib/other/other.v': 'module other
+
+pub struct Alpha {}
+
+pub fn (a Alpha) show() {}
+'
+		'lib/codec/codec.v': 'module codec
+
+import other
+
+pub struct Local {}
+
+pub fn (l Local) show() {}
+
+pub struct Box {
+	a other.Alpha
+}
+
+pub fn (b Box) show() {}
+
+pub struct Enc {}
+
+pub fn (e Enc) put[X](x X) {
+	x.show()
+	\$for field in X.fields {
+		x.\$(field.name).show()
+	}
+}
+
+pub struct Decoy {}
+
+pub fn (d Decoy) put[X](x X) {}
+
+pub fn run[T](t T) {
+	t.put(Box{})
+}
+
+fn keep() {
+	run(Enc{})
+}
+'
+	})
+	calls := g.edges.filter(it.kind == .calls && it.from == 'lib.codec.Enc.put')
+	assert calls.any(it.to == 'lib.codec.Box.show' && it.provenance == .inferred), calls.str()
+	assert calls.any(it.to == 'lib.other.Alpha.show' && it.provenance == .comptime), calls.str()
+	assert !calls.any(it.to == 'lib.codec.Local.show'), calls.str()
+}
