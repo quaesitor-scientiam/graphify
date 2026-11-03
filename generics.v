@@ -23,12 +23,38 @@ struct Flow {
 // instantiated with, at the receivers of its methods (`sources`, the edges as the
 // extraction recorded them, since a resolved edge drops its receiver) and in the types
 // of the struct fields that are generic instances (`fields`).
+// A call the expansion links, `t.put(Pen{})` on a `t T`, can reach a method with type
+// parameters of its own, which the call's arguments give types; those are known only once
+// the call is linked, so the expansion runs again while a pass links such a call (a chain
+// of them is short, so a few passes reach the end).
 fn expand_type_param_calls(edges []Edge, sources []Edge, fields []Symbol, mut inf Infer, funcs map[string]Symbol, unaddressable map[string]bool, variants_of map[string][]string) []Edge {
 	// the types each type parameter stands for, by instance_key
 	mut instances := map[string][]InferredType{}
 	mut flows := []Flow{}
-	// the types a generic function's type parameter is given at its call sites, from
-	// the argument recipes
+	collect_call_sites(edges, funcs, mut inf, mut instances, mut flows)
+	collect_owner_instances(sources, fields, funcs, mut inf, mut instances, mut flows)
+	settle_flows(mut instances, flows)
+	if instances.len == 0 && !edges.any(it.is_method && has_field_any(it.recv_recipe)) {
+		return edges
+	}
+	mut out, mut reached := expand_edges(edges, instances, funcs, mut inf, unaddressable,
+		variants_of)
+	for _ in 0 .. 4 {
+		if reached.len == 0 {
+			break
+		}
+		// only the calls just linked give new types; the rest are in `instances` already
+		collect_call_sites(reached, funcs, mut inf, mut instances, mut flows)
+		settle_flows(mut instances, flows)
+		out, reached = expand_edges(out, instances, funcs, mut inf, unaddressable, variants_of)
+	}
+	return out
+}
+
+// collect_call_sites records the types a generic function's type parameters, or a method's
+// own, are given at the call sites `edges` record, from their argument recipes: an instance
+// of the parameter, or a flow from the caller's parameter it passes on.
+fn collect_call_sites(edges []Edge, funcs map[string]Symbol, mut inf Infer, mut instances map[string][]InferredType, mut flows []Flow) {
 	for e in edges {
 		if e.kind != .calls || e.arg_sites == '' {
 			continue
@@ -133,8 +159,12 @@ fn expand_type_param_calls(edges []Edge, sources []Edge, fields []Symbol, mut in
 			}
 		}
 	}
-	// the types a generic struct's type parameters are instantiated with, at the
-	// receivers of its methods, and in the types of its fields
+}
+
+// collect_owner_instances records the types a generic struct's type parameters are
+// instantiated with, at the receivers of its methods (`sources`), and in the types of its
+// fields (`fields`).
+fn collect_owner_instances(sources []Edge, fields []Symbol, funcs map[string]Symbol, mut inf Infer, mut instances map[string][]InferredType, mut flows []Flow) {
 	for e in sources {
 		if e.kind != .calls || !e.is_method {
 			continue
@@ -161,8 +191,11 @@ fn expand_type_param_calls(edges []Edge, sources []Edge, fields []Symbol, mut in
 		own := funcs[f.parent] or { Symbol{} }
 		add_owner_instances(mut instances, mut flows, f.signature.all_after(' '), struct_module(f.parent, own), f.file, own)
 	}
-	// a type parameter that is passed on takes the types of the one it is passed from;
-	// a chain of generic calls is short, so a few rounds reach the fixed point
+}
+
+// settle_flows gives each type parameter that is passed on the types of the one it is
+// passed from; a chain of generic calls is short, so a few rounds reach the fixed point.
+fn settle_flows(mut instances map[string][]InferredType, flows []Flow) {
 	for _ in 0 .. 16 {
 		mut changed := false
 		for fl in flows {
@@ -176,10 +209,17 @@ fn expand_type_param_calls(edges []Edge, sources []Edge, fields []Symbol, mut in
 			break
 		}
 	}
-	if instances.len == 0 && !edges.any(it.is_method && has_field_any(it.recv_recipe)) {
-		return edges
-	}
+}
+
+// expand_edges is one pass of expand_type_param_calls over `edges`: each call on a type
+// parameter that `instances` lets it link is replaced by the methods it reaches, each
+// keeping the call's argument recipes. It also returns those new edges that pass arguments
+// to a method with type parameters of its own (passes_own_params), whose types a next pass
+// collects.
+fn expand_edges(edges []Edge, instances map[string][]InferredType, funcs map[string]Symbol, mut inf Infer, unaddressable map[string]bool, variants_of map[string][]string) ([]Edge, []Edge) {
 	mut out := []Edge{cap: edges.len}
+	// the linked calls that pass arguments to a method with type parameters of its own
+	mut reached := []Edge{}
 	// the edges of the calls in field loops, joined to the rest once every edge is out
 	// (see merge_call_edges)
 	mut field_edges := []Edge{}
@@ -194,7 +234,13 @@ fn expand_type_param_calls(edges []Edge, sources []Edge, fields []Symbol, mut in
 			caller := funcs[e.from] or { Symbol{} }
 			ids := field_any_ids(e, caller, generic_params(caller), instances, mut inf)
 			if ids.len == 0 {
-				field_edges << field_any_fallback(e, mut inf, unaddressable, variants_of)
+				fallback := field_any_fallback(e, mut inf, unaddressable, variants_of)
+				for fe in fallback {
+					if fe.to != e.to && passes_own_params(e, fe.to, funcs) {
+						reached << fe
+					}
+				}
+				field_edges << fallback
 				continue
 			}
 			// each platform's copy of a method, as resolve_edges links a call that reaches one
@@ -207,8 +253,12 @@ fn expand_type_param_calls(edges []Edge, sources []Edge, fields []Symbol, mut in
 						is_method:  true
 						file:       e.file
 						provenance: .comptime
+						arg_sites:  e.arg_sites
 						lines:      e.lines
 						build:      e.build
+					}
+					if passes_own_params(e, vid, funcs) {
+						reached << field_edges.last()
 					}
 				}
 			}
@@ -242,8 +292,12 @@ fn expand_type_param_calls(edges []Edge, sources []Edge, fields []Symbol, mut in
 					is_method:  true
 					file:       e.file
 					provenance: .inferred
+					arg_sites:  e.arg_sites
 					lines:      e.lines
 					build:      e.build
+				}
+				if passes_own_params(e, id, funcs) {
+					reached << out.last()
 				}
 			}
 			continue
@@ -288,13 +342,24 @@ fn expand_type_param_calls(edges []Edge, sources []Edge, fields []Symbol, mut in
 				is_method:  true
 				file:       e.file
 				provenance: .inferred
+				arg_sites:  e.arg_sites
 				lines:      e.lines
 				build:      e.build
+			}
+			if passes_own_params(e, id, funcs) {
+				reached << out.last()
 			}
 		}
 	}
 	merge_call_edges(mut out, field_edges)
-	return out
+	return out, reached
+}
+
+// passes_own_params reports whether the call `e`, linked to `id`, passes arguments to a
+// method with type parameters of its own, which they give types (see own_params).
+fn passes_own_params(e Edge, id string, funcs map[string]Symbol) bool {
+	callee := funcs[id] or { return false }
+	return callee.kind == .method && e.arg_sites != '' && own_params(callee).len > 0
 }
 
 // field_any_fallback is the edges of a call `e` on any field of a type that no field
@@ -324,6 +389,7 @@ fn field_any_fallback(e Edge, mut inf Infer, unaddressable map[string]bool, vari
 			is_method:  e.is_method
 			provenance: if r.inferred { .inferred } else { .extracted }
 			file:       e.file
+			arg_sites:  e.arg_sites
 			lines:      e.lines
 			build:      e.build
 		}

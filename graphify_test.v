@@ -11988,9 +11988,18 @@ pub struct Res {}
 
 pub fn (r Res) add() {}
 
+pub struct Junk {}
+
+pub fn (j Junk) add() {}
+
 pub struct Ctx {
 pub:
 	res Res
+}
+
+// an instance of X leaking into T would link Store[T].show to this
+pub fn (c Ctx) describe() string {
+	return \'\'
 }
 
 pub struct Store[T] {}
@@ -12370,4 +12379,225 @@ fn destroy(p Pipe) {
 	})
 	calls := g.edges.filter(it.kind == .calls && it.from == 'lib.render.destroy').map(it.to)
 	assert calls == ['lib.gfx.C.sg_pipeline.free'], calls.str()
+}
+
+// a call the expansion links, `t.put(Pen{})` on a `t T` that is an Enc, reaches a method
+// with a type parameter of its own: its argument is that method's instance too, so a call
+// on X in Enc.put reaches Pen's method
+fn test_a_generic_method_reached_through_a_type_parameter_gets_its_arguments_as_instances() {
+	g := graph_of({
+		'lib/codec/codec.v': 'module codec
+
+pub struct Pen {}
+
+pub fn (p Pen) describe() string {
+	return \'\'
+}
+
+pub struct Ink {}
+
+pub fn (i Ink) describe() string {
+	return \'\'
+}
+
+pub struct Enc {}
+
+pub fn (e Enc) put[X](x X) string {
+	return x.describe()
+}
+
+pub struct Other {}
+
+pub fn (o Other) put[X](x X) string {
+	return \'\'
+}
+
+pub fn run[T](t T) string {
+	return t.put(Pen{})
+}
+
+fn keep() {
+	run(Enc{})
+}
+'
+	})
+	calls := g.edges.filter(it.kind == .calls && it.from == 'lib.codec.Enc.put').map(it.to)
+	assert calls == ['lib.codec.Pen.describe'], calls.str()
+}
+
+// the other branches of an if-guard value: an `else if` guard's own variable, and `err`, the
+// error, in a plain `else`
+fn test_the_else_branches_of_an_if_guard_value_are_typed() {
+	g := graph_of({
+		'vlib/builtin/error.v': 'module builtin
+
+pub interface IError {
+	msg() string
+}
+'
+		'lib/drv/drv.v':        'module drv
+
+pub struct Prepared {}
+
+pub fn (mut p Prepared) release() {}
+
+pub fn (p Prepared) msg() string {
+	return \'\'
+}
+
+pub struct Other {}
+
+pub fn (mut o Other) release() {}
+
+pub fn (o Other) msg() string {
+	return \'\'
+}
+
+fn get() ?&Prepared {
+	return none
+}
+
+fn mystery() ?int {
+	return none
+}
+
+fn chained() {
+	mut p := if x := mystery() {
+		none
+	} else if y := get() {
+		y
+	} else {
+		panic(\'none\')
+	}
+	p.release()
+}
+
+fn failed() {
+	e := if x := mystery() {
+		none
+	} else {
+		err
+	}
+	println(e.msg())
+}
+'
+	})
+	chained := g.edges.filter(it.kind == .calls && it.from == 'lib.drv.chained').map(it.to)
+	assert 'lib.drv.Prepared.release' in chained, chained.str()
+	failed := g.edges.filter(it.kind == .calls && it.from == 'lib.drv.failed').map(it.to)
+	assert 'vlib.builtin.IError.msg' in failed, failed.str()
+}
+
+// a C struct method declared in two modules, neither the receiver's: the program-wide
+// fallback takes only the one module that declares it, so the call stays unresolved
+fn test_a_c_struct_method_two_other_modules_declare_stays_unresolved() {
+	g := graph_of({
+		'lib/gfx/structs.c.v':   'module gfx
+
+@[typedef]
+pub struct C.sg_pipeline {}
+
+pub fn (mut p C.sg_pipeline) free() {}
+'
+		'lib/other/structs.c.v': 'module other
+
+pub fn (mut p C.sg_pipeline) free() {}
+'
+		'lib/app/app.v':         'module app
+
+import gfx
+import other
+
+fn make() {
+	mut raw := C.sg_pipeline{}
+	raw.free()
+}
+'
+	})
+	calls := g.edges.filter(it.kind == .calls && it.from == 'lib.app.make').map(it.to)
+	assert calls == ['free'], calls.str()
+}
+
+// builtin's `clone()` on an alias of an array returns plain `array`: the value keeps the
+// alias, so an element of it, and that element's method, are typed
+fn test_a_clone_of_an_array_alias_keeps_its_type() {
+	g := graph_of({
+		'vlib/builtin/array.v': 'module builtin
+
+pub fn (a &array) clone() array {
+	return *a
+}
+'
+		'lib/pens/pens.v':      'module pens
+
+pub struct Pen {}
+
+pub fn (p Pen) describe() string {
+	return \'\'
+}
+
+pub struct Ink {}
+
+pub fn (i Ink) describe() string {
+	return \'\'
+}
+
+pub type Pens = []Pen
+
+fn first(ps Pens) string {
+	c := ps.clone()
+	return c[0].describe()
+}
+'
+	})
+	calls := g.edges.filter(it.kind == .calls && it.from == 'lib.pens.first').map(it.to)
+	assert 'lib.pens.Pen.describe' in calls, calls.str()
+}
+
+// a call on a field of a type parameter's instance, `ctx.enc.put(Pen{})` on a `ctx T`,
+// that the expansion links to a method with a type parameter of its own gives it its argument
+fn test_a_generic_method_reached_through_a_field_of_a_type_parameter_gets_its_arguments() {
+	g := graph_of({
+		'lib/codec/codec.v': 'module codec
+
+pub struct Pen {}
+
+pub fn (p Pen) describe() string {
+	return \'\'
+}
+
+pub struct Ink {}
+
+pub fn (i Ink) describe() string {
+	return \'\'
+}
+
+pub struct Enc {}
+
+pub fn (e Enc) put[X](x X) string {
+	return x.describe()
+}
+
+pub struct Other {}
+
+pub fn (o Other) put[X](x X) string {
+	return \'\'
+}
+
+pub struct Ctx {
+pub:
+	enc Enc
+}
+
+pub fn run[T](ctx T) string {
+	return ctx.enc.put(Pen{})
+}
+
+fn keep() {
+	run(Ctx{})
+}
+'
+	})
+	calls := g.edges.filter(it.kind == .calls && it.from == 'lib.codec.Enc.put').map(it.to)
+	assert calls == ['lib.codec.Pen.describe'], calls.str()
 }

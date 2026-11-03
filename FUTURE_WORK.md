@@ -597,7 +597,10 @@ unresolved outside tests, these had a cause the recipes could settle:
   (V3CallCtx.tparams), so `$if T is X` narrows a value of T in its block and guards the
   calls after it: json2's `val.to_json()` under `$if T.unaliased_typ is time.Time` reaches
   only `time.Time.to_json`. A field loop on one (`val.$(field.name)`) waits for those
-  types too (`caller_tparams`, in infer_call).
+  types too (`caller_tparams`, in infer_call). A call the expansion itself links,
+  `t.put(Pen{})` on a `t T`, keeps its argument recipes, and the expansion runs again
+  with them while a pass links such a call (expand_type_param_calls); on vlang one more
+  pass, for 10 calls.
 - `T.name` on a type parameter is a string, `T.typ`, `T.unaliased_typ` and `T.idx` ints
   and `T.indirections` a u8, as V's checker types them, beside `typeof(x).name` (`.selector`
   in recipe): `table_name.to_lower()` in orm.
@@ -622,9 +625,9 @@ on a `json2.Any` is Any's, not `veb.Middleware[T]`'s; and cbor's `val.bytes()` u
 `$if T is string` is the string's, not `Packer.bytes`. Two `v.type_name()` calls in redis's
 `hgetall`, unresolved on master too, now show as such: their edges carry the `$if T is`
 guards they are under, so they no longer share a key with the undeclared `type_name()`
-edge they were hidden in. resolve_edges took about 1.3 s longer on vlang (median of five
-runs, 5.7 s to 7.0 s, measured before the guard and merge fixes above), for the method
-calls' argument recipes; extraction as a whole moved less than the run-to-run noise.
+edge they were hidden in. resolve_edges takes about 2.5 s longer on vlang (median of three
+runs, 5.3 s to 7.8 s, timed in the process), for the method calls' argument recipes, the
+calls the guards now split, and the extra expansion pass (0.6 s).
 
 Still unresolved, looked at and left: migration's `db.execute` on a `T` whose only
 instances in the tree are test types, whose methods a non-test file doesn't see; a
@@ -634,6 +637,7 @@ examples' implicit `ctx`; and `drop_owned`'s `free` and `drop`, whose comptime g
 instance in the tree passes. A generic struct instantiated from another module,
 `codec.Store[codec.Paper]{}` in app, gives its methods no instance: the owner is keyed
 as written (`codec.Store`), not by its module's id.
+
 The raw edge is retained and `explain` reports ambiguous callers rather than
 inventing links. A future opt-in deep mode could run the checker over a whole
 project, but given the small remainder, it would need to address these
