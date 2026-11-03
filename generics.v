@@ -38,8 +38,14 @@ fn expand_type_param_calls(edges []Edge, sources []Edge, fields []Symbol, mut in
 	if instances.len == 0 && !edges.any(it.is_method && has_field_any(it.recv_recipe)) {
 		return edges
 	}
-	mut out, mut reached := expand_edges(edges, instances, funcs, mut inf, unaddressable,
-		variants_of)
+	// the passes that look for new types only collect the calls they link; the expanded edges
+	// are built once, with every type known. Only a method with type parameters of its own
+	// takes a type from a linked call (passes_own_params), so without one no pass is needed
+	mut reached := []Edge{}
+	if funcs.values().any(it.kind == .method && it.tparams != '') {
+		_, reached = expand_edges(edges, instances, funcs, mut inf, unaddressable, variants_of,
+			false)
+	}
 	for _ in 0 .. 4 {
 		// the calls just linked give types to the methods they reach; when they give a new
 		// one, the expansion is done again from the start, so a call it already linked, or
@@ -50,8 +56,10 @@ fn expand_type_param_calls(edges []Edge, sources []Edge, fields []Symbol, mut in
 		if instance_count(instances) == before {
 			break
 		}
-		out, reached = expand_edges(edges, instances, funcs, mut inf, unaddressable, variants_of)
+		_, reached = expand_edges(edges, instances, funcs, mut inf, unaddressable, variants_of,
+			false)
 	}
+	out, _ := expand_edges(edges, instances, funcs, mut inf, unaddressable, variants_of, true)
 	return out
 }
 
@@ -229,9 +237,10 @@ fn settle_flows(mut instances map[string][]InferredType, flows []Flow) {
 // parameter that `instances` lets it link is replaced by the methods it reaches, each
 // keeping the call's argument recipes. It also returns those new edges that pass arguments
 // to a method with type parameters of its own (passes_own_params), whose types a next pass
-// collects.
-fn expand_edges(edges []Edge, instances map[string][]InferredType, funcs map[string]Symbol, mut inf Infer, unaddressable map[string]bool, variants_of map[string][]string) ([]Edge, []Edge) {
-	mut out := []Edge{cap: edges.len}
+// collects. Unless `keep`, it returns only those: the expanded edges, a copy of all of
+// `edges`, are built once, by the last pass.
+fn expand_edges(edges []Edge, instances map[string][]InferredType, funcs map[string]Symbol, mut inf Infer, unaddressable map[string]bool, variants_of map[string][]string, keep bool) ([]Edge, []Edge) {
+	mut out := []Edge{cap: if keep { edges.len } else { 0 }}
 	// the linked calls that pass arguments to a method with type parameters of its own
 	mut reached := []Edge{}
 	// the edges of the calls in field loops, joined to the rest once every edge is out
@@ -239,7 +248,9 @@ fn expand_edges(edges []Edge, instances map[string][]InferredType, funcs map[str
 	mut field_edges := []Edge{}
 	for e in edges {
 		if e.kind != .calls || !e.is_method || e.to.contains('.') || e.provenance == .undeclared {
-			out << e
+			if keep {
+				out << e
+			}
 			continue
 		}
 		if has_field_any(e.recv_recipe) {
@@ -279,12 +290,16 @@ fn expand_edges(edges []Edge, instances map[string][]InferredType, funcs map[str
 			continue
 		}
 		caller := funcs[e.from] or {
-			out << e
+			if keep {
+				out << e
+			}
 			continue
 		}
 		tps := generic_params(caller)
 		if tps.len == 0 {
-			out << e
+			if keep {
+				out << e
+			}
 			continue
 		}
 		recv := inf.receiver(e) or {
@@ -296,10 +311,12 @@ fn expand_edges(edges []Edge, instances map[string][]InferredType, funcs map[str
 				chained = chained_call_ids(e, caller, tps, instances, mut inf)
 			}
 			if chained.len == 0 {
-				out << e
+				if keep {
+					out << e
+				}
 			}
 			for id in chained {
-				out << Edge{
+				ne := Edge{
 					from:       e.from
 					to:         id
 					kind:       .calls
@@ -310,8 +327,11 @@ fn expand_edges(edges []Edge, instances map[string][]InferredType, funcs map[str
 					lines:      e.lines
 					build:      e.build
 				}
+				if keep {
+					out << ne
+				}
 				if passes_own_params(e, id, funcs) {
-					reached << out.last()
+					reached << ne
 				}
 			}
 			continue
@@ -323,18 +343,24 @@ fn expand_edges(edges []Edge, instances map[string][]InferredType, funcs map[str
 				if field := inf.field_of(recv, e.to, e.file, 0) {
 					if field_text := plain_param(field.text, field.mod, tps) {
 						if (instances[instance_key(caller, field_text)] or { []InferredType{} }).any(it.text.starts_with('fn')) {
-							out << Edge{ ...e, provenance: .undeclared }
+							if keep {
+								out << Edge{ ...e, provenance: .undeclared }
+							}
 							continue
 						}
 					}
 				}
 			}
-			out << e
+			if keep {
+				out << e
+			}
 			continue
 		}
 		insts := guarded_instances(instances[instance_key(caller, recv_text)] or { []InferredType{} }, e.guards, recv_text, mut inf)
 		if insts.len == 0 {
-			out << e
+			if keep {
+				out << e
+			}
 			continue
 		}
 		mut ids := []string{}
@@ -345,11 +371,13 @@ fn expand_edges(edges []Edge, instances map[string][]InferredType, funcs map[str
 			}
 		}
 		if ids.len == 0 {
-			out << e
+			if keep {
+				out << e
+			}
 			continue
 		}
 		for id in ids {
-			out << Edge{
+			ne := Edge{
 				from:       e.from
 				to:         id
 				kind:       .calls
@@ -360,12 +388,17 @@ fn expand_edges(edges []Edge, instances map[string][]InferredType, funcs map[str
 				lines:      e.lines
 				build:      e.build
 			}
+			if keep {
+				out << ne
+			}
 			if passes_own_params(e, id, funcs) {
-				reached << out.last()
+				reached << ne
 			}
 		}
 	}
-	merge_call_edges(mut out, field_edges)
+	if keep {
+		merge_call_edges(mut out, field_edges)
+	}
 	return out, reached
 }
 
