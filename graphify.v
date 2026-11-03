@@ -119,6 +119,8 @@ pub fn build_graph_with_library(root string, worker_exe string, out_dir string, 
 	// depends on its roots, so they are part of the key.
 	bin_hash := file_hash(worker_exe)
 	cache_key := if bin_hash != '' && lib.enabled() { '${bin_hash} ${lib.cache_tag()}' } else { bin_hash }
+	// see compact_graph
+	parse_arena := arena_begin()
 	mut run := ParseRun{
 		worker_exe: worker_exe
 		old_cache:  load_cache(out_dir, cache_key)
@@ -176,11 +178,36 @@ pub fn build_graph_with_library(root string, worker_exe string, out_dir string, 
 	failed.sort()
 	stale.sort()
 	partial.sort()
-	save_cache(out_dir, cache_key, run.new_cache)
+	// the cache is written and forgotten: in a -prealloc build its encoding,
+	// as large as every file's results again, goes into an arena of its own
+	$if prealloc {
+		scope := unsafe { prealloc_scope_begin() }
+		save_cache(out_dir, cache_key, run.new_cache)
+		unsafe { prealloc_scope_end(scope) }
+	} $else {
+		save_cache(out_dir, cache_key, run.new_cache)
+	}
 	disambiguate_ids(mut g)
 	separate_member_ids(mut g)
+	has_library := lib_rels.len > 0
+	arena_leave(parse_arena)
+	$if prealloc {
+		g = compact_graph(g)
+		failed = clone_strings(failed)
+		stale = clone_strings(stale)
+		partial = clone_strings(partial)
+		source_hashes = clone_string_map(source_hashes)
+		lib_files = clone_bool_map(lib_files)
+	}
+	arena_free(parse_arena)
+	resolve_arena := arena_begin()
 	resolve_edges(mut g)
-	if lib_rels.len > 0 {
+	arena_leave(resolve_arena)
+	$if prealloc {
+		g = compact_graph(g)
+	}
+	arena_free(resolve_arena)
+	if has_library {
 		keep_reached_library(mut g, project_len, lib, lib_files)
 	}
 	g.file_hashes = source_hashes
@@ -189,6 +216,113 @@ pub fn build_graph_with_library(root string, worker_exe string, out_dir string, 
 		failed:      failed
 		stale:       stale
 		partial:     partial
+	}
+}
+
+// compact_graph deep-copies what a phase leaves in `g` into the current arena, so that
+// the phase's own arena, where most of what it allocated is garbage, can be freed behind
+// it. A -prealloc build frees nothing else: this is what bounds its memory.
+fn compact_graph(g Graph) Graph {
+	return Graph{
+		...g
+		symbols:     clone_symbols(g.symbols)
+		edges:       clone_edges(g.edges)
+		index_cache: unsafe { nil } // built from the arena; rebuilt when next asked for
+	}
+}
+
+fn clone_symbols(symbols []Symbol) []Symbol {
+	mut out := []Symbol{cap: symbols.len}
+	mut file, mut parent, mut build := '', '', ''
+	for s in symbols {
+		file = clone_unless_same(s.file, file)
+		parent = clone_unless_same(s.parent, parent)
+		build = clone_unless_same(s.build, build)
+		out << Symbol{
+			...s
+			id:        s.id.clone()
+			name:      s.name.clone()
+			signature: s.signature.clone()
+			file:      file
+			parent:    parent
+			doc:       s.doc.clone()
+			build:     build
+			recipe:    s.recipe.clone()
+			tparams:   s.tparams.clone()
+		}
+	}
+	return out
+}
+
+fn clone_edges(edges []Edge) []Edge {
+	mut out := []Edge{cap: edges.len}
+	mut from, mut file, mut build, mut recv_type := '', '', '', ''
+	for e in edges {
+		from = clone_unless_same(e.from, from)
+		file = clone_unless_same(e.file, file)
+		build = clone_unless_same(e.build, build)
+		recv_type = clone_unless_same(e.recv_type, recv_type)
+		out << Edge{
+			...e
+			from:        from
+			to:          e.to.clone()
+			recv_type:   recv_type
+			recv_recipe: e.recv_recipe.clone()
+			arg_sites:   e.arg_sites.clone()
+			guards:      e.guards.clone()
+			lines:       e.lines.clone()
+			build:       build
+			file:        file
+		}
+	}
+	return out
+}
+
+// clone_unless_same copies `s`, or shares `last` when it holds the same text: a file's
+// declarations are together, so most of these fields repeat the one before.
+fn clone_unless_same(s string, last string) string {
+	return if s == last { last } else { s.clone() }
+}
+
+fn clone_strings(strs []string) []string {
+	return strs.map(it.clone())
+}
+
+fn clone_string_map(m map[string]string) map[string]string {
+	mut out := map[string]string{}
+	for k, v in m {
+		out[k.clone()] = v.clone()
+	}
+	return out
+}
+
+fn clone_bool_map(m map[string]bool) map[string]bool {
+	mut out := map[string]bool{}
+	for k, v in m {
+		out[k.clone()] = v
+	}
+	return out
+}
+
+// arena_begin starts an arena for a phase whose garbage is to be freed with arena_free,
+// after arena_leave and copying out what survives; without -prealloc, these do nothing.
+fn arena_begin() voidptr {
+	$if prealloc {
+		return unsafe { prealloc_scope_begin() }
+	} $else {
+		return unsafe { nil }
+	}
+}
+
+fn arena_leave(arena voidptr) {
+	$if prealloc {
+		unsafe { prealloc_scope_leave(arena) }
+	}
+}
+
+fn arena_free(arena voidptr) {
+	$if prealloc {
+		unsafe { prealloc_scope_free_after(arena) }
 	}
 }
 

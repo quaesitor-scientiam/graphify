@@ -59,59 +59,148 @@ pub fn encode_file_result(fr FileResult) string {
 }
 
 pub fn decode_file_result(line string) FileResult {
-	sections := line.split(bp_ss)
-	sym_sec  := sections[0]
-	edge_sec := if sections.len > 1 { sections[1] } else { '' }
-	parse_error := if sections.len > 2 { bp_restore(sections[2]) } else { '' }
+	// Scanned in place rather than split: the parent decodes every file of an
+	// extract, and splitting copied each record and field once more before the
+	// fields kept were copied again, most of the parent's garbage.
+	ss1 := index_from(line, bp_ss[0], 0, line.len)
+	ss2 := if ss1 < line.len { index_from(line, bp_ss[0], ss1 + 1, line.len) } else { line.len }
+	ss3 := if ss2 < line.len { index_from(line, bp_ss[0], ss2 + 1, line.len) } else { line.len }
+	parse_error := if ss2 < line.len { bp_restore(line[ss2 + 1..ss3]) } else { '' }
 
+	mut f := []int{cap: 26}
 	mut symbols := []Symbol{}
-	if sym_sec != '' {
-		for sr in sym_sec.split(bp_rs) {
-			f := sr.split(bp_fs)
-			if f.len < 10 { continue }
-			symbols << Symbol{
-				id:        f[0]
-				name:      f[1]
-				kind:      unsafe { SymbolKind(f[2].int()) }
-				signature: bp_restore(f[3])
-				file:      f[4]
-				line:      f[5].int()
-				end_line:  f[6].int()
-				is_pub:    f[7] == '1'
-				parent:    f[8]
-				doc:       bp_restore(f[9])
-				recipe:    if f.len > 10 { f[10] } else { '' }
-				tparams:   if f.len > 11 { f[11] } else { '' }
-				build:     if f.len > 12 { f[12] } else { '' }
-			}
+	for at := 0; at < ss1; {
+		rec_end := index_from(line, bp_rs[0], at, ss1)
+		bp_fields(line, at, rec_end, mut f)
+		at = rec_end + 1
+		if f.len < 20 {
+			continue
+		}
+		symbols << Symbol{
+			id:        bp_field(line, f, 0)
+			name:      bp_field(line, f, 1)
+			kind:      unsafe { SymbolKind(bp_int(line, f, 2)) }
+			signature: bp_restore(bp_field(line, f, 3))
+			file:      bp_field(line, f, 4)
+			line:      bp_int(line, f, 5)
+			end_line:  bp_int(line, f, 6)
+			is_pub:    bp_is_one(line, f, 7)
+			parent:    bp_field(line, f, 8)
+			doc:       bp_restore(bp_field(line, f, 9))
+			recipe:    bp_field(line, f, 10)
+			tparams:   bp_field(line, f, 11)
+			build:     bp_field(line, f, 12)
 		}
 	}
 
 	mut edges := []Edge{}
-	if edge_sec != '' {
-		for er in edge_sec.split(bp_rs) {
-			f := er.split(bp_fs)
-			if f.len < 3 { continue }
-			edges << Edge{
-				from: f[0]
-				to:   f[1]
-				kind: unsafe { EdgeKind(f[2].int()) }
-				// tolerate the older 3-field form, so a cache written by a
-				// previous build decodes instead of panicking on f[3]
-				is_method: f.len > 3 && f[3] == '1'
-				recv_type: if f.len > 4 { f[4] } else { '' }
-				// disambiguate_ids renames an edge's `from` by this file; without
-				// it every call from a renamed declaration pointed at `id@`
-				file: if f.len > 5 { f[5] } else { '' }
-				recv_recipe: if f.len > 6 { f[6] } else { '' }
-				provenance: if f.len > 7 { unsafe { EdgeProvenance(f[7].int()) } } else { .extracted }
-				arg_sites:  if f.len > 8 { f[8] } else { '' }
-				guards:     if f.len > 9 { f[9] } else { '' }
-				lines:      if f.len > 10 && f[10] != '' { f[10].split(',').map(it.int()) } else { []int{} }
-				build:      if f.len > 11 { f[11] } else { '' }
+	for at := ss1 + 1; at < ss2; {
+		rec_end := index_from(line, bp_rs[0], at, ss2)
+		bp_fields(line, at, rec_end, mut f)
+		at = rec_end + 1
+		if f.len < 6 {
+			continue
+		}
+		edges << Edge{
+			from:        bp_field(line, f, 0)
+			to:          bp_field(line, f, 1)
+			kind:        unsafe { EdgeKind(bp_int(line, f, 2)) }
+			// tolerate the older 3-field form, so a cache written by a
+			// previous build decodes instead of panicking on f[3]
+			is_method:   bp_is_one(line, f, 3)
+			recv_type:   bp_field(line, f, 4)
+			// disambiguate_ids renames an edge's `from` by this file; without
+			// it every call from a renamed declaration pointed at `id@`
+			file:        bp_field(line, f, 5)
+			recv_recipe: bp_field(line, f, 6)
+			provenance:  if f.len > 14 {
+				unsafe { EdgeProvenance(bp_int(line, f, 7)) }
+			} else {
+				.extracted
 			}
+			arg_sites:   bp_field(line, f, 8)
+			guards:      bp_field(line, f, 9)
+			lines:       bp_ints(line, f, 10)
+			build:       bp_field(line, f, 11)
 		}
 	}
 
 	return FileResult{ symbols: symbols, edges: edges, parse_error: parse_error }
+}
+
+// index_from returns the index of the first `c` in s[from..to], or `to`.
+fn index_from(s string, c u8, from int, to int) int {
+	for i in from .. to {
+		if s[i] == c {
+			return i
+		}
+	}
+	return to
+}
+
+// bp_fields fills `f` with the start and end of each field of the record
+// s[from..to], two ints per field, as `split(bp_fs)` would cut it.
+fn bp_fields(s string, from int, to int, mut f []int) {
+	f.clear()
+	mut start := from
+	for i in from .. to {
+		if s[i] == bp_fs[0] {
+			f << start
+			f << i
+			start = i + 1
+		}
+	}
+	f << start
+	f << to
+}
+
+// bp_field copies field `i` of the record bp_fields cut, '' past its last.
+fn bp_field(s string, f []int, i int) string {
+	if 2 * i + 1 >= f.len || f[2 * i] == f[2 * i + 1] {
+		return ''
+	}
+	return s[f[2 * i]..f[2 * i + 1]]
+}
+
+fn bp_is_one(s string, f []int, i int) bool {
+	return 2 * i + 1 < f.len && f[2 * i + 1] - f[2 * i] == 1 && s[f[2 * i]] == `1`
+}
+
+// bp_int reads field `i` as string.int() would, without copying it out.
+fn bp_int(s string, f []int, i int) int {
+	if 2 * i + 1 >= f.len {
+		return 0
+	}
+	return bp_int_at(s, f[2 * i], f[2 * i + 1])
+}
+
+fn bp_int_at(s string, from int, to int) int {
+	mut i := from
+	neg := i < to && s[i] == `-`
+	if neg || (i < to && s[i] == `+`) {
+		i++
+	}
+	mut n := 0
+	for i < to && s[i] >= `0` && s[i] <= `9` {
+		n = n * 10 + int(s[i] - `0`)
+		i++
+	}
+	return if neg { -n } else { n }
+}
+
+// bp_ints reads field `i` as the comma-separated ints of a call's lines.
+fn bp_ints(s string, f []int, i int) []int {
+	if 2 * i + 1 >= f.len || f[2 * i] == f[2 * i + 1] {
+		return []int{}
+	}
+	from, to := f[2 * i], f[2 * i + 1]
+	mut out := []int{cap: 1}
+	mut start := from
+	for j in from .. to + 1 {
+		if j == to || s[j] == `,` {
+			out << bp_int_at(s, start, j)
+			start = j + 1
+		}
+	}
+	return out
 }

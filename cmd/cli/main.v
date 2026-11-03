@@ -144,7 +144,15 @@ fn cmd_extract(args []string) {
 	// and ~/.vmodules are read too, so its calls into them resolve.
 	lib := if '--no-library' in args { graphify.LibraryRoots{} } else { graphify.detect_library_roots() }
 	g, report := graphify.build_graph_with_library(path, os.executable(), out, lib)
-	graphify.write_bundle(g, out, report) or { fail('write failed: ${err}') }
+	// the bundle's text is written and forgotten, so in a -prealloc build it is
+	// encoded into an arena of its own; only g's counts are read after it
+	$if prealloc {
+		scope := unsafe { prealloc_scope_begin() }
+		graphify.write_bundle(g, out, report) or { fail('write failed: ${err}') }
+		unsafe { prealloc_scope_end(scope) }
+	} $else {
+		graphify.write_bundle(g, out, report) or { fail('write failed: ${err}') }
+	}
 	println('extracted ${g.symbols.len} symbols, ${g.edges.len} edges')
 	if report.failed.len > 0 {
 		shown := if report.failed.len > 8 { report.failed#[..8] } else { report.failed }
@@ -212,8 +220,18 @@ fn cmd_parse_batch(args []string) {
 			f.flush()
 			continue
 		}
-		f.writeln(graphify.encode_file_result(graphify.extract_v_file_result(parts[0], parts[1]))) or {}
-		f.flush()
+		// Nothing from one file's parse outlives its line in <outfile>, so in a
+		// -prealloc build each file allocates into its own arena, freed once
+		// that line is flushed; the worker stays the size of its largest file.
+		$if prealloc {
+			scope := unsafe { prealloc_scope_begin() }
+			f.writeln(graphify.encode_file_result(graphify.extract_v_file_result(parts[0], parts[1]))) or {}
+			f.flush()
+			unsafe { prealloc_scope_end(scope) }
+		} $else {
+			f.writeln(graphify.encode_file_result(graphify.extract_v_file_result(parts[0], parts[1]))) or {}
+			f.flush()
+		}
 	}
 	f.close()
 }
