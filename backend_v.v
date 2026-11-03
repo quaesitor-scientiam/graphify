@@ -1303,6 +1303,8 @@ fn (mut f V3File) extract_fn(id flat.NodeId, mut syms []Symbol, mut edges []Edge
 	if n.typ_text() != '' && n.typ_text() != 'void' {
 		sig += ' ${f.type_text(n.typ_text())}'
 	}
+	// a method's own type parameters, `T` in `fn (d Doc) reflect[T]() T`
+	own_tparams := if is_method { f.method_tparams(line, name) } else { []string{} }
 	f.add_symbol(mut syms, mut edges, Symbol{
 		id:        fid
 		name:      name
@@ -1315,7 +1317,7 @@ fn (mut f V3File) extract_fn(id flat.NodeId, mut syms []Symbol, mut edges []Edge
 		parent:    f.mod_id
 		doc:       doc_from(f.lines, line)
 		recipe:    if is_method { split_type_args(recv_typ).join(',') } else { f.generic_params(line, 'fn ${source_name(name)}').join(',') }
-		tparams:   if is_method { f.method_tparams(line, name).join(',') } else { '' }
+		tparams:   own_tparams.join(',')
 	})
 	mut rseen := map[string]bool{}
 	if is_method {
@@ -1346,7 +1348,14 @@ fn (mut f V3File) extract_fn(id flat.NodeId, mut syms []Symbol, mut edges []Edge
 		recv_name: recv_name
 		recv_type: if is_method { '${f.mod_id}.${recv_typ.trim_left('&')}' } else { '' }
 		file:      f.rel
-		tparams:   if is_method { split_type_args(recv_typ) } else { f.generic_params(line, 'fn ${source_name(name)}') }
+		// a method's body can name its receiver's type parameters and its own
+		tparams:   if is_method {
+			mut tps := split_type_args(recv_typ)
+			tps << own_tparams
+			tps
+		} else {
+			f.generic_params(line, 'fn ${source_name(name)}')
+		}
 		locals:    locals
 		vars:      vars
 	}
@@ -1754,7 +1763,7 @@ struct V3CallCtx {
 	recv_type string
 	file      string
 	// tparams are the type parameters of the enclosing function, or of its
-	// receiver's generic type, `T` in `fn encode[T](v T)`
+	// receiver's generic type and its own, `T` in `fn encode[T](v T)`
 	tparams []string
 	// guards are the comptime conditions on a type parameter that the block being walked
 	// is compiled under, each `+cond` or `-cond` (see guarded)
@@ -3004,6 +3013,16 @@ fn (f &V3File) recipe(id flat.NodeId, ctx V3CallCtx) string {
 						else { return '' }
 					}
 				}
+				if t.kind == .ident && t.value_text() in ctx.tparams && t.value_text() !in ctx.vars {
+					// the fields of a type parameter, `T.name`, as V's checker types them: its name,
+					// its type's index and indirections
+					match n.value_text() {
+						'name' { return 't:string' }
+						'typ', 'unaliased_typ', 'idx' { return 't:int' }
+						'indirections' { return 't:u8' }
+						else { return '' }
+					}
+				}
 				if t.kind == .ident && t.value_text() in ['C', 'JS'] {
 					return ''
 				}
@@ -3099,6 +3118,29 @@ fn (f &V3File) recipe(id flat.NodeId, ctx V3CallCtx) string {
 						f.last_value(k, otherwise)
 					} else if kind == .if_expr {
 						f.recipe(k, otherwise)
+					} else {
+						''
+					}
+					if e != '' {
+						return e
+					}
+				}
+				return ''
+			}
+			// `if x := opt { x } else { ... }`: the first branch sees `x`, as the walk declares it,
+			// and the rest see the error as `err`
+			if kids.len >= 2 && f.node(kids[0]).kind == .decl_assign {
+				r := f.last_value(kids[1], f.declare(f.node(kids[0]), f.kids(kids[0]), ctx))
+				if r != '' {
+					return r
+				}
+				failed := ctx.with_vars(['err'], ['t:IError'])
+				for k in kids[2..] {
+					kind := f.node(k).kind
+					e := if kind == .block {
+						f.last_value(k, failed)
+					} else if kind == .if_expr {
+						f.recipe(k, failed)
 					} else {
 						''
 					}
@@ -3541,10 +3583,10 @@ fn (mut f V3File) record_call(callee_id flat.NodeId, args []flat.NodeId, ctx V3C
 	for c in ctx.builds {
 		build = join_build(build, c)
 	}
-	// a non-method call keeps its argument recipes, one site at a time, since a generic
-	// callee's type parameters come from every call site; a repeat call merges into the
-	// edge its first call made
-	site := if is_method { '' } else { f.type_arg_site(callee_id) + f.arg_site(args, ctx) }
+	// a call keeps its argument recipes, one site at a time, since a generic callee's type
+	// parameters come from every call site, a method's own (`encode[T](val T)`) as a free
+	// function's; a repeat call merges into the edge its first call made
+	site := f.type_arg_site(callee_id) + f.arg_site(args, ctx)
 	line := f.line_of(f.node(callee_id).pos.offset)
 	if key in seen {
 		add_call_site(mut edges, ctx.from, name, rt, recipe, guards, site, line, build)
@@ -3560,7 +3602,7 @@ fn (mut f V3File) record_call(callee_id flat.NodeId, args []flat.NodeId, ctx V3C
 		recv_recipe: recipe
 		file:        ctx.file
 		provenance:  if value_call { EdgeProvenance.undeclared } else { .extracted }
-		arg_sites:   if is_method { '' } else { site + arg_site_end }
+		arg_sites:   site + arg_site_end
 		guards:      guards
 		lines:       [line]
 		build:       build
@@ -3602,8 +3644,7 @@ fn (f &V3File) type_arg_site(callee_id flat.NodeId) string {
 }
 
 // add_call_site records one more call site of a call that an edge from `from` in this
-// body already records: its line, the build that compiles it, and for a non-method call
-// its argument recipes.
+// body already records: its line, the build that compiles it, and its argument recipes.
 fn add_call_site(mut edges []Edge, from string, to string, recv_type string, recipe string, guards string, site string, line int, build string) {
 	for i := edges.len - 1; i >= 0 && edges[i].from == from; i-- {
 		e := edges[i]
@@ -3611,7 +3652,7 @@ fn add_call_site(mut edges []Edge, from string, to string, recv_type string, rec
 			&& e.recv_recipe == recipe && e.guards == guards {
 			edges[i] = Edge{
 				...e
-				arg_sites: if e.is_method { '' } else { e.arg_sites + site + arg_site_end }
+				arg_sites: e.arg_sites + site + arg_site_end
 				lines:     add_line(e.lines, line)
 				build:     either_build(e.build, build)
 			}
