@@ -12700,3 +12700,46 @@ fn keep() {
 	assert calls.any(it.to == 'lib.other.Alpha.show' && it.provenance == .comptime), calls.str()
 	assert !calls.any(it.to == 'lib.codec.Local.show'), calls.str()
 }
+
+// a call the expansion links can pass the caller's own type parameter on, `t.put(v)` in
+// `run[T, V]`: the method it reaches takes V's types, through the flow, in the next pass
+fn test_a_generic_method_reached_through_a_type_parameter_takes_a_passed_on_type() {
+	g := graph_of({
+		'lib/codec/codec.v': 'module codec
+
+pub struct Pen {}
+
+pub fn (p Pen) describe() string {
+	return \'\'
+}
+
+pub struct Ink {}
+
+pub fn (i Ink) describe() string {
+	return \'\'
+}
+
+pub struct Enc {}
+
+pub fn (e Enc) put[X](x X) string {
+	return x.describe()
+}
+
+pub struct Other {}
+
+pub fn (o Other) put[X](x X) string {
+	return \'\'
+}
+
+pub fn run[T, V](t T, v V) string {
+	return t.put(v)
+}
+
+fn keep() {
+	run(Enc{}, Pen{})
+}
+'
+	})
+	calls := g.edges.filter(it.kind == .calls && it.from == 'lib.codec.Enc.put').map(it.to)
+	assert calls == ['lib.codec.Pen.describe'], calls.str()
+}
