@@ -39,6 +39,9 @@ struct Infer {
 	iface_ids    map[string]bool     // ids of interfaces
 	// type aliases by name, for a bare call that converts to one (alias_conversion)
 	alias_by_name map[string][]TypeCand
+	// call_args are the argument recipes of each call site of a generic function, by the caller,
+	// the caller's file, the callee name and the callee's offset (call_site_args, arg_result)
+	call_args map[string]string
 mut:
 	memo map[string]InferredType
 }
@@ -508,7 +511,8 @@ fn (inf &Infer) follow_steps(e Edge, depth int) ?InferredType {
 	}
 	rest := steps[1..]
 	for si, step in rest {
-		if step.starts_with('p:') || step.starts_with('mapto:') || step.starts_with('mapit:') {
+		if step.starts_with('p:') || step.starts_with('mapto:') || step.starts_with('mapit:')
+			|| step.starts_with('at:') {
 			continue
 		}
 		if step == 'th' {
@@ -740,6 +744,11 @@ fn (inf &Infer) call_result(e Edge, to string, steps []string) ?InferredType {
 		}
 		id = ids[0]
 	}
+	if !steps.any(it.starts_with('p:')) {
+		if bound := inf.arg_result(e, to, id, steps, t.text.trim_left('!?')) {
+			return bound
+		}
+	}
 	// the type arguments of a generic call (`p:` steps) stand for the
 	// callee's type parameters, in order, in its return type
 	mut targs := []string{}
@@ -759,6 +768,61 @@ fn (inf &Infer) call_result(e Edge, to string, steps []string) ?InferredType {
 		}
 	}
 	return t
+}
+
+// arg_result is the type a generic call's result has when the result is a type parameter that
+// its arguments give: `rand.element(xs)` with `xs []Command` is a `Command`. The arguments are the
+// call's own (call_args, the site its `at:` step names), read in the scope of the call. A result
+// around a type parameter, such as `[]T`, is not typed here, and neither is a call with explicit
+// type arguments.
+fn (inf &Infer) arg_result(e Edge, to string, id string, steps []string, ret string) ?InferredType {
+	at := steps.filter(it.starts_with('at:'))
+	if at.len == 0 || ret !in (inf.generics_of[id] or { []string{} }) {
+		return none
+	}
+	args := inf.call_args[e.from + '\x00' + e.file + '\x00' + to + '\x00' + at[0][3..]] or {
+		return none
+	}
+	ptypes := param_types(inf.sig_of[id] or { return none })
+	for j, recipe in args.split('\x0b') {
+		if j >= ptypes.len || recipe == '' {
+			continue
+		}
+		arg := inf.follow_steps(Edge{ from: e.from, file: e.file, recv_recipe: recipe }, 0) or {
+			continue
+		}
+		// a variadic `...T` takes T's from its arguments; a spread `...xs` has no recipe here
+		if ptypes[j] == ret || ptypes[j] == '...' + ret {
+			return arg
+		}
+		if ptypes[j] == '[]' + ret && arg.text.starts_with('[]') {
+			return InferredType{
+				text: arg.text[2..]
+				mod:  arg.mod
+				file: arg.file
+			}
+		}
+	}
+	return none
+}
+
+// call_site_args maps each call site of an edge's arg_sites to its argument recipes, by the
+// offset its `at:` site names. A site's `ta:` site, if it has one, comes between the two.
+fn call_site_args(arg_sites string) map[string]string {
+	mut out := map[string]string{}
+	mut at := ''
+	for site in arg_sites.split(arg_site_end) {
+		if site.starts_with('at:') {
+			at = site[3..]
+			continue
+		}
+		if at == '' || site.starts_with('ta:') {
+			continue
+		}
+		out[at] = site
+		at = ''
+	}
+	return out
 }
 
 // spawned_thread is the type of the thread a spawned call starts, given the
@@ -855,11 +919,12 @@ fn (inf &Infer) declared_file(short string, mod string, fallback string) string 
 }
 
 // comptime_sites is `sites` (arg_sites) with comptime_recipe applied to each argument's recipe.
-// A `ta:` site names explicit type arguments, which have no narrowed step
+// An `at:` site names a call's offset and a `ta:` site its explicit type arguments; neither has a
+// narrowed step
 fn (inf &Infer) comptime_sites(sites string, file string) string {
 	mut out := []string{}
 	for site in sites.split(arg_site_end) {
-		if site.starts_with('ta:') {
+		if site.starts_with('ta:') || site.starts_with('at:') {
 			out << site
 			continue
 		}

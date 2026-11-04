@@ -1453,7 +1453,23 @@ fn resolve_edges(mut g Graph) {
 			else {}
 		}
 	}
+	// the argument recipes of each call site of a generic function, which arg_result types its
+	// result by; a call of any other function never needs them
+	mut generic_names := map[string]bool{}
+	for id, _ in generics_of {
+		generic_names[fn_names[id] or { continue }] = true
+	}
+	mut call_args := map[string]string{}
+	for e in g.edges {
+		if e.kind != .calls || e.arg_sites == '' || e.to.all_after_last('.') !in generic_names {
+			continue
+		}
+		for offset, args in call_site_args(e.arg_sites) {
+			call_args[e.from + '\x00' + e.file + '\x00' + e.to + '\x00' + offset] = args
+		}
+	}
 	mut inf := Infer{
+		call_args:    call_args
 		by_name:      by_name
 		const_calls:  const_calls
 		by_type_name: by_type_name

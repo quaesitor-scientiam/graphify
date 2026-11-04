@@ -13185,3 +13185,730 @@ fn test_freeing_an_arena_hands_its_memory_back() {
 		}
 	}
 }
+
+// a generic function called by another generic function, `up[T]` passing its `db` on to
+// `ensure_journal[T]`: the instance is a type of a test file, which only that file sees, and
+// the method on it is the one the call reaches, though `execute` names another method too
+fn test_a_generic_call_reaches_a_method_of_a_test_only_instance_through_a_generic_caller() {
+	g := graph_of({
+		'lib/migration/migration.v':      'module migration
+
+pub fn up[T](mut db T) ! {
+	ensure_journal(mut db)!
+}
+
+fn ensure_journal[T](mut db T) ! {
+	db.execute(\'CREATE\')!
+}
+'
+		'lib/migration/migration_test.v': 'module migration
+
+struct FakeDB {}
+
+fn (mut db FakeDB) execute(query string) ! {
+}
+
+fn test_up() {
+	mut db := FakeDB{}
+	up(mut db) or {}
+}
+'
+		'lib/other/other.v':              'module other
+
+pub struct Store {}
+
+pub fn (s Store) execute(query string) ! {
+}
+'
+	})
+	calls := g.edges.filter(it.kind == .calls && it.from == 'lib.migration.ensure_journal').map(it.to)
+	assert 'lib.migration.FakeDB.execute' in calls, calls.str()
+	assert 'lib.other.Store.execute' !in calls, calls.str()
+}
+
+// `rand.element(app.commands)`: a generic function's result has the element type of the
+// array its argument has, so the call on the result is the one on that element's type
+fn test_a_generic_call_result_takes_the_element_type_of_its_argument() {
+	g := graph_of({
+		'lib/rand/rand.v':  'module rand
+
+pub fn element[T](array []T) !T {
+	return array[0]
+}
+'
+		'lib/cli/cli.v':    'module cli
+
+type FnCommandCallback = fn (cmd Command) !
+
+pub struct Command {
+pub:
+	name     string
+	commands []Command
+	execute  FnCommandCallback = unsafe { nil }
+}
+'
+		'lib/other/other.v': 'module other
+
+pub struct Task {}
+
+pub fn (t Task) execute(args []string) ! {
+}
+'
+		'lib/app/app.v':    'module app
+
+import rand
+import cli
+
+pub fn run() {
+	mut app := cli.Command{
+		commands: [cli.Command{
+			name: \'solve\'
+		}]
+	}
+	if rcmd := rand.element(app.commands) {
+		rcmd.execute(rcmd) or {}
+	}
+}
+'
+	})
+	calls := g.edges.filter(it.kind == .calls && it.from == 'lib.app.run').map(it.to)
+	assert 'lib.cli.Command.execute' in calls, calls.str()
+	assert 'lib.other.Task.execute' !in calls, calls.str()
+}
+
+// `$if T.unaliased_typ is string` and `$map` in vlib's drop_owned, which only the compiler
+// instantiates, so the tree shows no instance: `owned.free()` under each is the free of the type
+// the check names, string's and map's, though `Buf` in builtin declares `free` too. The last
+// `$else` compiles for none of the types the checks name, so its `drop` is not OwnershipDrop's
+fn test_drop_owned_calls_are_typed_by_the_comptime_checks_around_them() {
+	g := graph_of({
+		'lib/builtin/ownership_notd_ownership.v':  'module builtin
+
+fn drop_owned_map_key[K](key K) {
+	drop_owned(key)
+}
+
+@[manualfree]
+pub fn drop_owned[T](value T) {
+	mut owned := value
+	$if T.unaliased_typ is $interface {
+		drop_owned_interface(owned)
+	} $else $if T is OwnershipDrop {
+		owned.drop()
+	} $else $if T.unaliased_typ is string {
+		unsafe { owned.free() }
+	} $else $if T.unaliased_typ is $map {
+		for key, item in owned {
+			drop_owned_map_key(key)
+			drop_owned(item)
+		}
+		unsafe { owned.free() }
+	} $else $if T.unaliased_typ is $struct {
+		$for field in T.fields {
+			drop_owned(owned.$(field.name))
+		}
+	} $else {
+		owned.drop()
+	}
+}
+'
+		'lib/builtin/ownership_interface_notd_v3_backend.v': 'module builtin
+
+interface OwnershipDrop {
+mut:
+	drop()
+}
+'
+		'lib/builtin/string.v':                   'module builtin
+
+pub fn (s string) free() {
+}
+'
+		'lib/builtin/map.v':                      'module builtin
+
+pub struct map {}
+
+pub fn (m &map) free() {
+}
+'
+		'lib/builtin/buf.v':                      'module builtin
+
+pub struct Buf {}
+
+pub fn (b Buf) free() {
+}
+
+pub fn (b Buf) drop() {
+}
+'
+	})
+	calls := g.edges.filter(it.kind == .calls && it.from == 'lib.builtin.drop_owned')
+	targets := calls.map(it.to)
+	assert 'lib.builtin.string.free' in targets, targets.str()
+	assert 'lib.builtin.map.free' in targets, targets.str()
+	assert 'lib.builtin.Buf.free' !in targets, targets.str()
+	assert 'lib.builtin.Buf.drop' !in targets, targets.str()
+	last := calls.filter(27 in it.lines).map(it.to)
+	assert last == ['drop'], last.str()
+}
+
+// a generic struct instantiated from another module, `codec.Store[codec.Paper]{}`: `first()` of
+// its instance has the type argument, so the call on the result is `Paper`'s, not that of`n// `Board`, which declares `describe` too
+fn test_a_generic_struct_instantiated_from_another_module_types_its_method_result() {
+	g := graph_of({
+		'lib/codec/codec.v': 'module codec
+
+pub struct Paper {}
+
+pub fn (p Paper) describe() string {
+	return \'\'
+}
+
+pub struct Board {}
+
+pub fn (b Board) describe() string {
+	return \'\'
+}
+
+pub struct Store[T] {
+pub mut:
+	items []T
+}
+
+pub fn (s &Store[T]) first() T {
+	return s.items[0]
+}
+'
+		'lib/other/other.v': 'module other
+
+pub struct Shelf {}
+
+pub fn (s Shelf) first() int {
+	return 0
+}
+'
+		'app/app.v':         'module app
+
+import codec
+
+pub fn run() string {
+	s := codec.Store[codec.Paper]{}
+	p := s.first()
+	return p.describe()
+}
+'
+	})
+	calls := g.edges.filter(it.kind == .calls && it.from == 'app.run').map(it.to)
+	assert 'lib.codec.Paper.describe' in calls, calls.str()
+	assert 'lib.codec.Board.describe' !in calls, calls.str()
+}
+
+// the implicit `ctx` of a veb route method: V gives a method that returns `veb.Result` a
+// `mut ctx Context` parameter of its module's own `Context`, wherever the App's middleware and
+// `veb.run` are written, so `ctx.json()` in routes.v reaches the json that Context embeds
+fn test_a_veb_route_method_has_its_modules_context_as_its_implicit_ctx() {
+	g := graph_of({
+		'lib/veb/veb.v':     'module veb
+
+pub struct Result {}
+
+pub struct Context {
+pub mut:
+	ok bool
+}
+
+pub fn (mut ctx Context) json(s string) Result {
+	return Result{}
+}
+
+pub struct Middleware[T] {
+}
+
+pub fn run[A, X](mut app A, port int) {
+}
+'
+		'lib/other/other.v': 'module other
+
+pub struct Form {}
+
+pub fn (f Form) json(s string) {
+}
+'
+		'app/main.v':        'module main
+
+import veb
+
+pub struct Context {
+	veb.Context
+}
+
+pub struct App {
+	veb.Middleware[Context]
+}
+
+fn main() {
+	mut app := &App{}
+	veb.run[App, Context](mut app, 8082)
+}
+'
+		'app/routes.v':      'module main
+
+import veb
+import other
+
+pub fn (app &App) index() veb.Result {
+	return ctx.json(\'x\')
+}
+'
+	})
+	calls := g.edges.filter(it.kind == .calls && it.from == 'app.App.index').map(it.to)
+	assert 'lib.veb.Context.json' in calls, calls.str()
+	assert 'lib.other.Form.json' !in calls, calls.str()
+}
+
+// V declares the implicit `ctx` only in a veb route method, one that returns `veb.Result` on a
+// receiver other than `Context` and has no `Context` parameter: there it shadows a module's
+// `__global ctx`, and in any other method `ctx` is that global
+fn test_only_a_veb_route_method_has_an_implicit_ctx() {
+	g := graph_of({
+		'lib/veb/veb.v':     'module veb
+
+pub struct Result {}
+
+pub struct Context {
+pub mut:
+	ok bool
+}
+
+pub fn (mut ctx Context) json(s string) Result {
+	return Result{}
+}
+
+pub struct Middleware[T] {
+}
+'
+		'lib/other/other.v': 'module other
+
+pub struct Form {}
+
+pub fn (f Form) json(s string) {
+}
+'
+		'app/app.v':         'module main
+
+import veb
+import other
+
+__global ctx other.Form
+
+pub struct Context {
+	veb.Context
+}
+
+pub struct App {
+	veb.Middleware[Context]
+}
+
+pub fn (app &App) index() veb.Result {
+	return ctx.json(\'x\')
+}
+
+pub fn (app &App) helper() {
+	ctx.json(\'x\')
+}
+
+pub fn (mut c Context) page() veb.Result {
+	ctx.json(\'x\')
+	return veb.Result{}
+}
+
+pub fn (app &App) form(mut c Context) veb.Result {
+	ctx.json(\'x\')
+	return veb.Result{}
+}
+'
+	})
+	route := g.edges.filter(it.kind == .calls && it.from == 'app.App.index').map(it.to)
+	assert 'lib.veb.Context.json' in route, route.str()
+	assert 'lib.other.Form.json' !in route, route.str()
+	for from in ['app.App.helper', 'app.Context.page', 'app.App.form'] {
+		calls := g.edges.filter(it.kind == .calls && it.from == from).map(it.to)
+		assert 'lib.other.Form.json' in calls, '${from}: ${calls}'
+		assert 'lib.veb.Context.json' !in calls, '${from}: ${calls}'
+	}
+}
+
+// `x, y := pick(names), pick(nums)` on one line: the two calls to `pick` merge into one call
+// edge with two argument sites, and `y` must still take the element type of `nums`, not of
+// `names`, so `y.show()` is Num's method
+fn test_two_generic_calls_on_one_line_each_take_their_own_argument_type() {
+	g := graph_of({
+		'lib/app/app.v': 'module app
+
+pub struct Command {}
+
+pub fn (c Command) show() {}
+
+pub struct Num {}
+
+pub fn (n Num) show() {}
+
+pub fn pick[T](xs []T) T {
+	return xs[0]
+}
+
+pub fn run(names []Command, nums []Num) {
+	x, y := pick(names), pick(nums)
+	x.show()
+	y.show()
+}
+'
+	})
+	calls := g.edges.filter(it.kind == .calls && it.from == 'lib.app.run').map(it.to)
+	assert 'lib.app.Num.show' in calls, calls.str()
+	assert 'lib.app.Command.show' in calls, calls.str()
+}
+
+// the same generic callee on two lines of one function: its two calls merge into one call edge
+// spanning both lines, and each result must still take the element type of its own argument
+fn test_one_generic_callee_on_two_lines_types_each_call_by_its_own_argument() {
+	g := graph_of({
+		'lib/app/app.v': 'module app
+
+pub struct Command {}
+
+pub fn (c Command) show() {}
+
+pub struct Num {}
+
+pub fn (n Num) show() {}
+
+pub fn pick[T](xs []T) T {
+	return xs[0]
+}
+
+pub fn run(names []Command, nums []Num) {
+	x := pick(names)
+	x.show()
+	y := pick(nums)
+	y.show()
+}
+'
+	})
+	calls := g.edges.filter(it.kind == .calls && it.from == 'lib.app.run').map(it.to)
+	assert 'lib.app.Num.show' in calls, calls.str()
+	assert 'lib.app.Command.show' in calls, calls.str()
+}
+
+
+// two test files of one directory, each its own program with its own `Calc[S]`, `TypeA` and
+// `TypeB`, as vlib/v/tests/generics has: the generic method of one test file reaches the methods
+// of the types that file declares, never those of the other test file, which it can't see
+fn test_a_generic_method_in_a_test_file_reaches_only_its_own_files_types() {
+	src := 'module main
+
+struct Calc[S] {
+mut:
+	typ S
+}
+
+struct TypeA {}
+
+struct TypeB {}
+
+fn (mut c Calc[S]) next[T](input T) f64 {
+	$if S is TypeA || S is TypeB {
+		return c.typ.next(input)
+	} $else {
+		return 99.0
+	}
+}
+
+fn (mut t TypeA) next[T](input T) f64 {
+	return 10.0
+}
+
+fn (mut t TypeB) next[T](input T) f64 {
+	return 11.0
+}
+
+fn test_calc() {
+	mut a := Calc[TypeA]{
+		typ: TypeA{}
+	}
+	assert a.next(100) == 10.0
+	mut b := Calc[TypeB]{
+		typ: TypeB{}
+	}
+	assert b.next(100) == 11.0
+}
+'
+	root := write_tree('generic_method_per_test_file', {
+		'gen/a_test.v': src
+		'gen/b_test.v': src
+	})
+	g := build_graph(Options{ root: root })
+	for own in ['gen/a_test.v', 'gen/b_test.v'] {
+		calls := g.edges.filter(it.kind == .calls && it.from == 'gen.Calc[S].next@' + own).map(it.to)
+		assert 'gen.TypeA.next@' + own in calls, '${own}: ${calls}'
+		assert 'gen.TypeB.next@' + own in calls, '${own}: ${calls}'
+		assert calls.all(!it.starts_with('gen.Type') || it.ends_with('@' + own)), '${own}: ${calls}'
+	}
+}
+
+// `$if c { a } $else { b }` as a value, where `a` and `b` each hold the result of a call of one
+// function: the two calls are different call sites, but the branches still have one type, so
+// the value has it
+fn test_a_comptime_if_value_of_two_results_of_one_function_has_their_type() {
+	g := graph_of({
+		'lib/app/app.v': 'module app
+
+pub struct Doc {}
+
+pub fn (d Doc) show() {}
+
+pub struct Other {}
+
+pub fn (o Other) show() {}
+
+fn make() Doc {
+	return Doc{}
+}
+
+pub fn run() {
+	a := make()
+	b := make()
+	y := $if linux {
+		a
+	} $else {
+		b
+	}
+	y.show()
+}
+'
+	})
+	calls := g.edges.filter(it.kind == .calls && it.from == 'lib.app.run').map(it.to)
+	assert 'lib.app.Doc.show' in calls, calls.str()
+	assert 'lib.other.Other.show' !in calls, calls.str()
+}
+
+// `$if T.unaliased_typ is Shower` where the tree instantiates T with Doc, which implements the
+// interface: the call is Doc's own method, and the interface the check names adds no target
+fn test_a_comptime_interface_check_keeps_its_instances_methods() {
+	g := graph_of({
+		'lib/app/app.v': 'module app
+
+pub interface Shower {
+	show()
+}
+
+pub struct Doc {}
+
+pub fn (d Doc) show() {}
+
+pub fn present[T](x T) {
+	$if T.unaliased_typ is Shower {
+		x.show()
+	}
+}
+
+pub fn run() {
+	present(Doc{})
+}
+'
+	})
+	calls := g.edges.filter(it.kind == .calls && it.from == 'lib.app.present').map(it.to)
+	assert 'lib.app.Doc.show' in calls, calls.str()
+	assert 'lib.app.Shower.show' !in calls, calls.str()
+}
+
+// the `$else` of `$if T is Pen` in a generic function nothing calls compiles for types other than
+// Pen: its call stands for no instance the tree shows, and the type the check names is not one.
+// `keep(1)` instantiates another function, so the tree has instances to expand calls with
+fn test_the_else_branch_of_a_comptime_type_check_does_not_take_its_type() {
+	g := graph_of({
+		'lib/app/app.v': 'module app
+
+pub struct Box {}
+
+pub fn (b Box) ink() {}
+
+pub struct Pen {}
+
+pub fn (p Pen) ink() {}
+
+fn keep[T](x T) {}
+
+pub fn use() {
+	keep(1)
+}
+
+pub fn other[T](x T) {
+	mut owned := x
+	$if T is Pen {
+		owned.ink()
+	} $else {
+		owned.ink()
+	}
+}
+'
+	})
+	calls := g.edges.filter(it.kind == .calls && it.from == 'lib.app.other')
+	targets := calls.map(it.to)
+	assert 'lib.app.Box.ink' !in targets, targets.str()
+	// the `$if T is Pen` branch's call is Pen's, as the walk retypes `owned` there; the `$else`
+	// one, on line 22, is no method the tree shows
+	last := calls.filter(22 in it.lines).map(it.to)
+	assert last == ['ink'], last.str()
+}
+
+// a generic call's result bound through `or { ... }` or `!`, which V3 reads as an or-expression
+// around the call: it still takes the element type of the call's own argument
+fn test_a_generic_result_bound_through_or_or_bang_takes_its_arguments_type() {
+	g := graph_of({
+		'lib/app/app.v': 'module app
+
+pub struct Command {}
+
+pub fn (c Command) show() {}
+
+pub struct Num {}
+
+pub fn (n Num) show() {}
+
+pub fn pick_opt[T](xs []T) ?T {
+	return xs[0]
+}
+
+pub fn pick_res[T](xs []T) !T {
+	return xs[0]
+}
+
+pub fn run(names []Command, nums []Num) ! {
+	a := pick_opt(names) or { return }
+	a.show()
+	b := pick_res(nums)!
+	b.show()
+}
+'
+	})
+	calls := g.edges.filter(it.kind == .calls && it.from == 'lib.app.run')
+	at := fn [calls] (line int) []string {
+		return calls.filter(line in it.lines).map(it.to)
+	}
+	assert at(21) == ['lib.app.Command.show'], at(21).str()
+	assert at(23) == ['lib.app.Num.show'], at(23).str()
+}
+
+// a variadic generic, `pick_any[T](xs ...T) T`: its result has the type of the arguments its
+// `...T` parameter takes
+fn test_a_variadic_generic_result_takes_its_arguments_type() {
+	g := graph_of({
+		'lib/app/app.v': 'module app
+
+pub struct Command {}
+
+pub fn (c Command) show() {}
+
+pub struct Num {}
+
+pub fn (n Num) show() {}
+
+pub fn pick_any[T](xs ...T) T {
+	return xs[0]
+}
+
+pub fn run(c Command, n Num) {
+	d := pick_any(c, c)
+	d.show()
+	e := pick_any(n)
+	e.show()
+}
+'
+	})
+	calls := g.edges.filter(it.kind == .calls && it.from == 'lib.app.run')
+	at := fn [calls] (line int) []string {
+		return calls.filter(line in it.lines).map(it.to)
+	}
+	assert at(17) == ['lib.app.Command.show'], at(17).str()
+	assert at(19) == ['lib.app.Num.show'], at(19).str()
+}
+
+// `$if T.unaliased_typ is json.Any` after `import x.json2 as json`, in a generic function the
+// tree instantiates with nothing: the type the check names is json2's `Any`, read through the
+// import alias as the walk reads `$if T is json.Any`, so the call is Any's method
+fn test_a_comptime_check_names_a_type_through_an_import_alias() {
+	g := graph_of({
+		'lib/x/json2/json2.v': 'module json2
+
+pub struct Any {}
+
+pub fn (a Any) show() {}
+'
+		'lib/other/other.v':   'module other
+
+pub struct Other {}
+
+pub fn (o Other) show() {}
+'
+		'lib/app/app.v':       'module app
+
+import x.json2 as json
+import other
+
+fn keep[T](x T) {}
+
+pub fn use() {
+	keep(1)
+}
+
+pub fn present[T](x T) {
+	mut v := x
+	$if T.unaliased_typ is json.Any {
+		v.show()
+	}
+}
+'
+	})
+	calls := g.edges.filter(it.kind == .calls && it.from == 'lib.app.present').map(it.to)
+	assert 'lib.x.json2.Any.show' in calls, calls.str()
+	assert 'lib.other.Other.show' !in calls, calls.str()
+}
+
+// a generic call's result bound in parentheses, `(pick(xs))` or `(pick_opt(xs) or { ... })`: the
+// value is still the call's, so it takes the element type of the call's own argument
+fn test_a_generic_result_bound_in_parentheses_takes_its_arguments_type() {
+	g := graph_of({
+		'lib/app/app.v': 'module app
+
+pub struct Command {}
+
+pub fn (c Command) show() {}
+
+pub struct Num {}
+
+pub fn (n Num) show() {}
+
+pub fn pick[T](xs []T) T {
+	return xs[0]
+}
+
+pub fn pick_opt[T](xs []T) ?T {
+	return xs[0]
+}
+
+pub fn run(names []Command, nums []Num) {
+	a := (pick(names))
+	a.show()
+	b := (pick_opt(nums) or { return })
+	b.show()
+}
+'
+	})
+	calls := g.edges.filter(it.kind == .calls && it.from == 'lib.app.run')
+	at := fn [calls] (line int) []string {
+		return calls.filter(line in it.lines).map(it.to)
+	}
+	assert at(21) == ['lib.app.Command.show'], at(21).str()
+	assert at(23) == ['lib.app.Num.show'], at(23).str()
+}
