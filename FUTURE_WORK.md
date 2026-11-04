@@ -630,14 +630,40 @@ edge they were hidden in. resolve_edges takes about 2.5 s longer on vlang (media
 runs, 5.3 s to 7.8 s, timed in the process), for the method calls' argument recipes, the
 calls the guards now split, and the extra expansion pass (0.6 s).
 
-Still unresolved, looked at and left: migration's `db.execute` on a `T` whose only
-instances in the tree are test types, whose methods a non-test file doesn't see; a
-generic function's result typed by its argument (`rand.element(app.commands)`); a field
-of a match branch with two types (`OptionType, ResultType { typ.base_type }`); veb
-examples' implicit `ctx`; and `drop_owned`'s `free` and `drop`, whose comptime guards no
-instance in the tree passes. A generic struct instantiated from another module,
+**Generic results, test-only instances, implicit `ctx` (November 2026).** Four causes
+that were left here before:
+
+- A generic free function's result takes the type of its own call's argument:
+  `rand.element(app.commands)` is a `Command`. Each call site in `arg_sites` starts with
+  `at:` and its callee's offset, and a `:=` that binds the call's result, through `or {}`,
+  `!` or parentheses, records the same offset (`bound_recipe`), so calls merged into one
+  edge keep their own arguments (`arg_result`). An untyped number gives `T` only if nothing
+  else does, and a chain of such results is followed 8 levels deep (`arg_depth`).
+- A generic function in a non-test file that a `_test.v` file instantiates finds the
+  methods the test's type has: migration's `db.execute` reaches `FakeDB.execute`
+  (`instance_scope`). A caller in a test file keeps its own file.
+- A veb route method's implicit `ctx` follows V's checker: a method returning `veb.Result`,
+  on a receiver other than `Context`, with no `Context` parameter, has its module's
+  `Context` (`implicit_veb_ctx`). A parameter of a type that embeds `veb.Context` isn't
+  detected, and one file can't see whether its module declares a `Context`.
+- A positive comptime check that no instance meets stands in for one, as the walk does for
+  `$if T is X`: `drop_owned`'s `free` under `T.unaliased_typ is string` and `is $map` is
+  string's and map's (`guarded_instances`). A bare name from a selective import isn't read.
+
+On vlang `05e4963855`: unresolved calls 153 to 141, 29 call edges added and 12 removed, each
+removed one an unresolved name; peak memory within noise of master's.
+
+Not typed by an argument: a result used directly (`id(x).run()`), nested (`id(id(x))`) or as
+an `if` or `match` value, a method's own type parameter, a result around a parameter (`[]T`),
+and a parameter such as `fn () T`.
+
+Still unresolved, looked at and left: `drop_owned`'s `drop`, under `$if T is OwnershipDrop`:
+an interface keeps the value typed `T`, and no instance in the tree gives it a `drop`. A generic struct instantiated from another module,
 `codec.Store[codec.Paper]{}` in app, gives its methods no instance: the owner is keyed
-as written (`codec.Store`), not by its module's id.
+as written (`codec.Store`), not by its module's id. A call on the result of its method is
+typed, on master too, and a test now holds that. A field of a match branch with two types
+(`OptionType, ResultType { typ.base_type }`), listed here before, has no unresolved edge on
+this tree, on master either.
 
 The raw edge is retained and `explain` reports ambiguous callers rather than
 inventing links. A future opt-in deep mode could run the checker over a whole

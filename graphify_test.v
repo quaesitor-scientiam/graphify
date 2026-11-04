@@ -13354,7 +13354,8 @@ pub fn (b Buf) drop() {
 }
 
 // a generic struct instantiated from another module, `codec.Store[codec.Paper]{}`: `first()` of
-// its instance has the type argument, so the call on the result is `Paper`'s, not that of`n// `Board`, which declares `describe` too
+// its instance has the type argument, so the call on the result is `Paper`'s, not that of
+// `Board`, which declares `describe` too
 fn test_a_generic_struct_instantiated_from_another_module_types_its_method_result() {
 	g := graph_of({
 		'lib/codec/codec.v': 'module codec
