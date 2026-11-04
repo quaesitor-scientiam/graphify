@@ -1454,10 +1454,13 @@ fn resolve_edges(mut g Graph) {
 		}
 	}
 	// the argument recipes of each call site of a generic function, which arg_result types its
-	// result by; a call of any other function never needs them
+	// result by; a call of a method (whose result owner_args types) or of any other function never
+	// needs them, and keeping those would hold every `len` or `get` call's arguments
 	mut generic_names := map[string]bool{}
-	for id, _ in generics_of {
-		generic_names[fn_names[id] or { continue }] = true
+	for s in g.symbols {
+		if s.kind == .function && s.recipe != '' {
+			generic_names[s.name] = true
+		}
 	}
 	mut call_args := map[string]string{}
 	for e in g.edges {
