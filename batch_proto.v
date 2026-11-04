@@ -58,10 +58,11 @@ pub fn encode_file_result(fr FileResult) string {
 	return sym_parts.join(bp_rs) + bp_ss + edge_parts.join(bp_rs) + bp_ss + bp_clean(fr.parse_error)
 }
 
+// decode_file_result reads back a line encode_file_result wrote. A record with too
+// few fields is skipped. The line is scanned in place rather than split: the parent
+// decodes every file of an extract, and splitting copied each record and field once
+// more before the fields kept were copied again, most of the parent's garbage.
 pub fn decode_file_result(line string) FileResult {
-	// Scanned in place rather than split: the parent decodes every file of an
-	// extract, and splitting copied each record and field once more before the
-	// fields kept were copied again, most of the parent's garbage.
 	ss1 := index_from(line, bp_ss[0], 0, line.len)
 	ss2 := if ss1 < line.len { index_from(line, bp_ss[0], ss1 + 1, line.len) } else { line.len }
 	ss3 := if ss2 < line.len { index_from(line, bp_ss[0], ss2 + 1, line.len) } else { line.len }
@@ -166,7 +167,8 @@ fn bp_is_one(s string, f []int, i int) bool {
 	return 2 * i + 1 < f.len && f[2 * i + 1] - f[2 * i] == 1 && s[f[2 * i]] == `1`
 }
 
-// bp_int reads field `i` as string.int() would, without copying it out.
+// bp_int reads field `i`, a decimal int as encode_file_result writes one, without
+// copying it out. Unlike string.int(), it knows no `0x` prefix or `_` separator.
 fn bp_int(s string, f []int, i int) int {
 	if 2 * i + 1 >= f.len {
 		return 0

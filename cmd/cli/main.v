@@ -222,7 +222,7 @@ fn cmd_parse_batch(args []string) {
 		}
 		// Nothing from one file's parse outlives its line in <outfile>, so in a
 		// -prealloc build each file allocates into its own arena, freed once
-		// that line is flushed; the worker stays the size of its largest file.
+		// that line is flushed, so a batch does not keep every file's parse.
 		$if prealloc {
 			scope := unsafe { prealloc_scope_begin() }
 			f.writeln(graphify.encode_file_result(graphify.extract_v_file_result(parts[0], parts[1]))) or {}
