@@ -120,6 +120,16 @@ fn main() {
 }
 
 fn cmd_extract(args []string) {
+	// the -prealloc build beside this one is faster, and every extract going through it
+	// keeps one hash for a graph and its cache (see graphify.extract_handover); if it
+	// can't run, this build extracts
+	$if !prealloc {
+		exe := os.executable()
+		extractor := graphify.extract_handover(exe)
+		if extractor != exe {
+			os.execvp(extractor, os.args[1..]) or {}
+		}
+	}
 	path := positional(args, 0) or { '.' }
 	store := store_dir(args)
 	if store != '' && '--out' !in args {

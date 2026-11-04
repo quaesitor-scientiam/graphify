@@ -21,12 +21,20 @@
 // graphify-hook, when present) whenever that no longer matches. A change to
 // the rest of vlib, such as os or strings, doesn't rebuild.
 //
+// Extraction runs bin/graphify-extract, the CLI built with -prealloc, about twice
+// as fast at about 1.6 times the peak memory, with the same graph. bin/graphify keeps
+// the GC, as a command that holds a graph and works on it would otherwise only grow:
+// `export html` takes 17 GB on the V repo, and hands its own `extract` over to the
+// extractor. On Windows, where -prealloc has not been run, when this build fails, and
+// when bin/graphify is not the build the extractor was made with, as after a rebuild by
+// hand or a restore, bin/graphify extracts.
+//
 // -Commit makes two machines extract exactly the same source: it fast-forwards
 // the repo to that commit and never moves it back or off its branch.
 //
 // A graph is out of date when it doesn't exist yet, or its manifest.json says it was
 // extracted from another commit of its repo or by another graphify build than
-// bin/graphify, or, for a project, read its vlib at another commit of the target
+// the one that extracts, or, for a project, read its vlib at another commit of the target
 // repo, or a module under VMODULES at another commit of its clone (graph_out_of_date).
 // Uncommitted edits aren't seen: -Force re-extracts every graph.
 //
@@ -87,6 +95,11 @@ mut:
 }
 
 const stamp_name = '.build-stamp'
+
+// the -prealloc CLI that extracts, beside bin/graphify, and the file beside it naming
+// the CLI it was built with (graphify.extractor_of)
+const extractor_name = 'graphify-extract'
+const extractor_pair_suffix = '.cli-hash'
 
 // the lock a run holds while it pulls, builds and extracts: a directory in the
 // store, which only one process can create (acquire_lock)
@@ -333,7 +346,7 @@ fn set_vroot(log_path string) {
 // changes). A new compiler counts even when vlib/v's parser, all the graph is read
 // through, is the same: vlang/v#30996 changed only the C backend, and graphify-mcp
 // went on losing live strings to the GC until it was rebuilt. A rebuild after each
-// `v up` is about 36 s on top of the re-extract the moved vlib asks for anyway.
+// `v up` is about a minute on top of the re-extract the moved vlib asks for anyway.
 fn build_stamp(graphify_root string, v_exe string) !string {
 	v_root := os.dir(os.real_path(v_exe))
 	mut lines := []string{}
@@ -429,6 +442,29 @@ fn remove_build_leftovers(bin_dir string) {
 	}
 }
 
+// extractor_path is where the extractor is built for the CLI `exe`: beside it, or on
+// Windows, where none is, `exe` itself.
+fn extractor_path(exe string) string {
+	$if windows {
+		return exe
+	} $else {
+		return os.join_path(os.dir(exe), extractor_name)
+	}
+}
+
+// extract_binary is the binary that extracts, as graphify.extract_handover picks it:
+// the extractor, when it was built with the CLI `exe`, unless GRAPHIFY_NO_EXTRACTOR
+// says to extract with the CLI, as when an extract runs out of memory under -prealloc.
+fn extract_binary(exe string) string {
+	if os.getenv('GRAPHIFY_NO_EXTRACTOR') != '' {
+		return exe
+	}
+	extractor := extractor_path(exe)
+	paired := os.read_file(extractor + extractor_pair_suffix) or { return exe }
+	cli_hash := sha256.hexhash(os.read_file(exe) or { return exe })
+	return if os.exists(extractor) && paired.trim_space() == cli_hash { extractor } else { exe }
+}
+
 // rebuild_if_stale rebuilds graphify's binaries when bin/.build-stamp no
 // longer matches, and reports whether it did.
 fn rebuild_if_stale(log_path string, root string, exe string) !bool {
@@ -436,7 +472,8 @@ fn rebuild_if_stale(log_path string, root string, exe string) !bool {
 	stamp := build_stamp(root, v_exe)!
 	stamp_path := os.join_path(root, 'bin', stamp_name)
 	old := os.read_file(stamp_path) or { '' }
-	if old == stamp && os.exists(exe) {
+	extractor := extractor_path(exe)
+	if old == stamp && os.exists(exe) && (extractor == exe || os.exists(extractor)) {
 		return false
 	}
 	log_line(log_path, 'graphify is out of date; rebuilding...')
@@ -447,6 +484,23 @@ fn rebuild_if_stale(log_path string, root string, exe string) !bool {
 	// the others only serve the graph: a failure is logged, the extract goes
 	// ahead, and the stamp stays old so the next run tries them again
 	mut all_built := true
+	if extractor != exe {
+		pair := extractor + extractor_pair_suffix
+		// the CLI just built, whatever replaces it during the slow build below
+		cli_hash := sha256.hexhash(os.read_file(exe)!)
+		// an extractor of older code must not extract: until this build, bin/graphify does
+		os.rm(pair) or {}
+		mut extractor_built := true
+		build_one(log_path, v_exe, extractor, true, ['-prealloc', 'cmd/cli']) or {
+			log_line(log_path, 'WARNING: ${err}')
+			all_built = false
+			extractor_built = false
+			os.rm(extractor) or {}
+		}
+		if extractor_built {
+			os.write_file(pair, cli_hash)!
+		}
+	}
 	mcp := os.join_path(root, 'bin', 'graphify-mcp' + ext)
 	if os.exists(mcp) {
 		build_one(log_path, v_exe, mcp, true, ['cmd/mcp']) or {
@@ -562,8 +616,9 @@ fn main() {
 
 	set_vroot(log_path)
 
+	extract_exe := extract_binary(graphify_exe)
 	// a pull or a rebuild shows as a graph out of date
-	exe_hash := sha256.hexhash(os.read_file(graphify_exe) or { '' })
+	exe_hash := sha256.hexhash(os.read_file(extract_exe) or { '' })
 	vlang_head := head_of(vlang)
 	vlang_graph := store_project_dir(store, vlang)
 	why := if opts.force { 'forced' } else { graph_out_of_date(vlang_graph, vlang_head, exe_hash, '') }
@@ -572,7 +627,7 @@ fn main() {
 	} else {
 		log_line(log_path, 'extracting graph (${why})...')
 		start := time.now()
-		result := os.exec([graphify_exe, 'extract', vlang, '--store', store])
+		result := os.exec([extract_exe, 'extract', vlang, '--store', store])
 		log_output(log_path, result.output)
 		if result.exit_code != 0 {
 			fail(log_path, 'extract failed')
@@ -582,7 +637,7 @@ fn main() {
 	}
 	mut failed := []string{}
 	for project in config.projects {
-		extract_project(log_path, graphify_exe, project, store, exe_hash, vlang_head, opts.force) or {
+		extract_project(log_path, extract_exe, project, store, exe_hash, vlang_head, opts.force) or {
 			log_line(log_path, 'ERROR: ${err}')
 			failed << project
 		}

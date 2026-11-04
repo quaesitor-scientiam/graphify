@@ -712,16 +712,28 @@ the git trees of `vlib` and `thirdparty` with their uncommitted changes) and,
 after pulling, rebuilds `bin/graphify` and any `graphify-mcp` and
 `graphify-hook` beside it whenever that no longer matches. Each binary is built
 under a temporary name and swapped in, so an MCP server that is running it
-doesn't block the build on Windows. So every `v up` rebuilds them, about 36 s:
+doesn't block the build on Windows. So every `v up` rebuilds them, about a minute:
 a new compiler can change how they run even when the graph they extract is the
 same (vlang/v#30996, a fix in the C backend alone, stopped `graphify-mcp`
 losing live strings to the garbage collector). If `v` isn't a git checkout, the
 stamp names its `vlib` and `thirdparty` directories instead. `-PrintStamp`
 prints the stamp and stops.
 
+Except on Windows, the script also builds `bin/graphify-extract`, the CLI with
+`-prealloc`, and extracts with it: on the V repo, about 4 s against 8 s and 4.2 GB against
+2.6 GB, with the same graph. `bin/graphify` keeps the garbage collector, as a command that
+works on a whole graph needs it: `export html` takes 17.5 GB under `-prealloc`, against
+2.5 GB. Its `extract` hands over to the extractor, so a worktree's or a hook's graph has
+the same hash and shares its cache. `bin/graphify-extract.cli-hash` says which CLI each
+extractor was built with. `bin/graphify` extracts itself if that build fails, on Windows,
+where `-prealloc` has not been run, when it is another build than the extractor's, as after
+a rebuild by hand or a restore from a backup, and with `GRAPHIFY_NO_EXTRACTOR=1`, which
+the script honours too, say if an extract runs out of memory under `-prealloc`, and which
+`bench/extract_bench.vsh` sets so that it times the binary it names.
+
 A graph, vlang's or a project's, is out of date when it has none yet, or its
 `manifest.json` says it was extracted from another commit of its repo, by
-another build of `bin/graphify`, or, for a project, from vlang's `vlib` at
+another build of the binary that extracts, or, for a project, from vlang's `vlib` at
 another commit, or from a module under `~/.vmodules` at another commit of its
 clone (`v update`, or a pull in it: `extracting gui (vglyph moved)...`).
 A pull or a rebuild therefore shows up on its own, and a run

@@ -688,9 +688,9 @@ checkout because it reads the captured line range from disk.
 
 **Freshness check (October 2026).** `stale_note` (freshness.v) compares the
 manifest's `source_commit` with the checkout's commit and its `binary_hash`
-with the graphify CLI that would re-extract it; the CLI prints the note on
+with the graphify that would re-extract it (`extractor_of`); the CLI prints the note on
 stderr and the MCP server puts it at the top of a tool result, rechecking at
-most once a minute (one `git rev-parse` and one hash of the CLI). The MCP
+most once a minute (one `git rev-parse` and a hash of each binary). The MCP
 server also reloads `graph.json` when an extract replaces it, and
 `update-vlang-graph.vsh` rebuilds graphify when its code or the `vlib/v`
 directories it compiles in changed. Nothing re-extracts on its own: an automatic refresh would make a
