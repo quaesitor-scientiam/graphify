@@ -71,6 +71,10 @@ fn main() {
 	println('Runs : ${runs}')
 	println('')
 
+	// time the binary named above: a CLI would otherwise hand `extract` over to the
+	// extractor beside it (graphify.extractor_of)
+	os.setenv('GRAPHIFY_NO_EXTRACTOR', '1', true)
+
 	mut times := []int{}
 
 	for i in 1 .. runs + 1 {

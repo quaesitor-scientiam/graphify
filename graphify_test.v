@@ -5343,6 +5343,47 @@ fn test_stale_note() {
 	write(git('rev-parse', 'HEAD'), file_hash(exe))
 	os.write_file(exe, 'build two') or { panic(err) }
 	assert stale_note(graph, repo, exe).contains('different graphify build')
+	// the extractor built with this CLI: a graph either of them made is current, and one
+	// made by an extractor since rebuilt is not
+	at := git('rev-parse', 'HEAD')
+	os.unsetenv(no_extractor_env)
+	extractor := os.join_path(os.dir(exe), extractor_name)
+	pair := extractor + extractor_pair_suffix
+	os.write_file(extractor, 'extractor one') or { panic(err) }
+	// with nothing saying it is of this CLI, it isn't used
+	assert extractor_of(exe) == exe
+	os.write_file(pair, file_hash(exe)) or { panic(err) }
+	assert extractor_of(exe) == extractor
+	assert stale_note(graph, repo, exe).contains('different graphify build')
+	write(at, file_hash(exe))
+	assert stale_note(graph, repo, exe) == ''
+	write(at, file_hash(extractor))
+	assert stale_note(graph, repo, exe) == ''
+	os.write_file(extractor, 'extractor two') or { panic(err) }
+	assert stale_note(graph, repo, exe).contains('different graphify build')
+	// a CLI that is another build, rebuilt by hand or restored, goes on without it, and
+	// the extractor's graph is of other code
+	write(at, file_hash(extractor))
+	os.write_file(pair, 'the hash of another CLI') or { panic(err) }
+	assert extractor_of(exe) == exe
+	assert stale_note(graph, repo, exe).contains('different graphify build')
+	write(at, file_hash(exe))
+	assert stale_note(graph, repo, exe) == ''
+	// asked not to, the CLI extracts, and that says nothing of a graph already extracted
+	os.write_file(pair, file_hash(exe)) or { panic(err) }
+	write(at, file_hash(extractor))
+	assert extract_handover(exe) == extractor
+	os.setenv(no_extractor_env, '1', true)
+	assert extract_handover(exe) == exe
+	assert extractor_of(exe) == extractor
+	assert stale_note(graph, repo, exe) == ''
+	os.unsetenv(no_extractor_env)
+	write(at, file_hash(exe))
+	// with the extractor gone, the CLI extracts
+	os.rm(extractor) or { panic(err) }
+	assert extractor_of(exe) == exe
+	os.rm(pair) or { panic(err) }
+	write(at, 'build one no longer exists')
 	// unless the graph came from another machine, whose build always differs
 	assert stale_note(graph, repo, '') == ''
 	// the library it read has moved: the V checkout was updated since
@@ -13062,6 +13103,7 @@ fn test_a_prealloc_extract_uses_nothing_it_has_freed() {
 	assert built2.exit_code == 0, built2.output
 	old_vroot := os.getenv('VROOT')
 	old_vmodules := os.getenv('VMODULES')
+	os.unsetenv(no_extractor_env)
 	os.setenv('VROOT', @VEXEROOT, true)
 	os.setenv('VMODULES', os.join_path(dir, 'no_vmodules'), true)
 	defer {
@@ -13085,6 +13127,34 @@ fn test_a_prealloc_extract_uses_nothing_it_has_freed() {
 		assert want.len > 0
 		assert have == want, name
 	}
+	// a CLI's `extract` hands over to the extractor built with it, so the manifest names
+	// the binary that extracted, and not to one built with another CLI
+	extractor := os.join_path(dir, extractor_name)
+	pair := extractor + extractor_pair_suffix
+	os.cp(unmapping, extractor) or { panic(err) }
+	os.write_file(pair, file_hash(gc)) or { panic(err) }
+	handed := os.join_path(dir, 'handed_out')
+	over := os.exec([gc, 'extract', @DIR, '--out', handed])
+	assert over.exit_code == 0, over.output
+	assert over.output.contains('[trace_prealloc]'), over.output
+	m := load_manifest(os.join_path(handed, 'manifest.json')) or { panic(err) }
+	assert m.binary_hash == file_hash(extractor)
+	gc_graph := os.read_file(os.join_path(dir, 'gc_out', 'graph.json')) or { panic(err) }
+	assert os.read_file(os.join_path(handed, 'graph.json')) or { panic(err) } == gc_graph
+	os.write_file(pair, 'the hash of another CLI') or { panic(err) }
+	kept := os.join_path(dir, 'kept_out')
+	own := os.exec([gc, 'extract', @DIR, '--out', kept])
+	assert own.exit_code == 0, own.output
+	assert !own.output.contains('[trace_prealloc]'), own.output
+	// nor when asked not to
+	os.write_file(pair, file_hash(gc)) or { panic(err) }
+	os.setenv(no_extractor_env, '1', true)
+	opted := os.exec([gc, 'extract', @DIR, '--out', os.join_path(dir, 'opted_out')])
+	os.unsetenv(no_extractor_env)
+	assert opted.exit_code == 0, opted.output
+	assert !opted.output.contains('[trace_prealloc]'), opted.output
+	km := load_manifest(os.join_path(kept, 'manifest.json')) or { panic(err) }
+	assert km.binary_hash == file_hash(gc)
 }
 
 fn test_freeing_an_arena_hands_its_memory_back() {

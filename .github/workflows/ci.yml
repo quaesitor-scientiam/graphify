@@ -190,6 +190,16 @@ jobs:
       - name: Run tests
         run: v test .
 
+      # -prealloc frees only whole arenas (graphify.v), and prealloc_no_recycle unmaps
+      # their memory as it goes, so a use of what was freed crashes instead of reading
+      # as it did. Not on Windows, where the updater extracts with the GC build.
+      - name: Run tests with -prealloc
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          v -prealloc test .
+          v -prealloc -d prealloc_no_recycle test .
+
       - name: Build CLI
         run: v -o bin/graphify cmd/cli
 
@@ -230,6 +240,16 @@ jobs:
           git -C "$RUNNER_TEMP/v" worktree add -q "$RUNNER_TEMP/vlang" HEAD
           ./bin/graphify extract "$RUNNER_TEMP/vlang" --out "$RUNNER_TEMP/graph-out"
           cat "$RUNNER_TEMP/graph-out/GRAPH_REPORT.md"
+
+      # What the updater extracts with (bin/graphify-extract): the same graph as the
+      # GC build's, which the other OSes are compared with below.
+      - name: Extract the pinned vlang tree with -prealloc
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          v -prod -prealloc -o bin/graphify-extract cmd/cli
+          ./bin/graphify-extract extract "$RUNNER_TEMP/vlang" --out "$RUNNER_TEMP/graph-out-prealloc"
+          cmp "$RUNNER_TEMP/graph-out/graph.json" "$RUNNER_TEMP/graph-out-prealloc/graph.json"
 
       - uses: actions/upload-artifact@v4
         with:
