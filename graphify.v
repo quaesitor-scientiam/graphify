@@ -204,7 +204,8 @@ pub fn build_graph_with_library(root string, worker_exe string, out_dir string, 
 	resolve_edges(mut g)
 	arena_leave(resolve_arena)
 	$if prealloc {
-		g = compact_graph(g)
+		// the edges are all resolve_edges changes: the symbols are still compact_graph's
+		g.edges = clone_edges(g.edges)
 	}
 	arena_free(resolve_arena)
 	if has_library {
@@ -219,9 +220,9 @@ pub fn build_graph_with_library(root string, worker_exe string, out_dir string, 
 	}
 }
 
-// compact_graph deep-copies what a phase leaves in `g` into the current arena, so that
-// the phase's own arena, where most of what it allocated is garbage, can be freed behind
-// it. A -prealloc build frees nothing else: this is what bounds its memory.
+// compact_graph deep-copies what parsing leaves in `g` into the current arena, so that
+// the arena it ran in, where most of what it allocated is garbage, can be freed behind
+// it. A -prealloc build frees only whole arenas, so this is what bounds its memory.
 fn compact_graph(g Graph) Graph {
 	return Graph{
 		...g
@@ -291,7 +292,7 @@ fn clone_strings(strs []string) []string {
 fn clone_string_map(m map[string]string) map[string]string {
 	mut out := map[string]string{}
 	for k, v in m {
-		out[k.clone()] = v.clone()
+		out[k] = v.clone() // setting a key clones it
 	}
 	return out
 }
@@ -299,13 +300,16 @@ fn clone_string_map(m map[string]string) map[string]string {
 fn clone_bool_map(m map[string]bool) map[string]bool {
 	mut out := map[string]bool{}
 	for k, v in m {
-		out[k.clone()] = v
+		out[k] = v // setting a key clones it
 	}
 	return out
 }
 
 // arena_begin starts an arena for a phase whose garbage is to be freed with arena_free,
 // after arena_leave and copying out what survives; without -prealloc, these do nothing.
+// Nothing in an arena may create a capturing closure: V keeps its closures in a global
+// table, set up and grown by whichever closure needs it, so the table would be left
+// pointing at the freed arena for the next closure to write through.
 fn arena_begin() voidptr {
 	$if prealloc {
 		return unsafe { prealloc_scope_begin() }
@@ -1485,20 +1489,6 @@ fn resolve_edges(mut g Graph) {
 		}
 	}
 	mut builds := build_worlds(inf, alias_targets, g.symbols)
-	// the build a call that comes out differently in another world needs: that of the
-	// alias declarations that name its callee's type, `use_openssl ?` for
-	// `openssl.SSLConn.dial` through `ssl.SSLConn`
-	// (the type's id may have a label before the module the alias names it by:
-	// `vlib.net.openssl.SSLConn`)
-	world_build := fn [target_build] (e Edge, id string) string {
-		owner := id.all_before('@').all_before_last('.')
-		for target, b in target_build {
-			if owner == target || owner.ends_with('.' + target) {
-				return join_build(e.build, b)
-			}
-		}
-		return e.build
-	}
 	mut resolved := []Edge{cap: g.edges.len}
 	// variants_of maps each platform copy of a function or method to all of its
 	// copies: the same id before the `@file`, in the same module.
@@ -1554,7 +1544,7 @@ fn resolve_edges(mut g Graph) {
 					if !unaddressable[r.id] {
 						add_resolved_call(mut resolved, mut seen_call, Edge{
 							...e
-							build: world_build(e, r.id)
+							build: world_build(target_build, e, r.id)
 						}, r)
 					}
 				}
@@ -1579,7 +1569,7 @@ fn resolve_edges(mut g Graph) {
 						if !unaddressable[r.id] {
 							add_resolved_call(mut resolved, mut seen_call, Edge{
 								...e
-								build: world_build(e, r.id)
+								build: world_build(target_build, e, r.id)
 							}, r)
 						}
 					}
@@ -1587,7 +1577,7 @@ fn resolve_edges(mut g Graph) {
 					he := if in_builds.len > 0 {
 						Edge{
 							...e
-							build: world_build(e, res.id)
+							build: world_build(target_build, e, res.id)
 						}
 					} else {
 						e
@@ -1782,6 +1772,21 @@ fn resolve_edges(mut g Graph) {
 	}
 	g.edges = expand_type_param_calls(resolved, g.edges, generic_fields, mut inf, generic_funcs,
 		unaddressable, variants_of)
+}
+
+// world_build is the build a call that comes out differently in another world needs:
+// that of the alias declarations that name its callee's type, `use_openssl ?` for
+// `openssl.SSLConn.dial` through `ssl.SSLConn` (the type's id may have a label before
+// the module the alias names it by: `vlib.net.openssl.SSLConn`). No closure, as
+// resolve_edges runs in an arena (see arena_begin).
+fn world_build(target_build map[string]string, e Edge, id string) string {
+	owner := id.all_before('@').all_before_last('.')
+	for target, b in target_build {
+		if owner == target || owner.ends_with('.' + target) {
+			return join_build(e.build, b)
+		}
+	}
+	return e.build
 }
 
 // BuildWorlds is how resolve_edges sees the builds that take another side of an

@@ -12743,3 +12743,375 @@ fn keep() {
 	calls := g.edges.filter(it.kind == .calls && it.from == 'lib.codec.Enc.put').map(it.to)
 	assert calls == ['lib.codec.Pen.describe'], calls.str()
 }
+
+// reuse_freed_arenas allocates over what a freed arena held, so that anything still
+// pointing into one reads as other text. A small arena's memory outlives its free
+// until it is reused, so without this a dangling string reads as it did.
+fn reuse_freed_arenas() {
+	$if prealloc {
+		for _ in 0 .. 40 {
+			scope := unsafe { prealloc_scope_begin() }
+			mut junk := []string{}
+			for i in 0 .. 20000 {
+				junk << 'reused arena memory ${i}'
+			}
+			unsafe { prealloc_scope_end(scope) }
+		}
+	}
+}
+
+// extract_text is all the text of what an extract returned, a new copy of it.
+fn extract_text(g Graph, r ExtractReport) string {
+	mut b := []string{}
+	b << 'root ${g.root} binary ${r.binary_hash}'
+	b << 'failed ${r.failed} stale ${r.stale} partial ${r.partial}'
+	mut files := g.file_hashes.keys()
+	files.sort()
+	for f in files {
+		b << 'hash ${f} ${g.file_hashes[f]}'
+	}
+	for s in g.symbols {
+		b << 'sym ${s.id}|${s.name}|${s.signature}|${s.file}|${s.line}|${s.parent}|${s.doc}|${s.build}|${s.recipe}|${s.tparams}'
+	}
+	for e in g.edges {
+		b << 'edge ${e.from}|${e.to}|${e.kind}|${e.recv_type}|${e.recv_recipe}|${e.arg_sites}|${e.guards}|${e.lines}|${e.build}|${e.file}'
+	}
+	for s in g.library.symbols {
+		b << 'lib ${s.id}|${s.name}|${s.signature}|${s.file}|${s.end_line}|${s.parent}|${s.doc}'
+	}
+	return b.join('\n')
+}
+
+fn test_what_an_extract_returns_outlives_the_arenas_it_ran_in() {
+	dir := os.join_path(os.temp_dir(), 'graphify_arena_worker_${os.getpid()}')
+	tpl := os.join_path(dir, 'canned')
+	os.mkdir_all(tpl) or { panic(err) }
+	worker := compile_crash_worker(dir)
+	root := write_tree('arena_outlives', {
+		'crash.v':   'module demo\n\npub fn crash_fn() int {\n\treturn 2\n}\n'
+		'ok.v':      'module demo\n\n// ok_fn has a doc.\npub fn ok_fn() int {\n\treturn crash_fn()\n}\n'
+		'partial.v': partial_parse_src
+	})
+	out := root + '_out'
+	os.setenv('GRAPHIFY_TEST_CANNED', tpl, true)
+	defer {
+		os.rmdir_all(dir) or {}
+		os.rmdir_all(root) or {}
+		os.rmdir_all(out) or {}
+	}
+	for rel in ['crash.v', 'ok.v', 'partial.v'] {
+		write_canned(tpl, root, rel)
+	}
+	build_graph_resilient(root, worker, out)
+	// crash.v changes and its worker dies, so the report has something in all its lists
+	os.write_file(os.join_path(root, 'crash.v'), 'module demo\n\npub fn crash_fn() int {\n\treturn 4\n}\n') or {
+		panic(err)
+	}
+	os.write_file(os.join_path(tpl, 'crash_now'), '') or { panic(err) }
+	g, r := build_graph_resilient(root, worker, out)
+	assert r.failed == ['crash.v']
+	assert r.stale == ['crash.v']
+	assert r.partial == ['partial.v']
+	assert g.file_hashes.len == 3
+	assert g.symbols.any(it.id == 'demo.ok_fn' && it.doc != '')
+	assert g.edges.any(it.from == 'demo.ok_fn' && it.to == 'demo.crash_fn' && it.lines.len == 1)
+	before := extract_text(g, r)
+	reuse_freed_arenas()
+	assert extract_text(g, r) == before
+}
+
+fn test_the_arena_copies_share_no_string_with_what_they_copy() {
+	e := Edge{
+		from:        'from'
+		to:          'to'
+		kind:        .calls
+		provenance:  .inferred
+		is_method:   true
+		recv_type:   'recv_type'
+		recv_recipe: 'recv_recipe'
+		arg_sites:   'arg_sites'
+		guards:      'guards'
+		lines:       [1, 2]
+		build:       'build'
+		file:        'file'
+	}
+	c := clone_edges([e])[0]
+	// a string field added to Edge must be set above, which this fails on until it is,
+	// and copied by clone_edges: the `...e` there would only share it
+	$for f in Edge.fields {
+		$if f.typ is string {
+			assert e.$(f.name) != '', f.name
+			assert c.$(f.name) == e.$(f.name), f.name
+			assert voidptr(c.$(f.name).str) != voidptr(e.$(f.name).str), f.name
+		}
+	}
+	assert c.kind == .calls && c.provenance == .inferred && c.is_method
+	assert c.lines == [1, 2]
+	assert voidptr(c.lines.data) != voidptr(e.lines.data)
+	s := Symbol{
+		id:        'id'
+		name:      'name'
+		kind:      .method
+		signature: 'signature'
+		file:      'file'
+		line:      3
+		end_line:  4
+		is_pub:    true
+		parent:    'parent'
+		doc:       'doc'
+		build:     'build'
+		recipe:    'recipe'
+		tparams:   'tparams'
+	}
+	g := compact_graph(Graph{
+		symbols: [s]
+		edges:   [e]
+	})
+	cs := g.symbols[0]
+	$for f in Symbol.fields {
+		$if f.typ is string {
+			assert s.$(f.name) != '', f.name
+			assert cs.$(f.name) == s.$(f.name), f.name
+			assert voidptr(cs.$(f.name).str) != voidptr(s.$(f.name).str), f.name
+		}
+	}
+	assert cs.kind == .method && cs.line == 3 && cs.end_line == 4 && cs.is_pub
+	assert g.edges[0].to == 'to' && voidptr(g.edges[0].to.str) != voidptr(e.to.str)
+}
+
+fn test_arena_copies_share_a_repeated_field_only_with_the_same_text() {
+	a := Edge{
+		from: 'one'
+		file: 'f.v'
+	}
+	b := Edge{
+		from: 'one'.clone()
+		file: 'g.v'
+	}
+	d := Edge{
+		from: 'two'
+		file: 'g.v'.clone()
+	}
+	out := clone_edges([a, b, d])
+	assert out.map(it.from) == ['one', 'one', 'two']
+	assert out.map(it.file) == ['f.v', 'g.v', 'g.v']
+	assert voidptr(out[1].from.str) == voidptr(out[0].from.str)
+	assert voidptr(out[1].from.str) != voidptr(b.from.str)
+	assert voidptr(out[2].file.str) == voidptr(out[1].file.str)
+	syms := clone_symbols([Symbol{ file: 'f.v', parent: 'p' }, Symbol{ file: 'g.v', parent: 'p'.clone() }])
+	assert syms.map(it.file) == ['f.v', 'g.v']
+	assert voidptr(syms[1].parent.str) == voidptr(syms[0].parent.str)
+}
+
+fn test_arena_copies_of_a_report_and_its_maps_are_deep() {
+	strs := ['a.v']
+	assert clone_strings(strs) == strs
+	assert voidptr(clone_strings(strs)[0].str) != voidptr(strs[0].str)
+	key := 'k.v'
+	hashes := {
+		key: 'hash'
+	}
+	copied := clone_string_map(hashes)
+	assert copied == hashes
+	assert voidptr(copied[key].str) != voidptr(hashes[key].str)
+	for k, _ in copied {
+		assert voidptr(k.str) != voidptr(key.str)
+	}
+	files := {
+		key: true
+	}
+	flags := clone_bool_map(files)
+	assert flags == files
+	for k, _ in flags {
+		assert voidptr(k.str) != voidptr(key.str)
+	}
+}
+
+// bp_sym is a symbol's fields as the protocol writes them, `n` of them.
+fn bp_sym(n int) string {
+	return ['i', 'n', int(SymbolKind.method).str(), 's', 'f', '3', '9', '1', 'p', 'd', 'r', 't', 'b'][..n].join(bp_fs)
+}
+
+// bp_edge is an edge's fields as the protocol writes them, `n` of them.
+fn bp_edge(n int) string {
+	return ['a', 'b', int(EdgeKind.calls).str(), '1', 'T', 'f', 'q', int(EdgeProvenance.inferred).str(),
+		's', 'g', '1,2', 'b'][..n].join(bp_fs)
+}
+
+fn test_decoding_a_line_keeps_a_record_only_with_its_required_fields() {
+	assert decode_file_result(bp_sym(9)).symbols.len == 0
+	short := decode_file_result(bp_sym(10)).symbols
+	assert short.len == 1
+	assert short[0].id == 'i' && short[0].kind == .method && short[0].line == 3
+	assert short[0].end_line == 9 && short[0].is_pub && short[0].doc == 'd'
+	assert short[0].recipe == '' && short[0].build == ''
+	full := decode_file_result(bp_sym(13)).symbols[0]
+	assert full.recipe == 'r' && full.tparams == 't' && full.build == 'b'
+	// a bad record is skipped, not the ones around it
+	mixed := decode_file_result(bp_sym(9) + bp_rs + bp_sym(10) + bp_rs).symbols
+	assert mixed.len == 1
+	assert decode_file_result('${bp_ss}${bp_edge(2)}').edges.len == 0
+	three := decode_file_result('${bp_ss}${bp_edge(3)}').edges
+	assert three.len == 1
+	assert three[0].to == 'b' && !three[0].is_method && three[0].lines == []
+	// the odd-line marker of a worker, and a line with no sections, hold nothing
+	odd := decode_file_result('{}')
+	assert odd.symbols.len == 0 && odd.edges.len == 0 && odd.parse_error == ''
+	assert decode_file_result('').symbols.len == 0
+}
+
+fn test_decoding_reads_provenance_only_from_an_edge_that_has_it() {
+	assert decode_file_result('${bp_ss}${bp_edge(7)}').edges[0].provenance == .extracted
+	assert decode_file_result('${bp_ss}${bp_edge(8)}').edges[0].provenance == .inferred
+}
+
+fn test_decoding_reads_each_edge_field_from_its_own_place() {
+	e := decode_file_result('${bp_ss}${bp_edge(12)}').edges[0]
+	assert e.from == 'a' && e.to == 'b' && e.kind == .calls && e.is_method
+	assert e.recv_type == 'T' && e.file == 'f' && e.recv_recipe == 'q'
+	assert e.provenance == .inferred
+	assert e.arg_sites == 's' && e.guards == 'g'
+	assert e.lines == [1, 2] && e.build == 'b'
+}
+
+fn test_decoding_a_flag_field_takes_only_a_lone_one() {
+	assert decode_file_result('${bp_ss}a${bp_fs}b${bp_fs}0${bp_fs}1').edges[0].is_method
+	assert !decode_file_result('${bp_ss}a${bp_fs}b${bp_fs}0${bp_fs}11').edges[0].is_method
+	assert !decode_file_result('${bp_ss}a${bp_fs}b${bp_fs}0${bp_fs}0').edges[0].is_method
+}
+
+fn test_decoding_restores_newlines_and_stops_at_the_sections_end() {
+	fr := FileResult{
+		symbols:     [Symbol{ id: 'i', signature: 'a\nb', doc: 'c\r\nd' }]
+		parse_error: 'first\nsecond'
+	}
+	back := decode_file_result(encode_file_result(fr))
+	assert back.symbols[0].signature == 'a\nb'
+	assert back.symbols[0].doc == 'c\nd'
+	assert back.parse_error == 'first\nsecond'
+	assert decode_file_result('${bp_ss}${bp_ss}err${bp_ss}more').parse_error == 'err'
+}
+
+fn test_decoding_reads_the_ints_the_protocol_writes() {
+	assert bp_int_at('-5', 0, 2) == -5
+	assert bp_int_at('+5', 0, 2) == 5
+	assert bp_int_at('12x', 0, 3) == 12
+	assert bp_int_at('', 0, 0) == 0
+	sym := decode_file_result(['i', 'n', '0', 's', 'f', '-5', '7', '0', 'p', 'd'].join(bp_fs)).symbols[0]
+	assert sym.line == -5 && sym.end_line == 7
+	assert decode_file_result('${bp_ss}${bp_edge(11)}').edges[0].lines == [1, 2]
+	sites := ['a', 'b', '0', '0', '', '', '', '0', '', '', '1,,3,'].join(bp_fs)
+	assert decode_file_result('${bp_ss}${sites}').edges[0].lines == [1, 0, 3, 0]
+}
+
+fn test_the_library_files_of_an_extract_outlive_the_arena_they_were_read_in() {
+	// keep_reached_library drops the edges of the files `lib_files` names after
+	// resolve_edges has allocated over the arena they were read in, which takes a
+	// project large enough that it does
+	base, roots := library_fixture('library_arena')
+	defer {
+		os.rmdir_all(base) or {}
+		os.setenv('GRAPHIFY_LIB_VROOT', '', true)
+		os.setenv('GRAPHIFY_LIB_VMODULES', '', true)
+	}
+	mut big := []string{}
+	for i in 0 .. 4000 {
+		big << 'fn generated_${i}() int {\n\treturn generated_${i + 1}()\n}\n'
+	}
+	big << 'fn generated_4000() int {\n\treturn 0\n}\n'
+	os.write_file(os.join_path(base, 'proj', 'generated.v'), 'module main\n\n' + big.join('\n')) or {
+		panic(err)
+	}
+	g, _ := build_graph_with_library(os.join_path(base, 'proj'), '', os.join_path(base,
+		'out'), roots)
+	assert g.library.symbols.any(it.id == 'vlib.os.join_path' && it.file != ''), g.library.symbols.map(it.id).str()
+	assert g.edges.any(it.from == 'main.generated_0' && it.to == 'main.generated_1')
+	before := extract_text(g, ExtractReport{})
+	reuse_freed_arenas()
+	assert extract_text(g, ExtractReport{}) == before
+	// a module from VMODULES is kept whole, with its edges; vlib's are dropped
+	vlib := g.edges.filter(it.file.starts_with(lib_vlib_prefix))
+	assert vlib.len == 0, vlib.map(it.file).str()
+}
+
+// test_a_prealloc_extract_uses_nothing_it_has_freed runs the real command in the build
+// that unmaps an arena's memory as it is freed, so that using any of it crashes or
+// comes out wrong: what a worker's arena for each file and the bundle's arena hold,
+// and a global of the runtime set up inside an arena, as V's table of closures is
+// by the first closure. Reused memory hides all of these from the tests above, which
+// run in one process that has set up such globals long before. Graphify's own source,
+// with the vlib it imports, is a project large enough for the library's closures to
+// run with arenas already freed; on Windows, freed memory does not fault.
+fn test_a_prealloc_extract_uses_nothing_it_has_freed() {
+	$if windows {
+		return
+	}
+	dir := os.join_path(os.temp_dir(), 'graphify_prealloc_cli_${os.getpid()}')
+	os.mkdir_all(dir) or { panic(err) }
+	defer {
+		os.rmdir_all(dir) or {}
+	}
+	vexe := @VEXE
+	cli := os.join_path(@DIR, 'cmd', 'cli')
+	gc := os.join_path(dir, 'gc_cli')
+	unmapping := os.join_path(dir, 'unmapping_cli')
+	built := os.exec([vexe, '-o', gc, cli])
+	assert built.exit_code == 0, built.output
+	built2 := os.exec([vexe, '-prealloc', '-d', 'prealloc_no_recycle', '-d', 'trace_prealloc', '-o',
+		unmapping, cli])
+	assert built2.exit_code == 0, built2.output
+	old_vroot := os.getenv('VROOT')
+	old_vmodules := os.getenv('VMODULES')
+	os.setenv('VROOT', @VEXEROOT, true)
+	os.setenv('VMODULES', os.join_path(dir, 'no_vmodules'), true)
+	defer {
+		os.setenv('VROOT', old_vroot, true)
+		os.setenv('VMODULES', old_vmodules, true)
+	}
+	expected := os.exec([gc, 'extract', @DIR, '--out', os.join_path(dir, 'gc_out')])
+	assert expected.exit_code == 0, expected.output
+	got := os.exec([unmapping, 'extract', @DIR, '--out', os.join_path(dir, 'unmapping_out')])
+	assert got.exit_code == 0, got.output
+	assert !got.output.contains('unparseable'), got.output
+	// the arenas are freed, which the rest of this test can't see: with nothing freed,
+	// nothing can be used after it. trace_prealloc logs the parent's arenas; a worker
+	// silences its stderr. Parsing's and resolve_edges' are freed after copying out of
+	// them, and the cache's and the bundle's end with what they wrote.
+	assert got.output.count('[trace_prealloc] scope free-after') == 2, got.output
+	assert got.output.count('[trace_prealloc] scope end') == 2, got.output
+	for name in ['graph.json', 'GRAPH_REPORT.md'] {
+		want := os.read_file(os.join_path(dir, 'gc_out', name)) or { panic(err) }
+		have := os.read_file(os.join_path(dir, 'unmapping_out', name)) or { panic(err) }
+		assert want.len > 0
+		assert have == want, name
+	}
+}
+
+fn test_freeing_an_arena_hands_its_memory_back() {
+	$if prealloc {
+		$if !prealloc_no_recycle ? {
+			$if !windows {
+				// arenas held open empty the pool of blocks that earlier tests freed (it
+				// has 256 slots), so the only block the next arena can start in is a
+				// freed one, not a new one
+				mut held := unsafe { [300]voidptr{} }
+				for i in 0 .. held.len {
+					held[i] = arena_begin()
+				}
+				a := arena_begin()
+				a_lo, a_hi := unsafe { prealloc_scope_address_range(a) }
+				arena_leave(a)
+				arena_free(a)
+				b := arena_begin()
+				b_lo, b_hi := unsafe { prealloc_scope_address_range(b) }
+				arena_leave(b)
+				arena_free(b)
+				for i := held.len - 1; i >= 0; i-- {
+					arena_leave(held[i])
+					arena_free(held[i])
+				}
+				assert b_lo < a_hi && a_lo < b_hi
+			}
+		}
+	}
+}
