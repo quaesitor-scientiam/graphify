@@ -35,7 +35,9 @@ fn expand_type_param_calls(edges []Edge, sources []Edge, fields []Symbol, mut in
 	collect_call_sites(edges, funcs, mut inf, mut instances, mut flows)
 	collect_owner_instances(sources, fields, funcs, mut inf, mut instances, mut flows)
 	settle_flows(mut instances, flows)
-	if instances.len == 0 && !edges.any(it.is_method && has_field_any(it.recv_recipe)) {
+	// a call under a comptime check has a type with no instance at all (guarded_instances)
+	if instances.len == 0
+		&& !edges.any(it.guards != '' || (it.is_method && has_field_any(it.recv_recipe))) {
 		return edges
 	}
 	// the passes that look for new types only collect the calls they link; the expanded edges
@@ -1099,7 +1101,8 @@ fn param_types(sig string) []string {
 // it still says: `$if T.unaliased_typ is string` is `string`, read in `file`, and the kind `$map`
 // is builtin's `map`. This is what the walk does for `$if T is X`, which retypes a variable typed
 // T as X (backend_v.v, comptime_type_is) whatever the instances are; this covers the forms it
-// doesn't read, such as `T.unaliased_typ`.
+// doesn't read, such as `T.unaliased_typ`. A bare name is read as the file's own module's, since
+// FileScope has no selective imports: `import m { Thing }` then `is Thing` stays unresolved.
 fn guarded_instances(insts []InferredType, guards string, tp string, file string, mut inf Infer) []InferredType {
 	if guards == '' {
 		return insts

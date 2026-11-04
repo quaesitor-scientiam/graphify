@@ -1453,26 +1453,7 @@ fn resolve_edges(mut g Graph) {
 			else {}
 		}
 	}
-	// the argument recipes of each call site of a generic function, which arg_result types its
-	// result by; a call of a method (whose result owner_args types) or of any other function never
-	// needs them, and keeping those would hold every `len` or `get` call's arguments
-	mut generic_names := map[string]bool{}
-	for s in g.symbols {
-		if s.kind == .function && s.recipe != '' {
-			generic_names[s.name] = true
-		}
-	}
-	mut call_args := map[string]string{}
-	for e in g.edges {
-		if e.kind != .calls || e.arg_sites == '' || e.to.all_after_last('.') !in generic_names {
-			continue
-		}
-		for offset, args in call_site_args(e.arg_sites) {
-			call_args[e.from + '\x00' + e.file + '\x00' + e.to + '\x00' + offset] = args
-		}
-	}
 	mut inf := Infer{
-		call_args:    call_args
 		by_name:      by_name
 		const_calls:  const_calls
 		by_type_name: by_type_name
@@ -1505,6 +1486,24 @@ fn resolve_edges(mut g Graph) {
 				recv_recipe: inf.comptime_recipe(e.recv_recipe, e.file)
 				arg_sites:   inf.comptime_sites(e.arg_sites, e.file)
 			}
+		}
+	}
+	// the argument recipes of each call site of a generic free function, which arg_result types
+	// its result by. Only those: arg_result doesn't read a method's own type parameters, and
+	// keeping every call's would hold the arguments of each `len` or `get` that shares a name with
+	// a generic method
+	mut generic_names := map[string]bool{}
+	for s in g.symbols {
+		if s.kind == .function && s.recipe != '' {
+			generic_names[s.name] = true
+		}
+	}
+	for e in g.edges {
+		if e.kind != .calls || e.arg_sites == '' || e.to.all_after_last('.') !in generic_names {
+			continue
+		}
+		for offset, args in call_site_args(e.arg_sites) {
+			inf.call_args[e.from + '\x00' + e.file + '\x00' + e.to + '\x00' + offset] = args
 		}
 	}
 	mut builds := build_worlds(inf, alias_targets, g.symbols)

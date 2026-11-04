@@ -2509,14 +2509,17 @@ fn (f &V3File) always_leaves(block flat.NodeId) bool {
 // offset of its callee (`at:`), which finds that call's argument recipes (call_args, in infer.v),
 // so a generic callee's result can take the type its arguments have. `f() or { ... }` and `f()!`
 // are an or-expression around the call, and `(f())` a paren, whose value is the call's (recipe
-// reads both the same way).
+// reads both the same way). The step follows the recipe's `c:` start, so it is only for a recipe
+// that is nothing but that call: `id(x).tag()` is the result of tag() (whose method a recipe's
+// last step names, chained_call_ids), and `mk[T]()` is typed by its written type arguments.
 fn (f &V3File) bound_recipe(rhs flat.NodeId, ctx V3CallCtx) string {
 	rec := f.recipe(rhs, ctx)
 	mut call := rhs
 	for f.node(call).kind in [.paren, .or_expr] && f.kids(call).len > 0 {
 		call = f.kids(call)[0]
 	}
-	if !rec.starts_with('c:') || rec.contains(recipe_alt) || f.node(call).kind != .call {
+	if !rec.starts_with('c:') || rec.contains(recipe_alt) || rec.contains(recipe_sep)
+		|| f.node(call).kind != .call {
 		return rec
 	}
 	callee := f.kids(call)
@@ -2832,6 +2835,7 @@ const primitive_types = ['bool', 'string', 'rune', 'byte', 'voidptr', 'charptr',
 // `Context`, which shadows a global `ctx`. '' for any other method. V also requires the module to
 // declare a `Context`, which one file can't see, and counts a parameter of a type that embeds
 // `veb.Context` as a context one, which this doesn't read; either way such a method has no `ctx`.
+// A type is read through the file's imports, so `w.Context` after `import veb as w` is veb's.
 fn (f &V3File) implicit_veb_ctx(n &flat.Node, recv_typ string, params []flat.NodeId) string {
 	ret := n.typ_text()
 	if ret != 'veb.Result' && f.type_text(ret) != 'veb.Result' {
@@ -2841,8 +2845,8 @@ fn (f &V3File) implicit_veb_ctx(n &flat.Node, recv_typ string, params []flat.Nod
 		return ''
 	}
 	for p in params[1..] {
-		typ := f.node(p).typ_text().trim_left('&')
-		if typ.all_after('mut ').trim_space() in ['Context', 'veb.Context'] {
+		typ := f.node(p).typ_text().trim_left('&').all_after('mut ').trim_space()
+		if typ in ['Context', 'veb.Context'] || f.type_text(typ) == 'veb.Context' {
 			return ''
 		}
 	}
