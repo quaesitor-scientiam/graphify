@@ -1488,6 +1488,24 @@ fn resolve_edges(mut g Graph) {
 			}
 		}
 	}
+	// the argument recipes of each call site of a generic free function, which arg_result types
+	// its result by. Only those: arg_result doesn't read a method's own type parameters, and
+	// keeping every call's would hold the arguments of each `len` or `get` that shares a name with
+	// a generic method
+	mut generic_names := map[string]bool{}
+	for s in g.symbols {
+		if s.kind == .function && s.recipe != '' {
+			generic_names[s.name] = true
+		}
+	}
+	for e in g.edges {
+		if e.kind != .calls || e.arg_sites == '' || e.to.all_after_last('.') !in generic_names {
+			continue
+		}
+		for offset, args in call_site_args(e.arg_sites) {
+			inf.call_args[e.from + '\x00' + e.file + '\x00' + e.to + '\x00' + offset] = args
+		}
+	}
 	mut builds := build_worlds(inf, alias_targets, g.symbols)
 	mut resolved := []Edge{cap: g.edges.len}
 	// variants_of maps each platform copy of a function or method to all of its

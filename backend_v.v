@@ -1337,6 +1337,13 @@ fn (mut f V3File) extract_fn(id flat.NodeId, mut syms []Symbol, mut edges []Edge
 			vars[pn.value_text()] = if pn.typ_text() != '' { 't:' + f.type_text(pn.typ_text()) } else { '' }
 		}
 	}
+	// the `ctx` a veb route method uses without declaring it, which V declares for it
+	if is_method && 'ctx' !in vars {
+		context := f.implicit_veb_ctx(n, recv_typ, params)
+		if context != '' {
+			vars['ctx'] = context
+		}
+	}
 	for i := start; i < params.len; i++ {
 		pn := f.node(params[i])
 		if t := f.param_type(pn) {
@@ -2498,6 +2505,39 @@ fn (f &V3File) always_leaves(block flat.NodeId) bool {
 	return false
 }
 
+// bound_recipe is the recipe of the value a declaration binds. A call's result also records the
+// offset of its callee (`at:`), which finds that call's argument recipes (call_args, in infer.v),
+// so a generic callee's result can take the type its arguments have. `f() or { ... }` and `f()!`
+// are an or-expression around the call, and `(f())` a paren, whose value is the call's (recipe
+// reads both the same way). The step follows the recipe's `c:` start, so it is only for a recipe
+// that is nothing but that call: `id(x).tag()` is the result of tag() (whose method a recipe's
+// last step names, chained_call_ids), and `mk[T]()` is typed by its written type arguments.
+fn (f &V3File) bound_recipe(rhs flat.NodeId, ctx V3CallCtx) string {
+	rec := f.recipe(rhs, ctx)
+	mut call := rhs
+	for f.node(call).kind in [.paren, .or_expr] && f.kids(call).len > 0 {
+		call = f.kids(call)[0]
+	}
+	if !rec.starts_with('c:') || rec.contains(recipe_alt) || rec.contains(recipe_sep)
+		|| f.node(call).kind != .call {
+		return rec
+	}
+	callee := f.kids(call)
+	if callee.len == 0 {
+		return rec
+	}
+	return rec + recipe_sep + 'at:' + f.node(callee[0]).pos.offset.str()
+}
+
+// unbound is `rec` without the `at:` steps of bound_recipe: two results of one callee have one
+// type whichever calls made them, unless the callee is generic and their arguments differ.
+fn unbound(rec string) string {
+	if !rec.contains('at:') {
+		return rec
+	}
+	return rec.split(recipe_sep).filter(!it.starts_with('at:')).join(recipe_sep)
+}
+
 // declare returns `ctx` with the variables a `:=` declares. `a := x` has the
 // children [a, x], `a, b := x, y` [a, x, b, y], and `a, b := f()` [a, f(), b].
 fn (f &V3File) declare(n &flat.Node, kids []flat.NodeId, ctx V3CallCtx) V3CallCtx {
@@ -2507,7 +2547,7 @@ fn (f &V3File) declare(n &flat.Node, kids []flat.NodeId, ctx V3CallCtx) V3CallCt
 	if kids.len == 2 * count {
 		for i := 0; i < kids.len; i += 2 {
 			names << f.node(kids[i]).value_text()
-			recipes << f.recipe(kids[i + 1], ctx)
+			recipes << f.bound_recipe(kids[i + 1], ctx)
 		}
 	} else if count > 1 && kids.len == count + 1 {
 		mut lhs := [kids[0]]
@@ -2789,6 +2829,30 @@ fn (f &V3File) type_arg(id flat.NodeId) ?string {
 const primitive_types = ['bool', 'string', 'rune', 'byte', 'voidptr', 'charptr', 'i8', 'i16',
 	'i32', 'i64', 'i128', 'u8', 'u16', 'u32', 'u64', 'u128', 'int', 'f32', 'f64', 'usize', 'isize']
 
+// implicit_veb_ctx is the recipe of the `ctx` that V declares for a veb route method, as its
+// checker does (insert_implicit_veb_ctx): a method that returns `veb.Result`, on a receiver other
+// than `Context`, with no `Context` parameter, has a `mut ctx Context` of its module's own
+// `Context`, which shadows a global `ctx`. '' for any other method. V also requires the module to
+// declare a `Context`, which one file can't see, and counts a parameter of a type that embeds
+// `veb.Context` as a context one, which this doesn't read; either way such a method has no `ctx`.
+// A type is read through the file's imports, so `w.Context` after `import veb as w` is veb's.
+fn (f &V3File) implicit_veb_ctx(n &flat.Node, recv_typ string, params []flat.NodeId) string {
+	ret := n.typ_text()
+	if ret != 'veb.Result' && f.type_text(ret) != 'veb.Result' {
+		return ''
+	}
+	if recv_typ.trim_left('&').all_after_last('.') == 'Context' {
+		return ''
+	}
+	for p in params[1..] {
+		typ := f.node(p).typ_text().trim_left('&').all_after('mut ').trim_space()
+		if typ in ['Context', 'veb.Context'] || f.type_text(typ) == 'veb.Context' {
+			return ''
+		}
+	}
+	return 't:' + f.type_text('Context')
+}
+
 // recipe says how to find the type of the expression `id` from what the file
 // states, as steps that resolve_edges follows through the whole graph (see
 // infer.v): a start, `t:<type>` for a type written here (in this file's
@@ -2904,6 +2968,11 @@ fn (f &V3File) recipe(id flat.NodeId, ctx V3CallCtx) string {
 			brs := kids.map(f.recipe(it, ctx))
 			if brs.len > 0 && brs.all(it != '' && it == brs[0]) {
 				return brs[0]
+			}
+			// results of one callee from two calls (`a := f()`, `b := f()`) agree too (unbound)
+			plain := brs.map(unbound(it))
+			if plain.len > 0 && plain.all(it != '' && it == plain[0]) {
+				return plain[0]
 			}
 			if brs.len == 2 && !default_term(f.build_cond(n)) {
 				return brs[1]
@@ -3585,8 +3654,10 @@ fn (mut f V3File) record_call(callee_id flat.NodeId, args []flat.NodeId, ctx V3C
 	}
 	// a call keeps its argument recipes, one site at a time, since a generic callee's type
 	// parameters come from every call site, a method's own (`encode[T](val T)`) as a free
-	// function's; a repeat call merges into the edge its first call made
-	site := f.type_arg_site(callee_id) + f.arg_site(args, ctx)
+	// function's; a repeat call merges into the edge its first call made. Each site starts with
+	// `at:` and the offset of its callee, so a bound result can find the site of its own call
+	site := 'at:${f.node(callee_id).pos.offset}' + arg_site_end + f.type_arg_site(callee_id) +
+		f.arg_site(args, ctx)
 	line := f.line_of(f.node(callee_id).pos.offset)
 	if key in seen {
 		add_call_site(mut edges, ctx.from, name, rt, recipe, guards, site, line, build)

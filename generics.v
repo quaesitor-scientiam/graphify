@@ -35,7 +35,9 @@ fn expand_type_param_calls(edges []Edge, sources []Edge, fields []Symbol, mut in
 	collect_call_sites(edges, funcs, mut inf, mut instances, mut flows)
 	collect_owner_instances(sources, fields, funcs, mut inf, mut instances, mut flows)
 	settle_flows(mut instances, flows)
-	if instances.len == 0 && !edges.any(it.is_method && has_field_any(it.recv_recipe)) {
+	// a call under a comptime check has a type with no instance at all (guarded_instances)
+	if instances.len == 0
+		&& !edges.any(it.guards != '' || (it.is_method && has_field_any(it.recv_recipe))) {
 		return edges
 	}
 	// the passes that look for new types only collect the calls they link; the expanded edges
@@ -101,7 +103,7 @@ fn collect_call_sites(edges []Edge, funcs map[string]Symbol, mut inf Infer, mut 
 		})
 		sites := e.arg_sites.split(arg_site_end)
 		for si, site in sites {
-			if si == sites.len - 1 || site == '' {
+			if si == sites.len - 1 || site == '' || site.starts_with('at:') {
 				continue
 			}
 			if site.starts_with('ta:') {
@@ -356,7 +358,7 @@ fn expand_edges(edges []Edge, instances map[string][]InferredType, funcs map[str
 			}
 			continue
 		}
-		insts := guarded_instances(instances[instance_key(caller, recv_text)] or { []InferredType{} }, e.guards, recv_text, mut inf)
+		insts := guarded_instances(instances[instance_key(caller, recv_text)] or { []InferredType{} }, e.guards, recv_text, e.file, mut inf)
 		if insts.len == 0 {
 			if keep {
 				out << e
@@ -365,7 +367,7 @@ fn expand_edges(edges []Edge, instances map[string][]InferredType, funcs map[str
 		}
 		mut ids := []string{}
 		for t in insts {
-			id := inf.method_on(t, e.to, e.file, 0) or { continue }
+			id := inf.method_on(t, e.to, instance_scope(t, e.file, inf), 0) or { continue }
 			if id !in ids {
 				ids << id
 			}
@@ -639,15 +641,29 @@ fn chained_call_ids(e Edge, caller Symbol, tps []string, instances map[string][]
 	tp := plain_param(prefix.text, prefix.mod, tps) or { return []string{} }
 	method := steps[steps.len - 1][2..]
 	mut ids := []string{}
-	for t in guarded_instances(instances[instance_key(caller, tp)] or { []InferredType{} }, e.guards, tp, mut inf) {
-		result_id := inf.method_on(t, method, e.file, 0) or { continue }
+	for t in guarded_instances(instances[instance_key(caller, tp)] or { []InferredType{} }, e.guards, tp, e.file, mut inf) {
+		result_id := inf.method_on(t, method, instance_scope(t, e.file, inf), 0) or { continue }
 		result := inf.returns(result_id) or { continue }
-		id := inf.method_on(result, e.to, e.file, 0) or { continue }
+		id := inf.method_on(result, e.to, instance_scope(result, e.file, inf), 0) or { continue }
 		if id !in ids {
 			ids << id
 		}
 	}
 	return ids
+}
+
+// instance_scope is the file a method of `t`, an instance of a type parameter or a type reached
+// from one, is looked up from for a call in `file`. A generic function in a non-test file that a
+// `_test.v` file instantiates is compiled with that test, so a type the test declares has the
+// methods the test file sees: `t` is read in the file that declares it, as path_method_ids reads
+// an instance. A call in a test file keeps its own file, since no test file sees another.
+fn instance_scope(t InferredType, file string, inf &Infer) string {
+	if is_test_file(file) {
+		return file
+	}
+	short := strip_generic_args(bare_type(t.text)).all_after_last('.')
+	declared := inf.declared_file(short, t.mod, t.file)
+	return if is_test_file(declared) { declared } else { file }
 }
 
 // path_method_ids are the methods a call reaches through a field, or a call, of a type
@@ -663,7 +679,7 @@ fn path_method_ids(e Edge, caller Symbol, tps []string, instances map[string][]I
 	tp := plain_param(steps[0][2..], '', tps) or { return []string{} }
 	rest := steps[1..].join(recipe_sep)
 	mut ids := []string{}
-	for t in guarded_instances(instances[instance_key(caller, tp)] or { []InferredType{} }, e.guards, tp, mut inf) {
+	for t in guarded_instances(instances[instance_key(caller, tp)] or { []InferredType{} }, e.guards, tp, e.file, mut inf) {
 		// the instance as its own module writes it: the qualified `vlib.veb.tests.Context` does not
 		// find its fields, the name in the instance's file does
 		mut name := t.text
@@ -677,7 +693,7 @@ fn path_method_ids(e Edge, caller Symbol, tps []string, instances map[string][]I
 			file:        inf.declared_file(strip_generic_args(name).all_after_last('.'), t.mod, t.file)
 			recv_recipe: 't:' + name + recipe_sep + rest
 		}, 0) or { continue }
-		id := inf.method_on(recv, e.to, e.file, 0) or { continue }
+		id := inf.method_on(recv, e.to, instance_scope(recv, e.file, inf), 0) or { continue }
 		if id !in ids {
 			ids << id
 		}
@@ -758,7 +774,7 @@ fn field_any_ids(e Edge, caller Symbol, tps []string, instances map[string][]Inf
 			return []string{}
 		}
 		owners = guarded_instances(instances[instance_key(caller, tp)] or { []InferredType{} },
-			e.guards, tp, mut inf)
+			e.guards, tp, e.file, mut inf)
 	} else {
 		if loop != '' && !inf.names_same_type(recv_type, loop, e.file) {
 			return []string{}
@@ -803,7 +819,7 @@ fn field_any_ids(e Edge, caller Symbol, tps []string, instances map[string][]Inf
 					recv_recipe: 't:' + own_name(ft) + recipe_sep + rest.join(recipe_sep)
 				}, 0) or { continue }
 			}
-			id := inf.method_on(recv, e.to, e.file, 0) or {
+			id := inf.method_on(recv, e.to, instance_scope(recv, e.file, inf), 0) or {
 				inf.platform_copy_method(recv, e.to, e.file) or { continue }
 			}
 			if id !in ids {
@@ -1080,8 +1096,14 @@ fn param_types(sig string) []string {
 // guarded_instances keeps the instances of the type parameter `tp` that the comptime
 // conditions of a call (`guards`, see V3CallCtx.guarded) let the call compile for. A
 // condition on another type parameter does not apply, and a test that type_is does not
-// decide keeps the instance.
-fn guarded_instances(insts []InferredType, guards string, tp string, mut inf Infer) []InferredType {
+// decide keeps the instance. When a positive condition names a type and no instance meets it,
+// the block still compiles for that type, as a function nothing in the tree instantiates with
+// it still says: `$if T.unaliased_typ is string` is `string`, read in `file`, and the kind `$map`
+// is builtin's `map`. This is what the walk does for `$if T is X`, which retypes a variable typed
+// T as X (backend_v.v, comptime_type_is) whatever the instances are; this covers the forms it
+// doesn't read, such as `T.unaliased_typ`. A bare name is read as the file's own module's, since
+// FileScope has no selective imports: `import m { Thing }` then `is Thing` stays unresolved.
+fn guarded_instances(insts []InferredType, guards string, tp string, file string, mut inf Infer) []InferredType {
 	if guards == '' {
 		return insts
 	}
@@ -1109,6 +1131,31 @@ fn guarded_instances(insts []InferredType, guards string, tp string, mut inf Inf
 			if holds == positive {
 				kept << t
 			}
+		}
+		named := if parts[2] == '$map' { 'map' } else { parts[2] }
+		if kept.len == 0 && positive && !named.starts_with('$') {
+			scope := inf.scope_of[file] or { FileScope{} }
+			mut stand := InferredType{
+				text: named
+				mod:  scope.mod
+				file: file
+			}
+			// a qualified name is the type its declaration names, as type_text reads `$if T is X`
+			// for the walk: `json.Any` after `import x.json2 as json` is json2's `Any` (its
+			// alias mapped to the import's path), as path_method_ids writes an instance
+			if named.contains('.') {
+				short := named.all_after_last('.')
+				written := named.all_before_last('.')
+				qual := scope.prefixes[written] or { written }
+				if decl := inf.find_type(short, qual, stand, file) {
+					stand = InferredType{
+						text: short
+						mod:  decl.mod
+						file: decl.file
+					}
+				}
+			}
+			kept << stand
 		}
 		out = kept.clone()
 	}

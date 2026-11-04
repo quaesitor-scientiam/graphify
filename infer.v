@@ -41,6 +41,10 @@ struct Infer {
 	alias_by_name map[string][]TypeCand
 mut:
 	memo map[string]InferredType
+	// call_args are the argument recipes of each call site of a generic function, by the caller,
+	// the caller's file, the callee name and the callee's offset (call_site_args, arg_result).
+	// resolve_edges sets them once comptime steps are settled, as they read those recipes
+	call_args map[string]string
 }
 
 // InferredType is a type as written in a declaration: `text` read in the
@@ -57,6 +61,11 @@ mut:
 
 // const_depth bounds following one const's recipe into another's.
 const const_depth = 4
+
+// arg_depth bounds following a generic call's argument into the call that made it (arg_result):
+// generated code can chain thousands of them, each adding to the stack, and an argument with no
+// type is followed once per parameter of T. Past it a result is what the callee declares.
+const arg_depth = 8
 
 // array_same_type are the array methods whose result has the receiver's type;
 // builtin declares most of them as returning plain `array`, or not at all.
@@ -496,7 +505,7 @@ fn (inf &Infer) follow_steps(e Edge, depth int) ?InferredType {
 			t = inf.fn_value_type(e, start) or { inf.named_fn_type(start[2..], e)? }
 		}
 	} else if start.starts_with('c:') {
-		t = inf.call_result(e, start[2..], steps) or {
+		t = inf.call_result(e, start[2..], steps, depth) or {
 			// a spawned call whose result isn't known is a thread of an unknown result
 			if 'th' !in steps {
 				return none
@@ -508,7 +517,8 @@ fn (inf &Infer) follow_steps(e Edge, depth int) ?InferredType {
 	}
 	rest := steps[1..]
 	for si, step in rest {
-		if step.starts_with('p:') || step.starts_with('mapto:') || step.starts_with('mapit:') {
+		if step.starts_with('p:') || step.starts_with('mapto:') || step.starts_with('mapit:')
+			|| step.starts_with('at:') {
 			continue
 		}
 		if step == 'th' {
@@ -684,7 +694,7 @@ fn (inf &Infer) follow_steps(e Edge, depth int) ?InferredType {
 
 // call_result is the return type of the call `to` made from e's file, its
 // generic arguments (the `p:` steps of `steps`) put in place of its parameters.
-fn (inf &Infer) call_result(e Edge, to string, steps []string) ?InferredType {
+fn (inf &Infer) call_result(e Edge, to string, steps []string, depth int) ?InferredType {
 	// V generates `T.from(x)` and `T.from_string(s)` for every enum T, and they return
 	// T (a result, which the recipe's `or` already drops), so the value is the enum; so
 	// does a `@[flag]` enum's `T.zero()`
@@ -740,6 +750,9 @@ fn (inf &Infer) call_result(e Edge, to string, steps []string) ?InferredType {
 		}
 		id = ids[0]
 	}
+	if bound := inf.arg_result(e, to, id, steps, t.text.trim_left('!?'), depth) {
+		return bound
+	}
 	// the type arguments of a generic call (`p:` steps) stand for the
 	// callee's type parameters, in order, in its return type
 	mut targs := []string{}
@@ -759,6 +772,87 @@ fn (inf &Infer) call_result(e Edge, to string, steps []string) ?InferredType {
 		}
 	}
 	return t
+}
+
+// arg_result is the type a generic call's result has when the result is a type parameter that
+// its arguments give: `rand.element(xs)` with `xs []Command` is a `Command`. The arguments are the
+// call's own (call_args, the site its `at:` step names), read in the scope of the call. Only a
+// result a declaration binds has that step (bound_recipe), right after the `c:` start, so these
+// aren't typed here: `id(x).run()`, `id(id(x))`, `if c { id(x) } else { id(x) }`, a call with
+// explicit type arguments, and a method's own type parameter. Neither is a result around a type
+// parameter, such as `[]T`, or a parameter of any other form, such as `fn () T`.
+fn (inf &Infer) arg_result(e Edge, to string, id string, steps []string, ret string, depth int) ?InferredType {
+	if depth >= arg_depth || steps.len < 2 || !steps[1].starts_with('at:')
+		|| ret !in (inf.generics_of[id] or { []string{} }) {
+		return none
+	}
+	args := inf.call_args[e.from + '\x00' + e.file + '\x00' + to + '\x00' + steps[1][3..]] or {
+		return none
+	}
+	ptypes := param_types(inf.sig_of[id] or { return none })
+	if ptypes.len == 0 {
+		return none
+	}
+	caller_params := inf.caller_tparams(e.from)
+	mut number := InferredType{}
+	for j, recipe in args.split('\x0b') {
+		// the arguments past the last parameter are all for its `...T`; a spread `...xs` has no
+		// recipe here
+		param := if j < ptypes.len { ptypes[j] } else { ptypes.last() }
+		one := param == ret || param == '...' + ret
+		if recipe == '' || (!one && param != '[]' + ret) {
+			continue
+		}
+		arg := inf.follow_steps(Edge{ from: e.from, file: e.file, recv_recipe: recipe }, depth + 1) or {
+			continue
+		}
+		// a call's result that stayed a type parameter is the callee's, even one the caller has a
+		// parameter of the same name as
+		if recipe.starts_with('c:') && arg.text.all_after_last(']') in caller_params {
+			continue
+		}
+		if one {
+			// an untyped number gives T only if nothing else does, a float before an int (V:
+			// `mix(0, b)` with `b u8` is a u8, `mix(1, 2.5)` an f64)
+			if recipe in ['t:int', 't:f64'] {
+				if number.text == '' || recipe == 't:f64' {
+					number = arg
+				}
+				continue
+			}
+			return arg
+		}
+		if arg.text.starts_with('[]') {
+			return InferredType{
+				text: arg.text[2..]
+				mod:  arg.mod
+				file: arg.file
+			}
+		}
+	}
+	if number.text == '' {
+		return none
+	}
+	return number
+}
+
+// call_site_args maps each call site of an edge's arg_sites to its argument recipes, by the
+// offset its `at:` site names. A site's `ta:` site, if it has one, comes between the two.
+fn call_site_args(arg_sites string) map[string]string {
+	mut out := map[string]string{}
+	mut at := ''
+	for site in arg_sites.split(arg_site_end) {
+		if site.starts_with('at:') {
+			at = site[3..]
+			continue
+		}
+		if at == '' || site.starts_with('ta:') {
+			continue
+		}
+		out[at] = site
+		at = ''
+	}
+	return out
 }
 
 // spawned_thread is the type of the thread a spawned call starts, given the
@@ -855,11 +949,12 @@ fn (inf &Infer) declared_file(short string, mod string, fallback string) string 
 }
 
 // comptime_sites is `sites` (arg_sites) with comptime_recipe applied to each argument's recipe.
-// A `ta:` site names explicit type arguments, which have no narrowed step
+// An `at:` site names a call's offset and a `ta:` site its explicit type arguments; neither has a
+// narrowed step
 fn (inf &Infer) comptime_sites(sites string, file string) string {
 	mut out := []string{}
 	for site in sites.split(arg_site_end) {
-		if site.starts_with('ta:') {
+		if site.starts_with('ta:') || site.starts_with('at:') {
 			out << site
 			continue
 		}
