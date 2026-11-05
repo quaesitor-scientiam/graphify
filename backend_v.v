@@ -1799,13 +1799,23 @@ struct TypeCheck {
 	typ  string
 }
 
-// narrowed_by is `ctx` with each variable in `checks` narrowed to its type.
+// narrowed_by is `ctx` with each variable in `checks` narrowed to its type. `x is v` on a
+// variable `v`, as in `$for v in T.variants`, is each variant in turn, which names no one type.
 fn (ctx V3CallCtx) narrowed_by(checks []TypeCheck) V3CallCtx {
 	mut out := ctx
 	for c in checks {
+		if ctx.is_variant_var(c.typ) {
+			continue
+		}
 		out = out.narrowed(c.name, 't:' + c.typ)
 	}
 	return out
+}
+
+// is_variant_var reports whether `name` is the variable of a `$for v in T.variants` loop, which a
+// type check names as `x is v`.
+fn (ctx V3CallCtx) is_variant_var(name string) bool {
+	return (ctx.vars[name] or { '' }) == 't:builtin.VariantData'
 }
 
 // narrowed is `ctx` with the variable `name` taken to have the type `recipe`
@@ -1839,6 +1849,41 @@ fn (ctx V3CallCtx) narrowed(name string, recipe string) V3CallCtx {
 		}
 	}
 	return out
+}
+
+// comptime_for_types are the builtin types of a `$for` loop's variable, by what it walks.
+const comptime_for_types = {
+	'params':     'FunctionParam'
+	'fields':     'FieldData'
+	'attributes': 'VAttribute'
+	'methods':    'FunctionData'
+	'values':     'EnumData'
+	'variants':   'VariantData'
+}
+
+// with_fallback is `ctx` with the type a method the variable `name`'s own type lacks is looked up
+// on (see fallback_receiver), which keeps the type it has.
+fn (ctx V3CallCtx) with_fallback(name string, recipe string) V3CallCtx {
+	mut fallbacks := ctx.fallbacks.clone()
+	fallbacks[name] = recipe
+	return V3CallCtx{
+		...ctx
+		fallbacks: fallbacks
+	}
+}
+
+// comptime_kind_var reads a `$if` condition that tests a variable for a kind of one builtin
+// type, `v is $map`, as the variable and that type. none for any other condition.
+fn comptime_kind_var(cond string) ?(string, string) {
+	parts := cond.trim_space().split(' ')
+	if parts.len != 3 || parts[1] != 'is' {
+		return none
+	}
+	return match parts[2] {
+		'$map' { parts[0], 'map' }
+		'$array' { parts[0], 'array' }
+		else { none }
+	}
 }
 
 // comptime_type_is reads a `$if` condition that tests one type, `T is Empty`,
@@ -2248,14 +2293,31 @@ fn (mut f V3File) walk(id flat.NodeId, ctx V3CallCtx, mut edges []Edge, mut seen
 			// only when T is Empty, so a variable typed T is an Empty in it; the
 			// other branches keep T
 			if kids.len >= 1 {
-				name, typ := comptime_type_is(n.value_text())
+				// `$if v is $map { v.clone() }`: a method the variable's type doesn't answer (a type
+				// parameter's, in `for v in m`) is builtin's for that kind. Its own type stays first:
+				// an alias of a map has its own methods, and a `[]Foo` its elements. A variable typed
+				// T keeps T alone, whose instances answer
+				if kid, kind_type := comptime_kind_var(n.value_text()) {
+					if kid in ctx.vars && !is_tparam_recipe(ctx.vars[kid], ctx.tparams) {
+						f.walk(kids[0], ctx.with_fallback(kid, 't:' + kind_type), mut edges, mut seen)
+						f.walk_list(kids[1..], ctx, mut edges, mut seen)
+						return ctx
+					}
+				}
+				mut name, typ := comptime_type_is(n.value_text())
+				// `$if x is v` on the variable of a variants loop is each variant in turn
+				if ctx.is_variant_var(typ) {
+					name = ''
+				}
 				if name != '' && name in ctx.tparams {
 					f.walk(kids[0], ctx.retyped(name, f.type_text(typ)), mut edges, mut seen)
 					f.walk_list(kids[1..], ctx.guarded('-', n.value_text()), mut edges, mut seen)
 					return ctx
 				}
 				// `$if data is bool` on a variable of type T: `data` is a bool in the block
-				if name != '' && name in ctx.vars && is_tparam_recipe(ctx.vars[name], ctx.tparams) {
+				// and `$if attr is Custom` on an attribute in `$for attr in T.attributes` is a Custom
+				if name != '' && name in ctx.vars && (is_tparam_recipe(ctx.vars[name], ctx.tparams)
+					|| ctx.vars[name] == 't:builtin.VAttribute') {
 					f.walk(kids[0], ctx.with_vars([name], ['ct:' + f.type_text(typ)]), mut edges, mut seen)
 					f.walk_list(kids[1..], ctx, mut edges, mut seen)
 					return ctx
@@ -2330,11 +2392,11 @@ fn (mut f V3File) walk(id flat.NodeId, ctx V3CallCtx, mut edges []Edge, mut seen
 			}
 		}
 		.comptime_for {
-			// `$for field in T.fields`: each field is a builtin FieldData, and each of
-			// `$for a in T.attributes` a VAttribute
+			// `$for field in T.fields`: each field is a builtin FieldData, and so on for the
+			// other kinds of loop (comptime_for_types)
 			parts := n.value_text().split('|')
-			if parts.len == 2 && parts[1] in ['fields', 'attributes'] {
-				typ := if parts[1] == 'fields' { 'FieldData' } else { 'VAttribute' }
+			if parts.len == 2 && parts[1] in comptime_for_types {
+				typ := comptime_for_types[parts[1]]
 				mut inner := ctx.with_vars([parts[0]], ['t:builtin.${typ}'])
 				if parts[1] == 'fields' {
 					// the type the loop walks the fields of (see field_any_step), and no
@@ -2350,6 +2412,25 @@ fn (mut f V3File) walk(id flat.NodeId, ctx V3CallCtx, mut edges []Edge, mut seen
 				f.walk_list(kids, inner, mut edges, mut seen)
 				return ctx
 			}
+		}
+		.select_branch {
+			// `value := <-ch { ... }`: the name and the receive are the branch's first
+			// children, and the body has the value
+			if n.value_text() == 'recv' && kids.len >= 2 {
+				f.walk(kids[1], ctx, mut edges, mut seen)
+				inner := ctx.with_vars([f.node(kids[0]).value_text()], [f.recipe(kids[1], ctx)])
+				f.walk_list(kids[2..], inner, mut edges, mut seen)
+				return ctx
+			}
+		}
+		.array_init {
+			// `[]T{len: n, init: index.str()}`: V's `index` is the element's index, in `init` only
+			for k in kids {
+				in_init := f.node(k).kind == .field_init && f.node(k).value_text() == 'init'
+				f.walk(k, if in_init { ctx.with_vars(['index'], ['t:int']) } else { ctx }, mut edges, mut
+					seen)
+			}
+			return ctx
 		}
 		.for_in_stmt {
 			if kids.len >= 3 {
@@ -2554,8 +2635,14 @@ fn (f &V3File) declare(n &flat.Node, kids []flat.NodeId, ctx V3CallCtx) V3CallCt
 		lhs << kids[2..]
 		// `a, b := if ... { x, y } else { ... }`: each name takes the type of its own value,
 		// not the first value's with `#i` after it, so a branch's `c` never types `b`
-		if f.node(kids[1]).kind in [.if_expr, .match_stmt] {
-			elems := f.tuple_recipes(kids[1], count, ctx)
+		// a lock's block can also end in one call with several results, `rlock s { s.pair() }`,
+		// which no value of its own types: that is the `#i` of the block's value, below
+		elems := if f.node(kids[1]).kind in [.if_expr, .match_stmt, .lock_expr] {
+			f.tuple_recipes(kids[1], count, ctx)
+		} else {
+			[]string{}
+		}
+		if elems.len > 0 && (f.node(kids[1]).kind != .lock_expr || elems.any(it != '')) {
 			for i, k in lhs {
 				names << f.node(k).value_text()
 				recipes << elems[i]
@@ -2913,8 +3000,15 @@ fn (f &V3File) recipe(id flat.NodeId, ctx V3CallCtx) string {
 				}
 			}
 		}
-		.in_expr, .is_expr {
-			// `x in xs` and `x is T` are bools
+		.fn_literal {
+			// `f := fn () T { ... }` holds a function with that result (the `R` step), as a
+			// parameter of function type does
+			if n.typ_text() != '' {
+				return 't:fn () ' + f.type_text(n.typ_text())
+			}
+		}
+		.in_expr, .is_expr, .select_stmt {
+			// `x in xs` and `x is T` are bools, and so is `select`: whether a branch ran
 			return 't:bool'
 		}
 		.typeof_expr {
@@ -2945,6 +3039,13 @@ fn (f &V3File) recipe(id flat.NodeId, ctx V3CallCtx) string {
 			if n.value_text() != '' {
 				return 't:' + f.type_text(n.value_text())
 			}
+			// `{ ...base, 'a': 1 }` has the type of the map it copies
+			if kids.len > 0 && f.node(kids[0]).kind == .prefix && f.node(kids[0]).value_text() == '...' {
+				inner := f.kids(kids[0])
+				if inner.len == 1 {
+					return f.recipe(inner[0], ctx)
+				}
+			}
 			// `{ 'name': 'Joe' }` with no type written: its keys and values
 			// are literals of one kind each
 			if t := literal_map_type(f, kids) {
@@ -2955,6 +3056,11 @@ fn (f &V3File) recipe(id flat.NodeId, ctx V3CallCtx) string {
 			// the same types
 			if r := map_entries_recipe(f, kids, ctx) {
 				return r
+			}
+			// entries that state no type, `{ key: 1 }`: it is still a map, builtin's, whose
+			// methods don't depend on the key and value types
+			if kids.len > 0 {
+				return 't:map'
 			}
 		}
 		.comptime_if {
@@ -3109,6 +3215,12 @@ fn (f &V3File) recipe(id flat.NodeId, ctx V3CallCtx) string {
 			if kids.len == 0 {
 				return ''
 			}
+			// `fn () string { ... }()`, which is also what the parser lowers `$tmpl(...)` to in
+			// an expression, has the literal's written result
+			if f.node(kids[0]).kind == .fn_literal {
+				ret := f.node(kids[0]).typ_text()
+				return if ret == '' { '' } else { 't:' + f.type_text(ret) }
+			}
 			name, is_method, target := f.callee(kids[0], ctx)
 			if name == '' {
 				return ''
@@ -3118,6 +3230,12 @@ fn (f &V3File) recipe(id flat.NodeId, ctx V3CallCtx) string {
 			if t := ctx.locals[name] {
 				if t.starts_with('fn') {
 					return 't:' + t + recipe_sep + 'R'
+				}
+			}
+			// and so does one of a variable holding a function literal (see fn_literal)
+			if v := ctx.vars[name] {
+				if v.starts_with('t:fn ') {
+					return v + recipe_sep + 'R'
 				}
 			}
 				mut rec := 'c:' + name
@@ -3166,6 +3284,10 @@ fn (f &V3File) recipe(id flat.NodeId, ctx V3CallCtx) string {
 				// `xs.map(it.trim_left(' '))`: the result of the method called on one element
 				if name == 'map' && kids.len == 2 && f.it_method(kids[1]) != '' {
 					rec += recipe_sep + 'mapit:' + f.it_method(kids[1])
+				}
+				// `xs.map(it.name.first)`: the array of that field of each element
+				if name == 'map' && kids.len == 2 && f.it_fields(kids[1]) != '' {
+					rec += recipe_sep + 'mapf:' + f.it_fields(kids[1])
 				}
 				return rec
 			}
@@ -3285,6 +3407,22 @@ fn (f &V3File) it_method(id flat.NodeId) string {
 	return f.node(ks[0]).value_text()
 }
 
+// it_fields is the fields `it.name.first` reads off `it`, `name.first`, or '' for any other
+// expression.
+fn (f &V3File) it_fields(id flat.NodeId) string {
+	n := f.node(id)
+	ks := f.kids(id)
+	if n.kind != .selector || ks.len != 1 || n.value_text() == '$' {
+		return ''
+	}
+	base := f.node(ks[0])
+	if base.kind == .ident {
+		return if base.value_text() == 'it' { n.value_text() } else { '' }
+	}
+	inner := f.it_fields(ks[0])
+	return if inner == '' { '' } else { inner + '.' + n.value_text() }
+}
+
 // match_pattern_type is the type a `match` branch's pattern names, which a subject
 // of a sum type takes in that branch: a type name, a primitive (`i64`), a module's
 // type (`toml.Doc`) or an array type (`[]int`). none for a value.
@@ -3293,7 +3431,9 @@ fn (f &V3File) match_pattern_type(pat flat.NodeId) ?string {
 	kids := f.kids(pat)
 	match n.kind {
 		.ident {
-			if n.value_text() in primitive_types || (n.value_text().len > 0 && n.value_text()[0].is_capital()) {
+			// the parser writes a `map[K]V` pattern as an ident with that text
+			if n.value_text() in primitive_types || (n.value_text().len > 0 && n.value_text()[0].is_capital())
+				|| n.value_text().starts_with('map[') {
 				return n.value_text()
 			}
 		}
@@ -3382,11 +3522,18 @@ fn map_entries_recipe(f &V3File, kids []flat.NodeId, ctx V3CallCtx) ?string {
 	if key == '' {
 		return none
 	}
+	// a nested literal that states no types says least, so another entry's type comes first
+	mut bare_map := false
 	for i := 1; i < kids.len; i += 2 {
 		r := f.recipe(kids[i], ctx)
-		if r != '' {
+		if r == 't:map' {
+			bare_map = true
+		} else if r != '' {
 			return r + recipe_sep + 'mapof:' + key
 		}
+	}
+	if bare_map {
+		return 't:map' + recipe_sep + 'mapof:' + key
 	}
 	for i := 1; i < kids.len; i += 2 {
 		if v := stated_literal_type(f, kids[i]) {

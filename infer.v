@@ -123,7 +123,9 @@ fn (mut inf Infer) infer_call(e Edge) ?CallResolution {
 	if e.is_method {
 		if t := inf.receiver(e) {
 			mut found := inf.method_on(t, e.to, e.file, 0) or { '' }
-			if found == '' {
+			// a method the narrowed type lacks is the declared type's, but for `str()`: V writes
+			// that for the narrowed type, even when the sum type declares its own
+			if found == '' && e.to != 'str' {
 				if alt := inf.fallback_receiver(e) {
 					found = inf.method_on(alt, e.to, e.file, 0) or { '' }
 				}
@@ -306,7 +308,7 @@ fn (inf &Infer) no_method(t InferredType, name string, file string) ?string {
 	}
 	// `str()` on a primitive the builtin doesn't declare one for (`u128`), or on a
 	// thread, which V writes as `thread(int)`
-	if name == 'str' && (text in primitive_types || is_thread_type(text)) {
+	if name == 'str' && (text in primitive_types || is_thread_type(text) || text.starts_with('chan ')) {
 		return ''
 	}
 	if text.starts_with('[') && (name in array_builtins || name == 'str') {
@@ -319,7 +321,7 @@ fn (inf &Infer) no_method(t InferredType, name string, file string) ?string {
 		named := strip_generic_args(text)
 		short := named.all_after_last('.')
 		qual := if named.contains('.') { named.all_before_last('.') } else { '' }
-		if decl := inf.find_type(short, qual, t, file) {
+		if decl := inf.named_decl(short, qual, t, file) {
 			// V writes `str()` for any type that doesn't, the methods of a
 			// `@[flag]` enum, and `type_name()` of a sum type or interface
 			if name == 'str' || (decl.id in inf.enum_ids && name in flag_enum_methods)
@@ -348,16 +350,19 @@ fn (inf &Infer) no_method(t InferredType, name string, file string) ?string {
 	}
 	ftext := bare_type(ft.text)
 	// a field whose type is a named function type, `cb Callback`
-	if is_named_type(ftext) {
+	if is_named_type(ftext) && ftext !in primitive_types && ftext != 'char' {
 		named := strip_generic_args(ftext)
 		qual := if named.contains('.') { named.all_before_last('.') } else { '' }
 		decl := inf.find_type(named.all_after_last('.'), qual, ft, file)?
-		target := inf.alias_of[decl.id] or { return none }
-		if target.starts_with('fn ') || target.starts_with('fn(') {
-			return ft.field_id
+		if target := inf.alias_of[decl.id] {
+			if target.starts_with('fn ') || target.starts_with('fn(') {
+				return ft.field_id
+			}
 		}
 	}
-	return none
+	// a field named `str` that holds no function, `str string`, is no call: V still writes the
+	// method, and `x.str()` calls that
+	return if name == 'str' { '' } else { none }
 }
 
 // holds_fns reports whether a value of type `t` is a function or holds functions in
@@ -518,7 +523,7 @@ fn (inf &Infer) follow_steps(e Edge, depth int) ?InferredType {
 	rest := steps[1..]
 	for si, step in rest {
 		if step.starts_with('p:') || step.starts_with('mapto:') || step.starts_with('mapit:')
-			|| step.starts_with('at:') {
+			|| step.starts_with('mapf:') || step.starts_with('at:') {
 			continue
 		}
 		if step == 'th' {
@@ -560,6 +565,19 @@ fn (inf &Infer) follow_steps(e Edge, depth int) ?InferredType {
 				}
 				continue
 			}
+			// `xs.map(it.name)`: the array of that field of each element. A field that can't be
+			// read (an element typed T) leaves an array of an element not known, as below
+			if name == 'map' && t.text.starts_with('[') && si + 1 < rest.len
+				&& rest[si + 1].starts_with('mapf:') {
+				if field := inf.fields_of_elem(t, rest[si + 1][5..], e.file) {
+					t = InferredType{
+						text: '[]' + field.text
+						mod:  field.mod
+						file: field.file
+					}
+					continue
+				}
+			}
 			if name == 'map' && t.text.starts_with('[') && si + 1 < rest.len
 				&& rest[si + 1].starts_with('mapto:') {
 				t.text = '[]' + rest[si + 1][6..]
@@ -578,6 +596,12 @@ fn (inf &Infer) follow_steps(e Edge, depth int) ?InferredType {
 			if t.text.starts_with('map[') && name in ['keys', 'values'] {
 				k, v := map_parts(t.text)?
 				t.text = '[]' + if name == 'keys' { k } else { v }
+				continue
+			}
+			// builtin's map, from a literal whose entries state no type: an array of an element
+			// not known, not the untyped `array` builtin declares, whose first() is a voidptr
+			if t.text == 'map' && name in ['keys', 'values'] {
+				t.text = '[]'
 				continue
 			}
 			if found := inf.method_on(t, name, e.file, 0) {
@@ -671,6 +695,9 @@ fn (inf &Infer) follow_steps(e Edge, depth int) ?InferredType {
 			if t.text.starts_with('map[') {
 				k, _ := map_parts(t.text)?
 				t.text = k
+			} else if t.text == 'map' {
+				// builtin's map, for a literal whose entries state no type: its key has no type here
+				return none
 			} else {
 				t.text = 'int'
 			}
@@ -690,6 +717,20 @@ fn (inf &Infer) follow_steps(e Edge, depth int) ?InferredType {
 		return none
 	}
 	return t
+}
+
+// fields_of_elem is the type of the fields `path` (`name.first`) read off one element of the
+// array `t`, or none when one can't be read.
+fn (inf &Infer) fields_of_elem(t InferredType, path string, file string) ?InferredType {
+	mut cur := InferredType{
+		text: elem_type(t.text)?
+		mod:  t.mod
+		file: t.file
+	}
+	for name in path.split('.') {
+		cur = inf.field_of(cur, name, file, 0)?
+	}
+	return cur
 }
 
 // call_result is the return type of the call `to` made from e's file, its
@@ -1187,15 +1228,24 @@ fn is_name_byte(c u8) bool {
 
 // returns is the return type of the function or method with id `id`, in the
 // scope it is declared in.
-// fn_return is the return type of a function type written as text, `fn () Doc`,
-// or none when it returns nothing.
+// fn_return is the return type of a function type written as text, `fn () Doc`, what follows its
+// parameter list, which can itself be a function, `fn () fn () Doc`, or several, `fn () (int, Doc)`.
+// none when it returns nothing.
 fn fn_return(t string) ?string {
-	close := t.last_index(')') or { return none }
-	ret := t[close + 1..].trim_space()
-	if ret == '' {
-		return none
+	open := t.index('(') or { return none }
+	mut depth := 0
+	for i in open .. t.len {
+		if t[i] == `(` {
+			depth++
+		} else if t[i] == `)` {
+			depth--
+			if depth == 0 {
+				ret := t[i + 1..].trim_space()
+				return if ret == '' { none } else { ret }
+			}
+		}
 	}
-	return ret
+	return none
 }
 
 // caller_tparams are the type parameters the declaration `id` can name: a generic function's,
@@ -1558,12 +1608,7 @@ fn (inf &Infer) field_of(t InferredType, name string, file string, depth int) ?I
 	if is_generic_param(short) {
 		return none
 	}
-	mut decl := TypeCand{}
-	if qual == 'C' {
-		decl = inf.c_struct(short, t)?
-	} else {
-		decl = inf.find_type(short, qual, t, file)?
-	}
+	decl := inf.named_decl(short, qual, t, file)?
 	key := '${decl.id}\x00${name}'
 	if ft := inf.field_type[key] {
 		// `s.items` of a `Stack[int]` is `[]int`, where the field is `[]T`
@@ -1611,6 +1656,19 @@ fn (inf &Infer) field_of(t InferredType, name string, file string, depth int) ?I
 		}
 	}
 	return if found.len == 1 { found[0] } else { none }
+}
+
+// named_decl is the declaration a type name written with the qualifier `qual` names: a C or
+// JS type is one the host declares, and any other is read through imports (find_type).
+fn (inf &Infer) named_decl(short string, qual string, t InferredType, file string) ?TypeCand {
+	if qual == 'C' {
+		return inf.c_struct(short, t)
+	}
+	if qual == 'JS' {
+		cs := (inf.by_type_name[short] or { return none }).filter(it.declares_host('JS'))
+		return nearest_type(cs.filter(it.file == t.file), cs.filter(it.mod == t.mod), cs)
+	}
+	return inf.find_type(short, qual, t, file)
 }
 
 // c_struct is the C struct `C.name` names, as seen from t's file. V's C types are

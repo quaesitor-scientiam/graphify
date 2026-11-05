@@ -32,7 +32,9 @@ fn expand_type_param_calls(edges []Edge, sources []Edge, fields []Symbol, mut in
 	// the types each type parameter stands for, by instance_key
 	mut instances := map[string][]InferredType{}
 	mut flows := []Flow{}
-	collect_call_sites(edges, funcs, mut inf, mut instances, mut flows)
+	// the type parameters a call site gives a type this can't read (collect_call_sites)
+	mut opaque := map[string]bool{}
+	collect_call_sites(edges, funcs, mut inf, mut instances, mut flows, mut opaque)
 	collect_owner_instances(sources, fields, funcs, mut inf, mut instances, mut flows)
 	settle_flows(mut instances, flows)
 	// a call under a comptime check has a type with no instance at all (guarded_instances)
@@ -45,23 +47,25 @@ fn expand_type_param_calls(edges []Edge, sources []Edge, fields []Symbol, mut in
 	// takes a type from a linked call (passes_own_params), so without one no pass is needed
 	mut reached := []Edge{}
 	if funcs.values().any(it.kind == .method && it.tparams != '') {
-		_, reached = expand_edges(edges, instances, funcs, mut inf, unaddressable, variants_of,
-			false)
+		_, reached = expand_edges(edges, instances, opaque, funcs, mut inf, unaddressable,
+			variants_of, false)
 	}
 	for _ in 0 .. 4 {
 		// the calls just linked give types to the methods they reach; when they give a new
 		// one, the expansion is done again from the start, so a call it already linked, or
 		// resolved by name for want of an instance, is linked with every type known now
 		before := instance_count(instances)
-		collect_call_sites(reached, funcs, mut inf, mut instances, mut flows)
+		collect_call_sites(reached, funcs, mut inf, mut instances, mut flows, mut opaque)
 		settle_flows(mut instances, flows)
 		if instance_count(instances) == before {
 			break
 		}
-		_, reached = expand_edges(edges, instances, funcs, mut inf, unaddressable, variants_of,
-			false)
+		_, reached = expand_edges(edges, instances, opaque, funcs, mut inf, unaddressable,
+			variants_of, false)
 	}
-	out, _ := expand_edges(edges, instances, funcs, mut inf, unaddressable, variants_of, true)
+	settle_opaque(mut opaque, flows)
+	out, _ := expand_edges(edges, instances, opaque, funcs, mut inf, unaddressable, variants_of,
+		true)
 	return out
 }
 
@@ -77,8 +81,10 @@ fn instance_count(instances map[string][]InferredType) int {
 
 // collect_call_sites records the types a generic function's type parameters, or a method's
 // own, are given at the call sites `edges` record, from their argument recipes: an instance
-// of the parameter, or a flow from the caller's parameter it passes on.
-fn collect_call_sites(edges []Edge, funcs map[string]Symbol, mut inf Infer, mut instances map[string][]InferredType, mut flows []Flow) {
+// of the parameter, or a flow from the caller's parameter it passes on. A call site that gives a
+// parameter neither (an argument with no known type, a parameter such as `map[K]V`) marks it
+// `opaque`: its instances are then not all known.
+fn collect_call_sites(edges []Edge, funcs map[string]Symbol, mut inf Infer, mut instances map[string][]InferredType, mut flows []Flow, mut opaque map[string]bool) {
 	for e in edges {
 		if e.kind != .calls || e.arg_sites == '' {
 			continue
@@ -102,8 +108,23 @@ fn collect_call_sites(edges []Edge, funcs map[string]Symbol, mut inf Infer, mut 
 			callee.signature
 		})
 		sites := e.arg_sites.split(arg_site_end)
+		// the parameters the call site being read has given a type, and whether one was begun
+		mut given := []string{}
+		mut in_site := false
 		for si, site in sites {
-			if si == sites.len - 1 || site == '' || site.starts_with('at:') {
+			if site.starts_with('at:') || si == sites.len - 1 {
+				if in_site {
+					for tp in tps {
+						if tp !in given {
+							opaque[callee.id + '\x00' + tp] = true
+						}
+					}
+				}
+				given = []string{}
+				in_site = site.starts_with('at:')
+				continue
+			}
+			if site == '' {
 				continue
 			}
 			if site.starts_with('ta:') {
@@ -120,6 +141,7 @@ fn collect_call_sites(edges []Edge, funcs map[string]Symbol, mut inf Infer, mut 
 							dst: dst
 							src: instance_key(caller, passed)
 						}
+						given << tps[j]
 						continue
 					}
 					if is_type_param_text(name) {
@@ -130,6 +152,7 @@ fn collect_call_sites(edges []Edge, funcs map[string]Symbol, mut inf Infer, mut 
 						mod:  mod
 						file: e.file
 					})
+					given << tps[j]
 				}
 				continue
 			}
@@ -169,6 +192,7 @@ fn collect_call_sites(edges []Edge, funcs map[string]Symbol, mut inf Infer, mut 
 							dst: dst
 							src: instance_key(caller, passed)
 						}
+						given << tp
 						continue
 					}
 					if is_type_param_text(text) {
@@ -179,6 +203,7 @@ fn collect_call_sites(edges []Edge, funcs map[string]Symbol, mut inf Infer, mut 
 						mod:  t.mod
 						file: t.file
 					})
+					given << tp
 				}
 			}
 		}
@@ -235,13 +260,30 @@ fn settle_flows(mut instances map[string][]InferredType, flows []Flow) {
 	}
 }
 
+// settle_opaque marks a type parameter opaque when one it is passed from is: its types are the
+// other's, not all known.
+fn settle_opaque(mut opaque map[string]bool, flows []Flow) {
+	for _ in 0 .. 16 {
+		mut changed := false
+		for fl in flows {
+			if opaque[fl.src] && !opaque[fl.dst] {
+				opaque[fl.dst] = true
+				changed = true
+			}
+		}
+		if !changed {
+			break
+		}
+	}
+}
+
 // expand_edges is one pass of expand_type_param_calls over `edges`: each call on a type
 // parameter that `instances` lets it link is replaced by the methods it reaches, each
 // keeping the call's argument recipes. It also returns those new edges that pass arguments
 // to a method with type parameters of its own (passes_own_params), whose types a next pass
 // collects. Unless `keep`, it returns only those: the expanded edges, a copy of all of
 // `edges`, are built once, by the last pass.
-fn expand_edges(edges []Edge, instances map[string][]InferredType, funcs map[string]Symbol, mut inf Infer, unaddressable map[string]bool, variants_of map[string][]string, keep bool) ([]Edge, []Edge) {
+fn expand_edges(edges []Edge, instances map[string][]InferredType, opaque map[string]bool, funcs map[string]Symbol, mut inf Infer, unaddressable map[string]bool, variants_of map[string][]string, keep bool) ([]Edge, []Edge) {
 	mut out := []Edge{cap: if keep { edges.len } else { 0 }}
 	// the linked calls that pass arguments to a method with type parameters of its own
 	mut reached := []Edge{}
@@ -374,7 +416,14 @@ fn expand_edges(edges []Edge, instances map[string][]InferredType, funcs map[str
 		}
 		if ids.len == 0 {
 			if keep {
-				out << e
+				out << if !opaque[instance_key(caller, recv_text)] && written_for_all(e, insts, inf) {
+					Edge{
+						...e
+						provenance: .undeclared
+					}
+				} else {
+					e
+				}
 			}
 			continue
 		}
@@ -402,6 +451,19 @@ fn expand_edges(edges []Edge, instances map[string][]InferredType, funcs map[str
 		merge_call_edges(mut out, field_edges)
 	}
 	return out, reached
+}
+
+// written_for_all reports whether the call `e` on a type parameter is one V writes for each of its
+// known instances, `insts`, none of which declares it, as no_method decides for a receiver of that
+// type: `str()`, or `type_name()` and `type_idx()` on a sum type or interface, say. An instance
+// with no declaration in the tree isn't one V's rule can be read for.
+fn written_for_all(e Edge, insts []InferredType, inf &Infer) bool {
+	for t in insts {
+		if (inf.no_method(t, e.to, instance_scope(t, e.file, inf)) or { return false }) != '' {
+			return false
+		}
+	}
+	return true
 }
 
 // passes_own_params reports whether the call `e`, linked to `id`, passes arguments to a
@@ -700,6 +762,8 @@ fn path_method_ids(e Edge, caller Symbol, tps []string, instances map[string][]I
 	}
 	return ids
 }
+
+
 
 // has_field_any reports whether a receiver recipe has the `fa:` step of a call on any
 // field of a type (see field_any_step).
