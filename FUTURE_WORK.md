@@ -665,6 +665,57 @@ typed, on master too, and a test now holds that. A field of a match branch with 
 (`OptionType, ResultType { typ.base_type }`), listed here before, has no unresolved edge on
 this tree, on master either.
 
+**What V provides, and more receivers typed (November 2026).** The commonest names left were
+`str`, `contains`, `keys`, `type_name` and `clone`, nearly all on a receiver the graph could
+not type or a method V writes:
+
+- A map literal whose entries state no type (`{ key: 1 }`, `{ Enum.a.str(): 'x' }`) is builtin's
+  `map`, with no key or value type to give a loop, and its `keys()` an array of an element not
+  known. `{ ...base }` has the type of `base`, and a nested literal like that gives way to a later
+  entry that states a type. A `match` branch on `map[K]V` narrows to it, as one on `[]T` did.
+- `value := <-ch` in a `select` has the channel's element type, and `select` as a value is a bool.
+- `$for method in T.methods` is a `FunctionData`, `.params` a `FunctionParam`, `.values` an
+  `EnumData` and `.variants` a `VariantData`, as `.fields` and `.attributes` were
+  (`comptime_for_types`). `$if attr is Custom` in an attribute loop makes `attr` a Custom. `x is v`
+  and `$if x is v` on a variants loop's variable narrow nothing.
+- `$if v is $map` or `$array` is a fallback (`comptime_kind_var`): a method the variable's own type
+  doesn't answer is builtin's for that kind, as `v.clone()` is in maps.v's `merge`. A type it has
+  stays first, so an alias of a map has its own methods and a `[]Foo` its elements. A variable
+  typed `T` has no fallback, since its instances answer. A value of an element typed `T`
+  (`for _, v in m`) whose instance is an alias with its own method of that name takes builtin's.
+- `xs.map(it.name.first)` on an array is an array of that field (`mapf:`, `it_fields`), or of an
+  element not known when the field can't be read. A method named `map` on another type keeps its
+  declared result.
+- A call of a function literal has its written result: `f := fn () T { ... }` then `f()`, and
+  `$tmpl(...).x()`, which the parser lowers to such a call. `fn_return` reads what follows the
+  parameter list, so `fn () fn () T` returns a function and `fn () (int, T)` two values.
+- `a, b := rlock s { x, y }` gives each name its own value, and `rlock s { s.pair() }` its result's.
+  `index` in an array's `init:` is an int, whatever variable has that name, and only there.
+- `str()` is V's on a channel and on a type with a data field named `str`, and also on a C struct.
+- A method on a type parameter that no known instance declares is undeclared when V writes it for
+  every instance, as `no_method` reads each (`written_for_all`), and no call site gave the
+  parameter a type this can't read (`opaque`, `collect_call_sites`): `id(x)` as an argument, or a
+  parameter such as `map[K]V`, leaves it unresolved, since the type may declare one. A function
+  with no known instance stays unresolved too. Only call sites of a generic function or a method's
+  own parameter are tracked as opaque: a generic struct's parameter is taken from its known
+  instances alone, and a function value (`h := g[Foo]`) is no call site.
+
+Compiled programs settle the rule for a narrowed value: `x.str()` on a sum type that declares
+`str` calls the variant's own or the one V writes, and never the sum type's, while any other
+method falls back to it. So `str` no longer takes that fallback (`infer_call`).
+
+On vlang `f7e5a403ff`: unresolved calls 141 to 87, with none newly unresolved. Three edges to a
+declared `str` went, each one wrong: `index.str()` in an `init:` was `Answer.str` and is
+`int.str`, and two calls of `str` on a variant are V's (`Any.str` on a map, in json2's tests,
+and `Arr.str` on `[]int`, which the test's own output `[0, 0]` shows).
+
+Still unresolved under those names, 15 sites of `str` and 2 of `type_name`, none of `contains`,
+`keys` or `clone`: on a type parameter whose instances aren't all known, `...T` and `$if T is $int`
+branches among them; on `x.$method()`'s result, which has no type here; on a field loop's
+`x.$(f.name)`, whose field may be of a type this can't read; on a generic result used directly
+(`id(x).str()`), or of a parameter around one (`pop(mut t Queue[T]) T`); and in a lambda, whose
+untyped parameters aren't read.
+
 The raw edge is retained and `explain` reports ambiguous callers rather than
 inventing links. A future opt-in deep mode could run the checker over a whole
 project, but given the small remainder, it would need to address these

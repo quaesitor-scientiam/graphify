@@ -14483,3 +14483,1123 @@ pub fn run(names []Command, nums []Num) {
 	calls := g.edges.filter(it.kind == .calls && it.from == 'lib.app.run').map(it.to)
 	assert 'lib.app.Command.show' !in calls, calls.str()
 }
+
+// the builtin declarations the tests of what V provides on a receiver reach
+const provided_builtin = 'module builtin
+
+pub struct array {}
+
+pub fn (a &array) clone() array {
+	return a
+}
+
+pub fn (a &array) map(x voidptr) array {
+	return a
+}
+
+pub struct map {}
+
+pub fn (m &map) keys() array {
+	return array{}
+}
+
+pub fn (m &map) clone() map {
+	return m
+}
+
+pub fn (s string) contains(x string) bool {
+	return true
+}
+
+pub fn (s string) trim_space() string {
+	return s
+}
+
+pub struct FunctionData {
+pub:
+	name  string
+	attrs []string
+}
+
+pub struct VariantData {
+pub:
+	typ int
+}
+
+pub struct EnumData {
+pub:
+	name string
+}
+
+pub struct FunctionParam {
+pub:
+	name string
+}
+
+pub struct VAttribute {
+pub:
+	name string
+}
+
+pub struct FieldData {
+pub:
+	name string
+}
+'
+
+// provided_calls are the calls of `name` out of the function `from`, by what they reach: a
+// bare name that stays unresolved, or a symbol's id
+fn provided_calls(g Graph, from string, name string) []string {
+	return g.edges.filter(it.kind == .calls && it.from == 'lib.app.' + from
+		&& it.to.all_after_last('.') == name).map('${it.to}:${it.provenance}')
+}
+
+fn test_a_map_literal_without_stated_types_has_the_methods_of_a_map() {
+	g := graph_of({
+		'vlib/builtin/builtin.v': provided_builtin
+		'lib/app/app.v':          "module app
+
+// a decoy: a call that names no type must not reach it
+pub struct Other {}
+
+pub fn (o Other) keys() {}
+
+pub fn (o Other) clone() {}
+
+pub fn by_variable_key(k int) {
+	m := {
+		k: 1
+	}
+	m.keys()
+	m.clone()
+}
+
+pub fn by_call_key() {
+	m := {
+		'a'.trim_space(): 1
+	}
+	m.keys()
+}
+
+pub fn spread(base map[string]int) {
+	m := {
+		...base
+	}
+	n := {
+		...m
+		'b': 2
+	}
+	n.keys()
+}
+
+pub struct Item {}
+
+pub fn (i Item) ping() {}
+
+pub fn (o Other) ping() {}
+
+// a spread keeps the value type of the map it copies, which no bare map has
+pub fn spread_value(base map[string]Item) {
+	m := {
+		...base
+	}
+	m['a'].ping()
+}
+"
+	})
+	assert provided_calls(g, 'spread_value', 'ping') == ['lib.app.Item.ping:inferred']
+	for from, want in {
+		'by_variable_key': ['vlib.builtin.map.keys:inferred']
+		'by_call_key':     ['vlib.builtin.map.keys:inferred']
+		'spread':          ['vlib.builtin.map.keys:inferred']
+	} {
+		assert provided_calls(g, from, 'keys') == want, from
+	}
+	assert provided_calls(g, 'by_variable_key', 'clone') == ['vlib.builtin.map.clone:inferred']
+}
+
+fn test_a_match_branch_on_a_map_type_has_the_methods_of_a_map() {
+	g := graph_of({
+		'vlib/builtin/builtin.v': provided_builtin
+		'lib/app/app.v':          'module app
+
+pub struct Other {}
+
+pub fn (o Other) keys() {}
+
+pub type Table = int | map[string]int
+
+pub type Value = int | map[string]Value
+
+pub fn smartcast(t Table) {
+	match t {
+		map[string]int { t.keys() }
+		else {}
+	}
+}
+
+pub struct Variant {}
+
+pub type Sum = Variant | int | map[string]Sum
+
+pub fn (s Sum) str() string {
+	return ""
+}
+
+pub fn (s Sum) only_sum() {}
+
+pub fn (o Other) only_sum() {}
+
+pub fn (o Other) str() string {
+	return ""
+}
+
+pub fn variant_str(s Sum) {
+	if s is Variant {
+		s.str()
+		s.only_sum()
+	}
+}
+
+// on a sum type that declares str(), the map in a branch has the str() V writes for a map, and the
+// `else` keeps the sum type (as the output of such a program shows)
+pub fn sum_str(s Sum) {
+	match s {
+		map[string]Sum { s.str() }
+		else {}
+	}
+}
+
+pub fn sum_else(s Sum) {
+	match s {
+		map[string]Sum {}
+		else { s.str() }
+	}
+}
+
+// a value read out of the narrowed map has the map value type, a sum type, which has the
+// type_name() V writes
+pub fn elements(t Value) {
+	match t {
+		map[string]Value {
+			for _, v in t {
+				match v {
+					int {}
+					else { v.type_name() }
+				}
+			}
+		}
+		else {}
+	}
+}
+'
+	})
+	assert provided_calls(g, 'smartcast', 'keys') == ['vlib.builtin.map.keys:inferred']
+	assert provided_calls(g, 'elements', 'type_name') == ['type_name:undeclared']
+	assert provided_calls(g, 'sum_str', 'str') == ['str:undeclared']
+	assert provided_calls(g, 'variant_str', 'str') == ['str:undeclared']
+	assert provided_calls(g, 'variant_str', 'only_sum') == ['lib.app.Sum.only_sum:inferred']
+	assert provided_calls(g, 'sum_else', 'str') == ['lib.app.Sum.str:extracted']
+}
+
+fn test_a_select_receive_variable_has_the_type_of_the_channel_element() {
+	g := graph_of({
+		'vlib/builtin/builtin.v': provided_builtin
+		'lib/app/app.v':          'module app
+
+pub struct Other {}
+
+pub fn (o Other) clone() {}
+
+pub fn (o Other) str() string {
+	return ""
+}
+
+pub fn receive(ch chan []string) {
+	select {
+		value := <-ch {
+			value.clone()
+		}
+	}
+}
+
+// the branch that sends has no such variable, and `value` after the select is the outer one
+pub fn outer(ch chan []string, value Other) {
+	select {
+		got := <-ch {
+			got.clone()
+		}
+	}
+	value.clone()
+}
+
+pub fn select_is_a_bool(ch chan int) {
+	ok := select {
+		_ := <-ch {}
+	}
+	ok.str()
+}
+
+pub fn channel_str() {
+	ch := chan int{cap: 1}
+	ch.str()
+}
+'
+	})
+	assert provided_calls(g, 'receive', 'clone') == ['vlib.builtin.array.clone:inferred']
+	assert provided_calls(g, 'outer', 'clone').sorted() == ['lib.app.Other.clone:extracted',
+		'vlib.builtin.array.clone:inferred'].sorted()
+	assert provided_calls(g, 'channel_str', 'str') == ['str:undeclared']
+	assert provided_calls(g, 'select_is_a_bool', 'str') == ['str:undeclared']
+}
+
+fn test_a_comptime_loop_variable_has_the_builtin_type_of_what_it_walks() {
+	g := graph_of({
+		'vlib/builtin/builtin.v': provided_builtin
+		'lib/app/app.v':          "module app
+
+pub struct Other {}
+
+pub fn (o Other) contains(x string) bool {
+	return false
+}
+
+pub struct Routes {}
+
+pub struct Custom {
+pub:
+	flag string
+}
+
+pub fn methods() {
+	\$for method in Routes.methods {
+		method.attrs.contains('x')
+		method.attrs[0].contains('y')
+		method.name.contains('z')
+	}
+}
+
+pub enum Colour {
+	red
+}
+
+pub fn values() {
+	\$for v in Colour.values {
+		v.name.contains('x')
+	}
+}
+
+pub fn params() {
+	\$for m in Routes.methods {
+		\$for p in m.params {
+			p.name.contains('x')
+		}
+	}
+}
+
+pub fn attributes() {
+	\$for attr in Routes.attributes {
+		\$if attr is Custom {
+			attr.flag.contains('x')
+		}
+	}
+}
+"
+	})
+	calls := provided_calls(g, 'methods', 'contains')
+	// method.attrs.contains is V's on an array, the two others string's
+	assert calls.sorted() == ['contains:undeclared', 'vlib.builtin.string.contains:inferred'].sorted(), calls.str()
+	assert provided_calls(g, 'attributes', 'contains') == ['vlib.builtin.string.contains:inferred']
+	assert provided_calls(g, 'values', 'contains') == ['vlib.builtin.string.contains:inferred']
+	assert provided_calls(g, 'params', 'contains') == ['vlib.builtin.string.contains:inferred']
+}
+
+fn test_a_map_of_a_field_is_an_array_of_the_field() {
+	g := graph_of({
+		'vlib/builtin/builtin.v': provided_builtin
+		'lib/app/app.v':          "module app
+
+pub struct Other {}
+
+pub fn (o Other) contains(x string) bool {
+	return false
+}
+
+pub struct Diag {
+pub:
+	message string
+	inner   Other
+}
+
+pub fn diags() []Diag {
+	return []
+}
+
+pub fn messages() {
+	m := diags().map(it.message)
+	m.any(it.contains('x'))
+}
+
+pub fn deep() {
+	m := diags().map(it.inner)
+	m[0].contains('x')
+}
+
+// a field of the element's field
+pub struct Outer {
+pub:
+	diag Diag
+}
+
+pub fn path(xs []Outer) {
+	m := xs.map(it.diag.inner)
+	m[0].contains('x')
+}
+
+// the first field alone would be a Diag, which has one of its own
+pub fn (d Diag) contains(x string) bool {
+	return false
+}
+
+// a selector on anything but `it` says nothing of the elements: `h.message` is no field of a Diag
+pub struct Holder {
+pub:
+	message Other
+}
+
+pub fn other_root(h Holder) {
+	m := diags().map(h.message)
+	m[0].contains('x')
+}
+
+// a method named map on a type of the program is no array's: its declared result stands
+pub struct Stream {}
+
+pub fn (s Stream) map(n string) Stream {
+	return s
+}
+
+pub fn (s Stream) run() {}
+
+pub fn (o Other) run() {}
+
+pub fn user_map(s Stream, c Diag) {
+	s.map(c.message).run()
+}
+
+pub fn user_map_it(s Stream, it Diag) {
+	s.map(it.message).run()
+}
+
+// an element typed T has no field this can read: the result is still an array
+pub fn of_param[T](xs []T) {
+	xs.map(it.name).first()
+}
+
+// a selector with no recipe (a C name) leaves the result an array of an unknown element, on
+// which V's own array methods are still known
+pub fn host_value() {
+	m := diags().map(C.FLAG)
+	m.first()
+}
+
+pub fn (o Other) first() {}
+"
+	})
+	assert provided_calls(g, 'path', 'contains') == ['lib.app.Other.contains:inferred']
+	assert provided_calls(g, 'other_root', 'contains') == ['contains:extracted']
+	assert provided_calls(g, 'user_map', 'run') == ['lib.app.Stream.run:inferred']
+	assert provided_calls(g, 'user_map_it', 'run') == ['lib.app.Stream.run:inferred']
+	assert provided_calls(g, 'of_param', 'first') == ['first:undeclared']
+	assert provided_calls(g, 'host_value', 'first') == ['first:undeclared']
+	assert provided_calls(g, 'messages', 'contains') == ['vlib.builtin.string.contains:inferred']
+	assert provided_calls(g, 'deep', 'contains') == ['lib.app.Other.contains:inferred']
+}
+
+fn test_a_call_of_a_function_literal_has_its_written_result() {
+	g := graph_of({
+		'vlib/builtin/builtin.v': provided_builtin
+		'lib/app/app.v':          "module app
+
+pub struct Other {}
+
+pub fn (o Other) contains(x string) bool {
+	return false
+}
+
+pub struct Inputs {
+pub:
+	unknown string
+}
+
+pub fn invoked() {
+	x := fn () string {
+		return ''
+	}().trim_space()
+	x.contains('y')
+}
+
+pub fn held() {
+	make := fn () Inputs {
+		return Inputs{}
+	}
+	got := make()
+	got.unknown.contains('y')
+}
+
+// a literal with no result gives nothing to call a method on
+pub fn no_result() {
+	run := fn () {}
+	run()
+}
+"
+	})
+	assert provided_calls(g, 'invoked', 'contains') == ['vlib.builtin.string.contains:inferred']
+	assert provided_calls(g, 'held', 'contains') == ['vlib.builtin.string.contains:inferred']
+	assert provided_calls(g, 'no_result', 'run') == ['run:undeclared']
+}
+
+fn test_a_kind_check_on_a_variable_gives_it_that_builtin_type() {
+	g := graph_of({
+		'vlib/builtin/builtin.v': provided_builtin
+		'lib/app/app.v':          'module app
+
+pub struct Other {}
+
+pub fn (o Other) clone() {}
+
+pub fn merge[K, V](m map[K]V) {
+	for _, v in m {
+		\$if v is \$map {
+			v.clone()
+		} \$else \$if v is \$array {
+			v.clone()
+		}
+	}
+}
+
+pub fn use_merge() {
+	merge({
+		"a": 1
+	})
+}
+
+// a variable typed T keeps T, so an alias of a map has its own method
+pub type Own = map[string]int
+
+pub fn (o Own) tag() {}
+
+pub fn (o Other) tag() {}
+
+pub fn on_param[T](v T) {
+	\$if v is \$map {
+		v.tag()
+	}
+}
+
+// a type the variable has is kept: an alias with its own method, and elements
+pub fn (o Own) clone() Own {
+	return o
+}
+
+pub fn on_param_clone[T](v T) {
+	\$if v is \$map {
+		v.clone()
+	}
+}
+
+pub fn use_on_param_clone() {
+	on_param_clone(Own({
+		"a": 1
+	}))
+}
+
+pub fn alias_param(v Own) {
+	\$if v is \$map {
+		v.clone()
+	}
+}
+
+pub struct Foo {}
+
+pub fn (f Foo) bar() {}
+
+pub fn (o Other) bar() {}
+
+pub fn elements_of_map(v map[string]Foo) {
+	\$if v is \$map {
+		v["a"].bar()
+	}
+}
+
+pub fn elements_of_array(v []Foo) {
+	\$if v is \$array {
+		v[0].bar()
+	}
+}
+
+// the kind holds in its own block only
+pub fn in_else[K, V](m map[K]V) {
+	for _, v in m {
+		\$if v is \$map {
+		} \$else {
+			v.clone()
+		}
+	}
+}
+
+pub fn use_on_param() {
+	on_param(Own({
+		"a": 1
+	}))
+}
+'
+	})
+	assert provided_calls(g, 'merge', 'clone').sorted() == ['vlib.builtin.array.clone:inferred',
+		'vlib.builtin.map.clone:inferred'].sorted()
+	assert provided_calls(g, 'on_param', 'tag') == ['lib.app.Own.tag:inferred']
+	assert provided_calls(g, 'alias_param', 'clone')[0].starts_with('lib.app.Own.clone')
+	assert provided_calls(g, 'on_param_clone', 'clone') == ['lib.app.Own.clone:inferred']
+	assert provided_calls(g, 'elements_of_map', 'bar') == ['lib.app.Foo.bar:inferred']
+	assert provided_calls(g, 'elements_of_array', 'bar') == ['lib.app.Foo.bar:inferred']
+	assert !provided_calls(g, 'in_else', 'clone').any(it.starts_with('vlib.builtin.'))
+}
+
+// no generic call at all in the tree: nothing says V writes it
+fn test_a_method_v_writes_on_a_type_parameter_with_no_instance_in_the_tree_stays_unresolved() {
+	g := graph_of({
+		'lib/app/app.v': 'module app
+
+pub struct A {}
+
+pub fn (a A) str() string {
+	return ""
+}
+
+pub struct B {}
+
+pub fn (b B) str() string {
+	return ""
+}
+
+pub fn alone[T](v T) {
+	v.str()
+}
+'
+	})
+	assert provided_calls(g, 'alone', 'str') == ['str:extracted']
+}
+
+// a nested literal that states no types doesn't hide the type a later entry states, and a bare
+// map's keys are an array of an element not known, not the voidptr builtin's first() declares
+fn test_a_bare_map_gives_way_to_a_stated_type_and_has_no_element() {
+	g := graph_of({
+		'vlib/builtin/builtin.v': provided_builtin + '
+pub fn (a &array) first() voidptr {
+	return unsafe { nil }
+}
+
+pub fn (v voidptr) str() string {
+	return ""
+}
+'
+		'lib/app/app.v':          "module app
+
+pub struct Foo {}
+
+pub fn (f Foo) ok() {}
+
+pub struct Other {}
+
+pub fn (o Other) ok() {}
+
+pub fn (o Other) str() string {
+	return ''
+}
+
+pub fn nested(k string) {
+	m := {
+		'a': {
+			k: Foo{}
+		}
+		'b': {
+			'x': Foo{}
+		}
+	}
+	m['b']['x'].ok()
+}
+
+pub fn chained(k string) {
+	x := {
+		k: 1
+	}
+	ks := x.keys()
+	ks.first().str()
+}
+
+pub fn (o Other) keys() {}
+
+// only bare maps inside: the outer value is still a map
+pub fn only_bare(k string) {
+	m := {
+		'a': {
+			k: 1
+		}
+	}
+	m['a'].keys()
+}
+"
+	})
+	assert provided_calls(g, 'only_bare', 'keys') == ['vlib.builtin.map.keys:inferred']
+	assert provided_calls(g, 'nested', 'ok') == ['lib.app.Foo.ok:inferred']
+	assert !provided_calls(g, 'chained', 'str').any(it.contains('voidptr'))
+}
+
+// the result of a function type is what follows its parameter list
+fn test_a_function_literal_returning_a_function_or_several_values() {
+	g := graph_of({
+		'vlib/builtin/builtin.v': provided_builtin
+		'lib/app/app.v':          'module app
+
+pub struct Foo {}
+
+pub fn (f Foo) ok() {}
+
+pub struct Other {}
+
+pub fn (o Other) ok() {}
+
+pub fn makes_a_function() {
+	f := fn () fn () Foo {
+		return fn () Foo {
+			return Foo{}
+		}
+	}
+	g := f()
+	g.ok()
+}
+
+pub fn makes_two() {
+	f := fn () (int, Foo) {
+		return 1, Foo{}
+	}
+	_, b := f()
+	b.ok()
+}
+'
+	})
+	assert !provided_calls(g, 'makes_a_function', 'ok').any(it.starts_with('lib.app.Foo'))
+	assert provided_calls(g, 'makes_two', 'ok') == ['lib.app.Foo.ok:inferred']
+	assert fn_return('fn () fn () Foo') or { '' } == 'fn () Foo'
+	assert fn_return('fn (x fn () int) Foo') or { '' } == 'Foo'
+	assert fn_return('fn () (int, Foo)') or { '' } == '(int, Foo)'
+	assert (fn_return('fn (x int)') or { 'none' }) == 'none'
+}
+
+// a literal whose entries state no type has no key type either: `k` is not an int
+fn test_a_map_literal_without_stated_types_gives_its_key_no_type() {
+	g := graph_of({
+		'vlib/builtin/builtin.v': provided_builtin + '
+pub fn (i int) str() string {
+	return ""
+}
+'
+		'lib/app/app.v':          'module app
+
+pub struct Other {}
+
+pub fn (o Other) str() string {
+	return ""
+}
+
+pub fn keys_of(key Other) {
+	m := {
+		key: 1
+	}
+	for k, _ in m {
+		k.str()
+	}
+}
+'
+	})
+	// the only other `str` in sight is int's, which typing the key as an int would pick
+	assert provided_calls(g, 'keys_of', 'str') == ['lib.app.Other.str:inferred']
+}
+
+// a variable that shares a name with the type a check names does not stop the narrowing: only a
+// variants loop's does. `$if x is v` on one narrows nothing either
+fn test_a_type_check_is_ignored_only_for_a_variants_loop_variable() {
+	g := graph_of({
+		'vlib/builtin/builtin.v': provided_builtin
+		'lib/app/app.v':          'module app
+
+pub struct Foo {}
+
+pub fn (f Foo) ping() {}
+
+pub struct Other {}
+
+pub fn (o Other) ping() {}
+
+pub type Sum = Foo | int
+
+pub fn same_name(x Sum, Foo int) {
+	if x is Foo {
+		x.ping()
+	}
+}
+
+pub fn comptime_variant[T](val T) {
+	\$for v in T.variants {
+		\$if val is v {
+			val.str()
+		}
+	}
+}
+
+pub struct NoStr {}
+
+pub fn use_variant() {
+	comptime_variant(NoStr{})
+}
+
+pub fn (o Other) str() string {
+	return ""
+}
+
+pub fn (f Foo) str() string {
+	return ""
+}
+'
+	})
+	assert provided_calls(g, 'same_name', 'ping') == ['lib.app.Foo.ping:inferred']
+	assert provided_calls(g, 'comptime_variant', 'str') == ['str:undeclared']
+}
+
+// V writes str() for any type, and type_name() for a sum type, so one on a type parameter that
+// no instance declares has no declaration; any other method stays unresolved, and an instance
+// that declares it is linked
+fn test_a_method_v_writes_on_a_type_parameter_is_undeclared() {
+	g := graph_of({
+		'vlib/builtin/builtin.v': provided_builtin
+		'lib/app/app.v':          'module app
+
+pub struct Plain {}
+
+pub struct Named {}
+
+pub fn (n Named) str() string {
+	return ""
+}
+
+pub fn (n Named) type_name() string {
+	return ""
+}
+
+// decoys: with one method of a name a call would link to it by the name alone
+pub struct Other {}
+
+pub fn (o Other) str() string {
+	return ""
+}
+
+pub fn (o Other) type_name() string {
+	return ""
+}
+
+pub fn no_instance[T](v T) {
+	v.str()
+	v.type_name()
+	v.type_idx()
+	v.missing()
+}
+
+pub fn plain_instance[T](v T) {
+	v.str()
+	v.missing()
+}
+
+pub fn named_instance[T](v T) {
+	v.str()
+	v.type_name()
+}
+
+pub fn elements[T](vs []T) {
+	_ := vs.map(it.str())
+}
+
+pub type Dyn = Plain | Named
+
+pub fn dynamic[T](v T) {
+	v.type_name()
+	v.type_idx()
+}
+
+// one call site gives a type this can read and one gives none: the second may be a type that
+// declares str(), so nothing can be said
+pub fn id_of[T](x T) T {
+	return x
+}
+
+pub fn partly_known[T](v T) {
+	v.str()
+}
+
+// the same through a parameter passed on
+pub fn outer[T](v T) {
+	inner(v)
+}
+
+pub fn inner[T](v T) {
+	v.str()
+}
+
+// a parameter no type is collected from: the tree does pass one, here a Named
+pub fn by_map[K, V](m map[K]V) {
+	for _, v in m {
+		v.str()
+	}
+}
+
+pub fn variant[T](val T) {
+	\$for v in T.variants {
+		if val is v {
+			val.str()
+		}
+	}
+}
+
+pub fn use() {
+	plain_instance(Plain{})
+	named_instance(Named{})
+	elements([Plain{}])
+	variant(Plain{})
+	dynamic(Dyn(Plain{}))
+	partly_known(Plain{})
+	partly_known(id_of(Named{}))
+	outer(Plain{})
+	outer(id_of(Named{}))
+	by_map({
+		"a": Named{}
+	})
+}
+'
+	})
+	// no instance known: a type that declares it may still be given, by an argument this can't read
+	assert provided_calls(g, 'no_instance', 'str') == ['str:extracted']
+	assert provided_calls(g, 'no_instance', 'type_name') == ['type_name:extracted']
+	assert provided_calls(g, 'no_instance', 'type_idx') == ['type_idx:extracted']
+	assert provided_calls(g, 'dynamic', 'type_name') == ['type_name:undeclared']
+	assert provided_calls(g, 'dynamic', 'type_idx') == ['type_idx:undeclared']
+	assert provided_calls(g, 'partly_known', 'str') == ['str:extracted']
+	assert provided_calls(g, 'inner', 'str') == ['str:extracted']
+	assert provided_calls(g, 'by_map', 'str') == ['str:extracted']
+	assert provided_calls(g, 'no_instance', 'missing') == ['missing:extracted']
+	assert provided_calls(g, 'plain_instance', 'str') == ['str:undeclared']
+	assert provided_calls(g, 'plain_instance', 'missing') == ['missing:extracted']
+	assert provided_calls(g, 'named_instance', 'str') == ['lib.app.Named.str:inferred']
+	assert provided_calls(g, 'named_instance', 'type_name') == ['lib.app.Named.type_name:inferred']
+	assert provided_calls(g, 'elements', 'str') == ['str:undeclared']
+	assert provided_calls(g, 'variant', 'str') == ['str:undeclared']
+}
+
+// a field loop's str() on a field that declares none stays unresolved: a field's type may be one
+// this can't read, and nothing says which
+fn test_a_str_on_any_field_that_declares_none_stays_unresolved() {
+	g := graph_of({
+		'vlib/builtin/builtin.v': provided_builtin
+		'lib/app/app.v':          'module app
+
+pub struct Plain {}
+
+// a decoy: the call on the field must not reach it by name
+pub struct Other {}
+
+pub fn (o Other) str() string {
+	return ""
+}
+
+pub struct Data {
+pub:
+	p Plain
+}
+
+pub fn fields(d Data) {
+	\$for field in Data.fields {
+		d.\$(field.name).str()
+	}
+}
+
+// the result of a call between them may declare str(), so it stays unresolved
+pub fn through_a_call(d Data) {
+	\$for field in Data.fields {
+		d.\$(field.name).unknown().str()
+	}
+}
+
+pub struct Decoy {}
+
+pub fn (o Decoy) str() string {
+	return ""
+}
+
+// and the same on a type parameter, which the expansion answers (field_any_fallback)
+pub fn generic_fields[T](d T) {
+	\$for field in T.fields {
+		d.\$(field.name).str()
+	}
+}
+
+pub fn use_generic_fields() {
+	generic_fields(Data{})
+}
+'
+	})
+	assert provided_calls(g, 'generic_fields', 'str') == ['str:extracted']
+	assert provided_calls(g, 'fields', 'str') == ['str:extracted']
+	assert provided_calls(g, 'through_a_call', 'str') == ['str:extracted']
+}
+
+fn test_a_c_struct_and_a_js_type_read_their_declarations() {
+	g := graph_of({
+		'vlib/builtin/builtin.v': provided_builtin
+		'lib/app/structs.c.v':    'module app
+
+pub struct C.Iter {
+pub:
+	isize int
+	str   &char
+}
+'
+		'lib/app/host.js.v':      'module app
+
+pub struct JS.Failure {
+pub:
+	stack string
+}
+'
+		'lib/app/app.v':          "module app
+
+pub struct Other {}
+
+pub fn (o Other) contains(x string) bool {
+	return false
+}
+
+pub fn (o Other) str() string {
+	return ''
+}
+
+pub fn c_struct() {
+	iter := C.Iter{}
+	iter.str().contains('x')
+}
+
+pub struct DataField {
+pub:
+	str string
+}
+
+pub fn data_field(d DataField) {
+	d.str()
+}
+
+pub fn js_type() {
+	e := JS.Failure{}
+	e.stack.contains('x')
+}
+"
+	})
+	assert provided_calls(g, 'c_struct', 'str') == ['str:undeclared']
+	assert provided_calls(g, 'c_struct', 'contains') == ['vlib.builtin.string.contains:inferred']
+	assert provided_calls(g, 'js_type', 'contains') == ['vlib.builtin.string.contains:inferred']
+	assert provided_calls(g, 'data_field', 'str') == ['str:undeclared']
+}
+
+fn test_an_array_init_expression_has_its_implicit_index() {
+	g := graph_of({
+		'vlib/builtin/builtin.v': provided_builtin + '
+pub fn (i int) str() string {
+	return ""
+}
+'
+		'lib/app/app.v':          'module app
+
+pub struct Other {}
+
+pub fn (o Other) str() string {
+	return ""
+}
+
+pub fn fill() []string {
+	return []string{len: 3, init: index.str()}
+}
+
+// the implicit index is in `init` only: `len` reads the variable of that name
+pub fn outer_index(index Other) {
+	_ := []string{len: index.size()}
+}
+
+// and in `init` it is the index, whatever variable has the name
+pub fn shadowed_index(index Other) {
+	_ := []string{len: 1, init: index.str()}
+}
+
+pub fn (o Other) size() int {
+	return 0
+}
+
+pub fn (i int) size() int {
+	return 0
+}
+'
+	})
+	assert provided_calls(g, 'fill', 'str') == ['vlib.builtin.int.str:inferred']
+	assert provided_calls(g, 'outer_index', 'size') == ['lib.app.Other.size:extracted']
+	assert provided_calls(g, 'shadowed_index', 'str') == ['vlib.builtin.int.str:inferred']
+}
+
+fn test_a_lock_expression_gives_each_name_its_own_value() {
+	g := graph_of({
+		'vlib/builtin/builtin.v': provided_builtin
+		'lib/app/app.v':          "module app
+
+pub struct Other {}
+
+pub fn (o Other) contains(x string) bool {
+	return false
+}
+
+pub struct Shared {
+pub mut:
+	a string
+	b Other
+}
+
+pub fn locked(shared s Shared) {
+	x, y := rlock s {
+		s.a, s.b
+	}
+	x.contains('p')
+	y.contains('q')
+}
+
+pub fn (s Shared) pair() (Other, string) {
+	return s.b, s.a
+}
+
+// a block ending in one call with several results
+pub fn locked_call(shared s Shared) {
+	x, y := rlock s {
+		s.pair()
+	}
+	x.contains('p')
+	y.contains('q')
+}
+"
+	})
+	assert provided_calls(g, 'locked', 'contains').sorted() == ['lib.app.Other.contains:inferred',
+		'vlib.builtin.string.contains:inferred'].sorted()
+	assert provided_calls(g, 'locked_call', 'contains').sorted() == ['lib.app.Other.contains:inferred',
+		'vlib.builtin.string.contains:inferred'].sorted()
+}
