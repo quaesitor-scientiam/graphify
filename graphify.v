@@ -790,24 +790,29 @@ fn in_main_unit(s Symbol, mains map[string]bool) bool {
 
 // separate_member_ids gives a field or const whose id is also another kind of
 // symbol's id an id of its own, `<parent>::field::<name>` or
-// `<parent>::const::<name>`, in the form import ids already use. V lets a
+// `<parent>::const::<name>`, in the form import ids already use, and a global
+// whose id is a function's or type's `<parent>::global::<name>`. V lets a
 // method share its name with a field of its receiver type (`Server.username`
 // in vlib/crypto/scram is both) and a const share its name with a function, and
 // both used to come out as one id, so a `calls` edge to the method pointed as
 // much at the field. The function, method or type keeps the plain id because
-// edges point at it; fields and consts are only ever reached by their
-// `defines` edge, which is rebuilt here.
+// edges point at it. Nothing has resolved to a const's or global's id yet, and
+// its `defines` edge is rebuilt here.
 fn separate_member_ids(mut g Graph) {
 	mut other := map[string]bool{}
+	mut decl := map[string]bool{}
 	for s in g.symbols {
 		if s.kind != .field && s.kind != .constant {
 			other[s.id] = true
+			if s.kind != .global {
+				decl[s.id] = true
+			}
 		}
 	}
 	mut renamed := false
 	for i in 0 .. g.symbols.len {
 		s := g.symbols[i]
-		if (s.kind == .field || s.kind == .constant) && other[s.id] {
+		if ((s.kind == .field || s.kind == .constant) && other[s.id]) || (s.kind == .global && decl[s.id]) {
 			g.symbols[i].id = '${s.parent}::${s.kind}::${s.name}'
 			renamed = true
 		}
@@ -1131,6 +1136,9 @@ fn resolve_edges(mut g Graph) {
 	// (see below): one that does is called as one, and it is the fallback when no
 	// function of that name fits (see infer_call)
 	mut const_calls := map[string][]CallCand{}
+	// fn_values holds those known to hold a function itself, which V takes over a
+	// function of the name (see infer_call)
+	mut fn_values := map[string][]CallCand{}
 	mut by_type_name := map[string][]TypeCand{}
 	// type aliases by name, for a bare call of one (see alias_conversion)
 	mut alias_by_name := map[string][]TypeCand{}
@@ -1201,6 +1209,7 @@ fn resolve_edges(mut g Graph) {
 			imports_of[s.file] << s.name
 			mut sc := scope_of[s.file] or { FileScope{} }
 			sc.prefixes[s.name] = s.name
+			sc.paths[s.name] = true
 			// the alias and the path as written are only on the signature:
 			// `import x.json2 as json`, and `from x.json2` when the path redirects
 			if s.signature.contains(' as ') {
@@ -1240,6 +1249,13 @@ fn resolve_edges(mut g Graph) {
 				id:   s.id
 				mod:  s.parent
 				file: s.file
+			}
+			if s.recipe.starts_with('t:fn ') || s.recipe.starts_with('t:fn(') {
+				fn_values[s.name] << CallCand{
+					id:   s.id
+					mod:  s.parent
+					file: s.file
+				}
 			}
 		}
 		if s.kind == .type_alias && s.id.starts_with('C.') {
@@ -1465,6 +1481,7 @@ fn resolve_edges(mut g Graph) {
 	mut inf := Infer{
 		by_name:      by_name
 		const_calls:  const_calls
+		fn_values:    fn_values
 		by_type_name: by_type_name
 		site_of:      site_of
 		imports_of:   imports_of
@@ -1554,9 +1571,14 @@ fn resolve_edges(mut g Graph) {
 				}
 				continue
 			}
+			// a conversion is one before any function of the name elsewhere (Infer.conversion),
+			// and the tier below links it
+			mut here := ?CallResolution(none)
+			if e.is_method || e.to.contains('.') || inf.conversion(e) == none {
+				here = inf.infer_call(e)
+			}
 			// what the call is in a build that takes another side of an alias
 			// (build_worlds), where that differs from what it is here
-			here := inf.infer_call(e)
 			mut in_builds := []CallResolution{}
 			// a call on any field that infer_call left to expand_type_param_calls is not one
 			// to link through another build's name match first
@@ -1669,7 +1691,7 @@ fn resolve_edges(mut g Graph) {
 			if !e.is_method && !e.to.contains('.') && e.to !in runtime_helpers {
 				ids := bare_builtin_call(e, by_name, site_of).filter(!unaddressable[it])
 				if ids.len > 0 && implicit_receiver_call(e, by_name) == none
-					&& alias_conversion(e, alias_by_name, site_of, imports_of) == none {
+					&& type_conversion(e, alias_by_name, by_type_name, site_of, imports_of, scope_of) == none {
 					for id in ids {
 						key := '${e.from}\x00${id}'
 						if at := seen_call[key] {
@@ -1721,11 +1743,11 @@ fn resolve_edges(mut g Graph) {
 			}
 			seen_call[key] = resolved.len
 		}
-		// a bare call of a type alias is a conversion to it: `uintptr_t(x)` under
-		// `type uintptr_t = usize`. Only the aliases the caller can see count (see
-		// alias_conversion), and a method call is never one.
+		// a bare call of a type is a conversion to it: `uintptr_t(x)` under
+		// `type uintptr_t = usize`. Only the types the caller can see count (see
+		// type_conversion), and a method call is never one.
 		if e.kind == .calls && !e.is_method && !e.to.contains('.') {
-			if id := alias_conversion(e, alias_by_name, site_of, imports_of) {
+			if id := type_conversion(e, alias_by_name, by_type_name, site_of, imports_of, scope_of) {
 				if !unaddressable[id] {
 					resolved << Edge{
 						from:       e.from
@@ -2179,9 +2201,9 @@ fn resolve_callee(e Edge, by_name map[string][]CallCand, site_of map[string]Decl
 	// A plain `error()` names a function of the caller's own module or, when
 	// there is none, of builtin: another module's function needs its prefix,
 	// and a selective import's names already carry one (see callee in
-	// backend_v.v), so `log.error` is no candidate here. In a standalone
-	// program the "own module" is every program in its directory, which only
-	// makes this skip more often.
+	// backend_v.v), so `log.error` is no candidate here. A standalone program's
+	// own module is what it is built with (sees_in_module), not its directory:
+	// `copy()` in a `module main` test beside `module io` is builtin's.
 	if !e.is_method && !e.to.contains('.') && !e.to.contains('__static__') {
 		mut own := false
 		mut builtins := []CallCand{}
@@ -2190,7 +2212,17 @@ fn resolve_callee(e Edge, by_name map[string][]CallCand, site_of map[string]Decl
 				continue
 			}
 			if c.mod == caller.mod {
-				own = true
+				// an id with no site can't address one declaration, so it can't rule
+				// the module's own out, and this tier doesn't pick builtin's
+				site := site_of[site_key(c.id, c.file)] or {
+					site_of[c.id] or {
+						own = true
+						continue
+					}
+				}
+				if caller.sees_in_module(c.file, site.is_main) {
+					own = true
+				}
 			} else if import_reaches(c.mod, 'builtin') {
 				builtins << c
 			}
@@ -2228,6 +2260,7 @@ mut:
 	declared string            // the name on the file's `module` line
 	is_main  bool              // in a standalone program, see main_unit_files
 	prefixes map[string]string // import path or alias -> import path
+	paths    map[string]bool   // the import paths themselves
 }
 
 // resolve_by_receiver_type resolves a method call whose receiver type is known
@@ -2306,7 +2339,9 @@ fn resolve_qualified_callee(e Edge, by_name map[string][]CallCand, site_of map[s
 	cands := by_name[e.to.all_after_last('.')] or { return none }
 	file := if e.file != '' { e.file } else { (site_of[e.from] or { return none }).file }
 	scope := scope_of[file] or { return none }
-	imported := scope.prefixes[prefix] or { '' }
+	// a callee's prefix is a path first: `jj.start()` under `import benchmark as jj` comes
+	// out as `benchmark.start`, though `import x.benchmark` takes `benchmark` as its alias
+	imported := if scope.paths[prefix] { prefix } else { scope.prefixes[prefix] or { '' } }
 	mut fits := []CallCand{}
 	for c in cands {
 		if c.is_method {
@@ -2325,6 +2360,16 @@ fn resolve_qualified_callee(e Edge, by_name map[string][]CallCand, site_of map[s
 		} else if imported != '' && import_reaches(c.mod, imported) && importable(c.id, c.file, file, site_of) {
 			fits << c
 		}
+	}
+	// an import with no such function in a module it reaches may name a module a file beside
+	// the caller declares: `import c` with c.v in the directory, which V builds where the
+	// directory has a `module builtin` file (vlib/v/tests/testdata/enum_in_builtin) and
+	// refuses elsewhere, and `import stats_import` in vlib/v/preludes_js, a file V adds to a
+	// test's own build
+	if fits.len == 0 && imported != '' {
+		declared := imported.all_after_last('.')
+		fits = cands.filter(!it.is_method && it.mod == scope.mod && !test_private(it.file, file)
+			&& (scope_of[it.file] or { FileScope{} }).declared == declared)
 	}
 	id := only_id(if imported != '' { exact_calls(fits, imported) } else { fits })?
 	return CallResolution{
@@ -2518,6 +2563,28 @@ fn alias_conversion(e Edge, alias_by_name map[string][]TypeCand, site_of map[str
 	caller := caller_site(e, site_of) or { return none }
 	res := type_in_scope(cands, caller, imports_of)?
 	return res.id
+}
+
+// type_conversion is the type a bare call converts to: an alias (alias_conversion), or a
+// struct or enum of the caller's own module, which only a `@[translated]` file can name in
+// lowercase and so call bare (`&debug_info(raw)`, `token(0)`). A struct and a function of one
+// name in a module don't compile, so there is nothing else it could be. A type of an imported
+// module needs its prefix.
+fn type_conversion(e Edge, alias_by_name map[string][]TypeCand, by_type_name map[string][]TypeCand, site_of map[string]DeclSite, imports_of map[string][]string, scope_of map[string]FileScope) ?string {
+	if id := alias_conversion(e, alias_by_name, site_of, imports_of) {
+		return id
+	}
+	caller := caller_site(e, site_of)?
+	cands := by_type_name[e.to] or { return none }
+	return only_type_id(cands.filter(it.mod == caller.mod && !it.c && !it.js
+		&& !test_private(it.file, caller.file)
+		&& caller.sees_in_module(it.file, (scope_of[it.file] or { FileScope{} }).is_main)))
+}
+
+// own_module_fn reports whether a plain function of this name is in the caller's module.
+fn own_module_fn(e Edge, by_name map[string][]CallCand, site_of map[string]DeclSite) bool {
+	caller := caller_site(e, site_of) or { return false }
+	return (by_name[e.to] or { return false }).any(!it.is_method && it.mod == caller.mod)
 }
 
 fn rel_path(root string, path string) string {

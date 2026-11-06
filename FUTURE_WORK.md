@@ -774,6 +774,37 @@ lost. `type_idx` at three sites in tests went with the same rule. The seventh si
 `T.type_name()` in an `$else` no instance compiles, stays unresolved: V has no such function unless
 the type declares a static method of that name, so there is nothing to link to and nothing V writes.
 
+**Plain names (November 2026).** Five rules for a call that names its target, each from a compiled
+program or a fixture V builds:
+
+- A `module main` test beside `module io` is not in io, so `copy()` is builtin's, though io declares
+  one. An id with no site can't address one declaration, so it can't rule the module's own out: with
+  that module imported the call stays unresolved. Without the import the last tier still takes
+  builtin's where a main helper of the directory shares its id with the module's function, which is
+  wrong, as master has it.
+- A callee's prefix is an import path first: `jj.start()` under `import benchmark as jj` comes out
+  as `benchmark.start`, though `import x.benchmark` takes `benchmark` as its alias. Only callees read
+  it this way, since a type's text can name the alias.
+- An import with no such function in a module it reaches may name a module a file beside the caller
+  declares (`import c` with c.v in the directory). V builds that in
+  vlib/v/tests/testdata/enum_in_builtin, which has a `module builtin` file, and refuses it without one.
+  A module the import reaches comes first when it declares the function; one outside the graph, or
+  one that doesn't declare it, is passed over.
+- A const or global holding a function in the caller's own module is the callee, as V takes it over a
+  function of the name, in the same file or another, but not one holding another value (`const f = g()`
+  of an int, where V calls the function). Known to hold one means a literal or a written `fn` type, so
+  `const f = g` isn't read as one. The value of such a call has the function's result. A global sharing
+  an id with a function or type has an id of its own (`::global::`), as a const already did.
+- A bare call of a struct or enum of the caller's own module is a conversion, as one of an alias is:
+  only a `@[translated]` file can name such a type in lowercase (`&debug_info(raw)`, `token(0)`). A
+  struct and a function of one name in a module don't compile. A conversion now comes before a function
+  of the name elsewhere, so `token(0)` no longer links to an unrelated module's `token`, and an alias
+  gets that too, unless a function of the name is in the caller's own module. The value of a conversion
+  has its type.
+
+On vlang `67011350d0`: unresolved calls 84 to 73, 13 edges changed and nothing else, two of them
+wrong links corrected (`token`, and `func3` to another module's function).
+
 The raw edge is retained and `explain` reports ambiguous callers rather than
 inventing links. A future opt-in deep mode could run the checker over a whole
 project, but given the small remainder, it would need to address these
