@@ -15388,7 +15388,8 @@ pub fn use() {
 	// no instance known: a type that declares it may still be given, by an argument this can't read
 	assert provided_calls(g, 'no_instance', 'str') == ['str:extracted']
 	assert provided_calls(g, 'no_instance', 'type_name') == ['type_name:extracted']
-	assert provided_calls(g, 'no_instance', 'type_idx') == ['type_idx:extracted']
+	// but no type here declares this one, so whichever instance compiles has it from V
+	assert provided_calls(g, 'no_instance', 'type_idx') == ['type_idx:undeclared']
 	assert provided_calls(g, 'dynamic', 'type_name') == ['type_name:undeclared']
 	assert provided_calls(g, 'dynamic', 'type_idx') == ['type_idx:undeclared']
 	assert provided_calls(g, 'partly_known', 'str') == ['str:extracted']
@@ -15403,6 +15404,2320 @@ pub fn use() {
 	assert provided_calls(g, 'variant', 'str') == ['str:undeclared']
 }
 
+// the method of `$if T is Iface` is each instance's that answers it, read wherever the instance is
+// declared; with no instance that answers, the interface's own, as on a value of that type
+fn test_an_interface_check_on_a_type_parameter_is_its_instances_then_the_interface() {
+	g := graph_of({
+		'lib/app/app.v':     'module app
+
+import lib.far
+import lib.far as farr
+import lib.far { Reaches }
+
+pub interface Dropper {
+mut:
+	dropit()
+}
+
+pub struct Owner {}
+
+pub fn (mut o Owner) dropit() {}
+
+// a decoy: it has the name, and no call gives its type
+pub struct Decoy {}
+
+pub fn (mut d Decoy) dropit() {}
+
+pub struct Silent {}
+
+pub fn by_type_known[T](v T) {
+	mut c := v
+	\$if T is Dropper {
+		c.dropit()
+	}
+}
+
+pub fn by_type_unknown[T](v T) {
+	mut c := v
+	\$if T is Dropper {
+		c.dropit()
+	}
+}
+
+pub fn by_type_silent[T](v T) {
+	mut c := v
+	\$if T is Dropper {
+		c.dropit()
+	}
+}
+
+pub fn by_var_known[T](v T) {
+	\$if v is Dropper {
+		mut c := v
+		c.dropit()
+	}
+}
+
+pub fn by_var_unknown[T](v T) {
+	\$if v is Dropper {
+		mut c := v
+		c.dropit()
+	}
+}
+
+pub fn by_mut_known[T](mut v T) {
+	\$if v is Dropper {
+		v.dropit()
+	}
+}
+
+pub fn by_mut_unknown[T](mut v T) {
+	\$if v is Dropper {
+		v.dropit()
+	}
+}
+
+// the branch after the check is no longer held to the interface
+pub fn in_else[T](mut v T) {
+	\$if v is Dropper {
+	} \$else {
+		v.dropit()
+	}
+}
+
+pub fn in_else_of_type[T](v T) {
+	mut c := v
+	\$if T is Dropper {
+	} \$else {
+		c.dropit()
+	}
+}
+
+// the check holds T, and the call is on a value typed U
+pub fn other_param[T, U](a T, b U) {
+	mut c := b
+	\$if T is Dropper {
+		c.dropit()
+	}
+}
+
+pub fn no_check[T](mut v T) {
+	v.dropit()
+}
+
+pub interface Printable {
+	str() string
+}
+
+pub fn (o Owner) str() string {
+	return ""
+}
+
+pub fn (d Decoy) str() string {
+	return ""
+}
+
+// V writes str() for a type that declares none, so the interface does not settle it
+pub fn prints[T](v T) {
+	\$if v is Printable {
+		v.str()
+	}
+}
+
+// the interface through an import: qualified, under an alias, or selected
+pub fn qualified_none[T](v T) {
+	mut c := v
+	\$if T is far.Reaches {
+		c.reach()
+	}
+}
+
+pub fn aliased_none[T](v T) {
+	mut c := v
+	\$if T is farr.Reaches {
+		c.reach()
+	}
+}
+
+pub fn aliased_known[T](v T) {
+	mut c := v
+	\$if T is farr.Reaches {
+		c.reach()
+	}
+}
+
+pub fn selected_none[T](v T) {
+	mut c := v
+	\$if T is Reaches {
+		c.reach()
+	}
+}
+
+pub fn selected_known[T](v T) {
+	mut c := v
+	\$if T is Reaches {
+		c.reach()
+	}
+}
+
+pub fn selected_known_var[T](mut v T) {
+	\$if v is Reaches {
+		v.reach()
+	}
+}
+
+pub fn use() {
+	by_type_known(Owner{})
+	by_type_silent(Silent{})
+	by_var_known(Owner{})
+	mut o := Owner{}
+	by_mut_known(mut o)
+	aliased_known(far.Reacher{})
+	selected_known(far.Reacher{})
+	mut r := far.Reacher{}
+	selected_known_var(mut r)
+}
+'
+		'lib/far/far.v':     'module far
+
+pub interface Reaches {
+mut:
+	reach()
+}
+
+pub struct Reacher {}
+
+pub fn (mut r Reacher) reach() {}
+
+// a decoy
+pub struct Other {}
+
+pub fn (mut o Other) reach() {}
+'
+		'lib/other/other.v': 'module other
+
+import lib.app
+
+// declared where the name `Dropper` means nothing
+pub struct Faraway {}
+
+pub fn (mut f Faraway) dropit() {}
+
+pub fn use() {
+	app.by_type_known(Faraway{})
+}
+'
+	})
+	iface := ['lib.app.Dropper.dropit:inferred']
+	owner := 'lib.app.Owner.dropit:inferred'
+	mut known := provided_calls(g, 'by_type_known', 'dropit')
+	known.sort()
+	assert known == ['lib.app.Owner.dropit:inferred', 'lib.other.Faraway.dropit:inferred']
+	assert provided_calls(g, 'by_type_unknown', 'dropit') == iface
+	assert provided_calls(g, 'by_type_silent', 'dropit') == iface
+	assert provided_calls(g, 'by_var_known', 'dropit') == [owner]
+	assert provided_calls(g, 'by_var_unknown', 'dropit') == iface
+	assert provided_calls(g, 'by_mut_known', 'dropit') == [owner]
+	assert provided_calls(g, 'by_mut_unknown', 'dropit') == iface
+	assert provided_calls(g, 'in_else', 'dropit') == ['dropit:extracted']
+	assert provided_calls(g, 'in_else_of_type', 'dropit') == ['dropit:extracted']
+	assert provided_calls(g, 'other_param', 'dropit') == ['dropit:extracted']
+	assert provided_calls(g, 'no_check', 'dropit') == ['dropit:extracted']
+	assert provided_calls(g, 'prints', 'str') == ['str:extracted']
+	reach_iface := ['lib.far.Reaches.reach:inferred']
+	reacher := ['lib.far.Reacher.reach:inferred']
+	assert provided_calls(g, 'qualified_none', 'reach') == reach_iface
+	assert provided_calls(g, 'aliased_none', 'reach') == reach_iface
+	assert provided_calls(g, 'selected_none', 'reach') == reach_iface
+	assert provided_calls(g, 'aliased_known', 'reach') == reacher
+	assert provided_calls(g, 'selected_known', 'reach') == reacher
+	assert provided_calls(g, 'selected_known_var', 'reach') == reacher
+}
+
+// a check for any of several kinds holds a type parameter to their builtin types, when no instance
+// says otherwise; it reads only kinds of the one parameter
+fn test_a_check_for_several_kinds_is_a_guard_on_a_type_parameter() {
+	g := graph_of({
+		'vlib/builtin/builtin.v': 'module builtin
+
+pub struct array {}
+
+pub fn (mut a array) wipe() {}
+
+pub fn (a &array) first() voidptr {
+	return unsafe { nil }
+}
+
+pub fn (a &array) keep() voidptr {
+	return unsafe { nil }
+}
+
+pub struct map {}
+
+pub fn (mut m map) wipe() {}
+
+pub fn (v voidptr) tell() {}
+'
+		'lib/app/app.v':          'module app
+
+pub struct One {}
+
+pub fn (o One) wipe() {}
+
+pub struct Two {}
+
+pub fn (o Two) wipe() {}
+
+pub fn either_unknown[F](x &F) {
+	\$if F.unaliased_typ is \$array_dynamic || F.unaliased_typ is \$map {
+		mut t := unsafe { x }
+		t.wipe()
+	}
+}
+
+pub fn either_array[F](x &F) {
+	\$if F.unaliased_typ is \$array_dynamic || F.unaliased_typ is \$map {
+		mut t := unsafe { x }
+		t.wipe()
+	}
+}
+
+pub fn either_struct[F](x &F) {
+	\$if F.unaliased_typ is \$array_dynamic || F.unaliased_typ is \$map {
+		mut t := unsafe { x }
+		t.wipe()
+	}
+}
+
+pub fn only_array[F](x &F) {
+	\$if F.unaliased_typ is \$array_dynamic {
+		mut t := unsafe { x }
+		t.wipe()
+	}
+}
+
+pub fn in_else[F](x &F) {
+	\$if F.unaliased_typ is \$array_dynamic || F.unaliased_typ is \$map {
+	} \$else {
+		mut t := unsafe { x }
+		t.wipe()
+	}
+}
+
+// decoys, so that no name is unique
+pub fn (o Two) tell() {}
+
+pub struct Three {}
+
+pub fn (o Three) tell() {}
+
+// an element of an array whose element isn t known is not the voidptr builtin declares
+pub fn element_unknown[F](x F) {
+	\$if F.unaliased_typ is \$array_dynamic {
+		x.first().tell()
+	}
+}
+
+pub fn element_union[F](x F) {
+	\$if F.unaliased_typ is \$array_dynamic || F.unaliased_typ is \$map {
+		x.first().tell()
+	}
+}
+
+// nor of an instance whose element has no such method
+pub fn element_instance[F](x F) {
+	x.first().tell()
+}
+
+// a method of builtin that does return a voidptr still does
+pub fn not_an_element[F](x F) {
+	\$if F.unaliased_typ is \$array_dynamic {
+		x.keep().tell()
+	}
+}
+
+// an instance of the kinds does not reach the branch after the check
+pub fn else_of_array[F](x &F) {
+	\$if F.unaliased_typ is \$array_dynamic || F.unaliased_typ is \$map {
+	} \$else {
+		mut t := unsafe { x }
+		t.wipe()
+	}
+}
+
+// the instance meets the second kind
+pub fn either_map[F](x &F) {
+	\$if F.unaliased_typ is \$array_dynamic || F.unaliased_typ is \$map {
+		mut t := unsafe { x }
+		t.wipe()
+	}
+}
+
+pub fn not_only_kinds[F](x &F) {
+	\$if F.unaliased_typ is \$array_dynamic || F.unaliased_typ is One {
+		mut t := unsafe { x }
+		t.wipe()
+	}
+}
+
+// the condition says nothing of G alone, though it ends with it
+pub fn two_params[F, G](x &F, y &G) {
+	\$if F.unaliased_typ is \$array_dynamic || G.unaliased_typ is \$map {
+		mut t := unsafe { y }
+		t.wipe()
+	}
+}
+
+pub fn use() {
+	a := []int{}
+	either_array(&a)
+	else_of_array(&a)
+	b := One{}
+	either_struct(&b)
+	m := map[string]int{}
+	either_map(&m)
+	element_instance([]One{})
+}
+'
+	})
+	mut both := provided_calls(g, 'either_unknown', 'wipe')
+	both.sort()
+	assert both == ['vlib.builtin.array.wipe:inferred', 'vlib.builtin.map.wipe:inferred']
+	assert provided_calls(g, 'either_array', 'wipe') == ['vlib.builtin.array.wipe:inferred']
+	// an instance that isn't of those kinds doesn't compile the block
+	mut none_met := provided_calls(g, 'either_struct', 'wipe')
+	none_met.sort()
+	assert none_met == ['vlib.builtin.array.wipe:inferred', 'vlib.builtin.map.wipe:inferred']
+	assert provided_calls(g, 'only_array', 'wipe') == ['vlib.builtin.array.wipe:inferred']
+	assert provided_calls(g, 'in_else', 'wipe') == ['wipe:extracted']
+	assert provided_calls(g, 'else_of_array', 'wipe') == ['wipe:extracted']
+	assert provided_calls(g, 'either_map', 'wipe') == ['vlib.builtin.map.wipe:inferred']
+	assert provided_calls(g, 'not_only_kinds', 'wipe') == ['wipe:extracted']
+	assert provided_calls(g, 'two_params', 'wipe') == ['wipe:extracted']
+	assert provided_calls(g, 'element_unknown', 'tell') == ['tell:extracted']
+	assert provided_calls(g, 'element_union', 'tell') == ['tell:extracted']
+	assert provided_calls(g, 'element_instance', 'tell') == ['tell:extracted']
+	assert provided_calls(g, 'not_an_element', 'tell') == ['vlib.builtin.voidptr.tell:inferred']
+}
+
+// type_idx needs no instance, and nothing else in the graph to bring the expansion on
+fn test_type_idx_on_a_type_parameter_alone_in_a_graph_is_undeclared() {
+	g := graph_of({
+		'lib/app/app.v': 'module app
+
+pub fn alone[T](v T) {
+	v.type_idx()
+}
+'
+	})
+	assert provided_calls(g, 'alone', 'type_idx') == ['type_idx:undeclared']
+}
+
+// `T.type_name()` is no method V writes: it names a static method only a type that declares one has
+fn test_a_static_call_on_a_type_parameter_is_not_a_method_v_writes() {
+	g := graph_of({
+		'lib/app/app.v': 'module app
+
+pub fn named[T]() string {
+	return T.type_name()
+}
+'
+	})
+	calls := g.edges.filter(it.kind == .calls && it.from == 'lib.app.named').map('${it.to}:${it.provenance}')
+	assert calls == ['T__static__type_name:extracted']
+}
+
+// a field read off a variable matched by a branch of several types has a type only when they agree,
+// and the variable is no such thing once narrowed or declared again
+fn test_a_field_of_a_branch_of_several_types_has_the_type_they_agree_on() {
+	g := graph_of({
+		'lib/app/app.v':     'module app
+
+import lib.other
+
+pub struct Base {}
+
+pub fn (b &Base) tid() int {
+	return 1
+}
+
+pub struct Rival {}
+
+pub fn (r Rival) tid() int {
+	return 2
+}
+
+pub struct First {
+pub:
+	same   &Base  = unsafe { nil }
+	differ &Base  = unsafe { nil }
+	third  &Base  = unsafe { nil }
+	lonely &Base  = unsafe { nil }
+	across &Base  = unsafe { nil }
+	title  string
+}
+
+pub struct Second {
+pub:
+	same   &Base  = unsafe { nil }
+	differ &Rival = unsafe { nil }
+	third  &Base  = unsafe { nil }
+	across &Base  = unsafe { nil }
+}
+
+pub struct Third {
+pub:
+	same  &Base  = unsafe { nil }
+	third &Rival = unsafe { nil }
+}
+
+pub fn (f First) run() {}
+
+pub fn (s Second) run() {}
+
+pub type Either = First | Second | Third | other.Remote
+
+pub fn agrees(t Either) int {
+	match t {
+		First, Second { return t.same.tid() }
+		else { return 0 }
+	}
+}
+
+pub fn differs(t Either) int {
+	match t {
+		First, Second { return t.differ.tid() }
+		else { return 0 }
+	}
+}
+
+pub fn last_differs(t Either) int {
+	match t {
+		First, Second, Third { return t.third.tid() }
+		else { return 0 }
+	}
+}
+
+pub fn one_lacks(t Either) int {
+	match t {
+		First, Second { return t.lonely.tid() }
+		else { return 0 }
+	}
+}
+
+pub fn narrowed_again(t Either) int {
+	match t {
+		First, Second {
+			if t is Second {
+				return t.differ.tid()
+			}
+			return 0
+		}
+		else { return 0 }
+	}
+}
+
+pub fn declared_again(t Either, r First) int {
+	match t {
+		First, Second {
+			t := r
+			return t.differ.tid()
+		}
+		else { return 0 }
+	}
+}
+
+pub fn other_module(t Either) int {
+	match t {
+		First, other.Remote { return t.across.tid() }
+		else { return 0 }
+	}
+}
+
+pub fn a_method(t Either) {
+	match t {
+		First, Second { t.run() }
+		else {}
+	}
+}
+
+// a string is one type in every module
+pub fn primitive_across(t Either) {
+	match t {
+		First, other.Remote { t.title.tell() }
+		else {}
+	}
+}
+
+// a branch of values narrows nothing
+pub fn of_values(f First, a First, b First) int {
+	match f {
+		a, b { return f.same.tid() }
+		else { return 0 }
+	}
+}
+
+pub struct Holder {
+pub:
+	kind Key
+}
+
+// a field path is matched as a variable is
+pub fn on_a_path(h Holder) int {
+	match h.kind {
+		First, Second { return h.kind.same.tid() }
+		else { return 0 }
+	}
+}
+
+pub struct OtherHolder {
+pub:
+	kind Lone
+}
+
+pub struct Lone {
+pub:
+	same &Rival = unsafe { nil }
+}
+
+// `h` declared again, its path is another variable`s
+pub fn path_of_a_param_again(h Holder) int {
+	match h.kind {
+		First, Second {
+			f := fn (h OtherHolder) int {
+				return h.kind.same.tid()
+			}
+			return f(OtherHolder{})
+		}
+		else {
+			return 0
+		}
+	}
+}
+
+pub fn path_of_a_local_again(h Holder) int {
+	match h.kind {
+		First, Second {
+			f := fn () int {
+				h := OtherHolder{}
+				return h.kind.same.tid()
+			}
+			return f()
+		}
+		else {
+			return 0
+		}
+	}
+}
+
+pub fn path_of_it_again(hs []Holder, others []OtherHolder) []int {
+	return hs.map(match it.kind {
+		First, Second { others.map(it.kind.same.tid()).len }
+		else { 0 }
+	})
+}
+
+pub struct Far {
+pub:
+	across &other.Base = unsafe { nil }
+	names  []string
+	counts map[string]int
+	rivals map[string]Base
+	loose  other.Base
+}
+
+// decoys: the name, and no type gives them
+pub struct Bystander {}
+
+pub fn (b Bystander) tell_all() {}
+
+pub fn (b Bystander) tell_map() {}
+
+// the same text in two modules names two types
+pub fn map_of_two_types(x AcrossKey) {
+	match x {
+		other.Remote, Far {
+			for _, v in x.rivals {
+				v.tid()
+			}
+		}
+		else {}
+	}
+}
+
+// a call looks through `&`
+pub fn a_pointer_and_a_value(x AcrossKey) {
+	match x {
+		other.Remote, Far { x.loose.tid() }
+		else {}
+	}
+}
+
+// `h` declared is not `holder`
+pub fn a_name_that_starts_alike(holder Holder) int {
+	match holder.kind {
+		First, Second {
+			h := 1
+			return h + holder.kind.same.tid()
+		}
+		else {
+			return 0
+		}
+	}
+}
+
+// one type named from two modules, and arrays and maps of builtin types, are one type
+pub fn across_modules(x AcrossKey) bool {
+	match x {
+		other.Remote, Far {
+			x.across.tid()
+			x.names.tell_all()
+			x.counts.tell_map()
+		}
+		else {}
+	}
+	return false
+}
+
+pub type AcrossKey = Far | Plain | other.Remote
+'
+		'lib/other/other.v': 'module other
+
+pub struct Base {}
+
+pub fn (b &Base) tid() int {
+	return 3
+}
+
+pub struct Remote {
+pub:
+	across &Base = unsafe { nil }
+	title  string
+	names  []string
+	counts map[string]int
+	rivals map[string]Base
+	loose  &Base = unsafe { nil }
+}
+
+pub struct Decoy {}
+
+pub fn (d Decoy) tell() {}
+'
+		'vlib/builtin/builtin.v': 'module builtin
+
+pub fn (s string) tell() {}
+
+pub fn (a []string) tell_all() {}
+
+pub fn (m map[string]int) tell_map() {}
+'
+	})
+	base := ['lib.app.Base.tid:inferred']
+	unresolved := ['tid:extracted']
+	assert provided_calls(g, 'agrees', 'tid') == base
+	assert provided_calls(g, 'differs', 'tid') == unresolved
+	assert provided_calls(g, 'last_differs', 'tid') == unresolved
+	assert provided_calls(g, 'one_lacks', 'tid') == unresolved
+	assert provided_calls(g, 'narrowed_again', 'tid') == ['lib.app.Rival.tid:inferred']
+	assert provided_calls(g, 'declared_again', 'tid') == ['lib.app.Base.tid:inferred']
+	assert provided_calls(g, 'other_module', 'tid') == unresolved
+	// V calls each type's, so no one of them is the callee
+	assert provided_calls(g, 'a_method', 'run') == ['run:extracted']
+	assert provided_calls(g, 'of_values', 'tid') == base
+	assert provided_calls(g, 'primitive_across', 'tell') == ['vlib.builtin.string.tell:inferred']
+	assert provided_calls(g, 'on_a_path', 'tid') == base
+	rival := ['lib.app.Rival.tid:inferred']
+	assert provided_calls(g, 'path_of_a_param_again', 'tid') == rival
+	assert provided_calls(g, 'path_of_a_local_again', 'tid') == rival
+	assert provided_calls(g, 'path_of_it_again', 'tid') == rival
+	assert provided_calls(g, 'across_modules', 'tid') == ['lib.other.Base.tid:inferred']
+	assert provided_calls(g, 'across_modules', 'tell_all').len == 1
+	assert provided_calls(g, 'across_modules', 'tell_all')[0].starts_with('vlib.builtin.')
+	assert provided_calls(g, 'across_modules', 'tell_map').len == 1
+	assert provided_calls(g, 'across_modules', 'tell_map')[0].starts_with('vlib.builtin.')
+	assert provided_calls(g, 'map_of_two_types', 'tid') == unresolved
+	assert provided_calls(g, 'a_pointer_and_a_value', 'tid') == ['lib.other.Base.tid:inferred']
+	assert provided_calls(g, 'a_name_that_starts_alike', 'tid') == base
+}
+
+// `$if T is Foo` is not read for a concrete type: V's `is` takes an alias of Foo, Foo may be another
+// type parameter, and an array of an interface is a type, not the interface
+fn test_a_check_for_a_concrete_type_keeps_the_instances() {
+	g := graph_of({
+		'lib/app/app.v': 'module app
+
+pub struct Solid {}
+
+pub fn (s Solid) tag() {}
+
+pub type Renamed = Solid
+
+pub fn (r Renamed) tag() {}
+
+pub struct Decoy {}
+
+pub fn (d Decoy) tag() {}
+
+pub struct Rest {}
+
+pub fn (r Rest) tag() {}
+
+pub fn by_type[T]() {
+	\$if T is Solid {
+		v := T{}
+		v.tag()
+	}
+}
+
+pub fn by_var[T](x T) {
+	\$if x is Solid {
+		v := T{}
+		v.tag()
+	}
+}
+
+pub fn in_the_else[T](x T) {
+	\$if T is Solid {
+	} \$else {
+		x.tag()
+	}
+}
+
+pub fn other_param[T, U](x T, y U) {
+	\$if T is U {
+		v := T{}
+		v.tag()
+	}
+}
+
+pub interface Pinger {
+	ping()
+}
+
+pub struct Echo {}
+
+pub fn (e Echo) ping() {}
+
+pub fn elements[T](x T) {
+	\$if T is []Pinger {
+		x.first().ping()
+	}
+}
+
+pub fn run(r Renamed) {
+	by_type[Renamed]()
+	by_var(r)
+	other_param(Rest{}, Rest{})
+	in_the_else(Solid{})
+	in_the_else(Rest{})
+}
+'
+	})
+	// the else of a type check leaves its type out
+	assert provided_calls(g, 'in_the_else', 'tag') == ['lib.app.Rest.tag:inferred']
+	assert provided_calls(g, 'by_type', 'tag') == ['lib.app.Renamed.tag:inferred']
+	assert provided_calls(g, 'by_var', 'tag') == ['lib.app.Renamed.tag:inferred']
+	assert provided_calls(g, 'other_param', 'tag') == ['lib.app.Rest.tag:inferred']
+	assert provided_calls(g, 'elements', 'ping') == ['lib.app.Pinger.ping:inferred']
+}
+
+// an interface check holds a type parameter to the instances that can implement it, and it reads
+// the same in each spelling
+fn test_an_interface_check_leaves_out_an_instance_that_cannot_implement_it() {
+	g := graph_of({
+		'lib/app/app.v': 'module app
+
+pub interface Named {
+	name string
+}
+
+pub interface Pinger {
+	Named
+	ping(n int) string
+	str() string
+}
+
+pub struct Good {
+pub:
+	name string
+}
+
+pub fn (g Good) ping(n int) string {
+	return ""
+}
+
+// other parameters
+pub struct Arity {
+pub:
+	name string
+}
+
+pub fn (a Arity) ping() string {
+	return ""
+}
+
+// no field the embedded interface has
+pub struct Nameless {}
+
+pub fn (n Nameless) ping(k int) string {
+	return ""
+}
+
+pub struct Decoy {
+pub:
+	name string
+}
+
+pub fn (d Decoy) ping(n int) string {
+	return ""
+}
+
+pub fn by_var[T](x T) {
+	\$if x is Pinger {
+		x.ping(1)
+	}
+}
+
+pub fn by_type[T](x T) {
+	\$if T is Pinger {
+		x.ping(1)
+	}
+}
+
+pub fn by_unaliased[T](x T) {
+	\$if T.unaliased_typ is Pinger {
+		x.ping(1)
+	}
+}
+
+pub fn no_instance[T](x T) {
+	\$if T.unaliased_typ is Pinger {
+		x.ping(1)
+	}
+}
+
+pub fn none_can[T](x T) {
+	\$if x is Pinger {
+		x.ping(1)
+	}
+}
+
+// the else of the check is what can`t implement it, and what is left of the rest isn`t read
+pub fn in_the_else[T](x T) {
+	\$if T is Pinger {
+	} \$else {
+		x.ping()
+	}
+}
+
+pub fn passes_on[T](x T) {
+	\$if x is Pinger {
+		helper(x)
+	}
+}
+
+pub fn helper[U](v U) {
+	v.ping(1)
+}
+
+pub fn run() {
+	for_each := Good{}
+	by_var(for_each)
+	by_var(Arity{})
+	by_var(Nameless{})
+	by_type(for_each)
+	by_type(Arity{})
+	by_unaliased(for_each)
+	by_unaliased(Nameless{})
+	none_can(Arity{})
+	passes_on(for_each)
+	passes_on(Arity{})
+	in_the_else(Arity{})
+}
+'
+	})
+	assert provided_calls(g, 'in_the_else', 'ping') == ['lib.app.Arity.ping:inferred']
+	good := ['lib.app.Good.ping:inferred']
+	// a call of a generic function records no condition, so what it passes on isn't narrowed by one
+	assert provided_calls(g, 'helper', 'ping') == ['lib.app.Good.ping:inferred',
+		'lib.app.Arity.ping:inferred']
+	assert provided_calls(g, 'by_var', 'ping') == good
+	assert provided_calls(g, 'by_type', 'ping') == good
+	assert provided_calls(g, 'by_unaliased', 'ping') == good
+	assert provided_calls(g, 'no_instance', 'ping') == ['lib.app.Pinger.ping:inferred']
+	assert provided_calls(g, 'none_can', 'ping') == ['lib.app.Pinger.ping:inferred']
+}
+
+// a check for several kinds: an alias meets a kind however it is written, a test that isn`t decided
+// keeps the instance, a kind with no builtin type leaves the others no stand-in, and a condition
+// that isn`t only kinds is no guard
+fn test_a_check_for_several_kinds_reads_each_kind() {
+	g := graph_of({
+		'vlib/builtin/builtin.v': 'module builtin
+
+pub struct array {}
+
+pub fn (a array) clear() {}
+
+pub fn (a array) reverse() {}
+
+pub struct map {
+pub:
+	key_bytes int
+}
+
+pub fn (m map) clear() {}
+
+pub fn (m map) tag() {}
+
+pub fn (i int) show() {}
+'
+		'lib/app/app.v':          'module app
+
+pub type Table = map[string]int
+
+pub fn (t Table) tag() {}
+
+pub fn (t Table) reverse() {}
+
+pub type Flag = bool
+
+pub fn (f Flag) tag() {}
+
+pub struct Plain {}
+
+pub fn (p Plain) tag() {}
+
+pub fn (p Plain) clear() {}
+
+pub fn (p Plain) reverse() {}
+
+pub fn (p Plain) show() {}
+
+pub struct Decoy {}
+
+pub fn (d Decoy) tag() {}
+
+pub fn (d Decoy) clear() {}
+
+pub fn (d Decoy) reverse() {}
+
+pub fn (d Decoy) show() {}
+
+pub fn alias_written_plain[T](x T) {
+	\$if T is \$map || T is \$array_dynamic {
+		x.tag()
+	}
+}
+
+pub fn alias_unaliased[T](x T) {
+	\$if T.unaliased_typ is \$array_dynamic || T.unaliased_typ is \$map {
+		x.reverse()
+	}
+}
+
+// V reads an alias of a bool as no \$bool
+pub fn alias_of_bool[T](x T) {
+	\$if T is \$bool {
+		x.tag()
+	}
+}
+
+// nor written with `unaliased_typ`
+pub fn alias_of_bool_unaliased[T](x T) {
+	\$if T.unaliased_typ is \$bool || T.unaliased_typ is \$map {
+		x.tag()
+	}
+}
+
+pub fn undecided_kind[T](x T) {
+	\$if T.unaliased_typ is \$struct || T.unaliased_typ is \$map {
+		x.tag()
+	}
+}
+
+pub fn not_only_kinds[T](x T) {
+	\$if T.unaliased_typ is \$map || windows {
+		x.tag()
+	}
+}
+
+pub fn a_kind_with_no_type[T](mut x T) {
+	\$if T.unaliased_typ is \$array || T.unaliased_typ is \$map {
+		x.clear()
+	}
+}
+
+pub fn int_or_map[T](x T) {
+	\$if T.unaliased_typ is \$int || T.unaliased_typ is \$map {
+		x.show()
+	}
+}
+
+pub fn a_loop_over_a_map[T](x T) {
+	\$if T.unaliased_typ is \$array_dynamic || T.unaliased_typ is \$map {
+		\$for f in T.fields {
+			x.\$(f.name).show()
+		}
+	}
+}
+
+pub fn run(t Table, f Flag) {
+	alias_written_plain[Table](t)
+	alias_unaliased[Table](t)
+	alias_of_bool[Flag](f)
+	alias_of_bool_unaliased[Flag](f)
+	undecided_kind(Plain{})
+	not_only_kinds(Plain{})
+}
+'
+	})
+	assert provided_calls(g, 'alias_written_plain', 'tag') == ['lib.app.Table.tag:inferred']
+	assert provided_calls(g, 'alias_unaliased', 'reverse') == ['lib.app.Table.reverse:inferred']
+	assert provided_calls(g, 'alias_of_bool_unaliased', 'tag').all(!it.contains('Flag'))
+	assert provided_calls(g, 'undecided_kind', 'tag') == ['lib.app.Plain.tag:inferred']
+	assert provided_calls(g, 'not_only_kinds', 'tag') == ['lib.app.Plain.tag:inferred']
+	assert provided_calls(g, 'a_kind_with_no_type', 'clear') == ['clear:extracted']
+	assert provided_calls(g, 'int_or_map', 'show') == ['show:extracted']
+	assert provided_calls(g, 'a_loop_over_a_map', 'show').all(!it.contains('int.show'))
+	assert provided_calls(g, 'alias_of_bool', 'tag').all(!it.contains('Flag'))
+}
+
+// a function in a field of the name is no method V writes
+fn test_a_function_field_named_as_a_method_v_writes_is_not_undeclared() {
+	g := graph_of({
+		'lib/app/app.v': 'module app
+
+pub struct Holder {
+pub:
+	type_name fn () string = fn () string {
+		return ""
+	}
+}
+
+pub fn read[T](x T) string {
+	return x.type_name()
+}
+
+pub type Reader = fn () int
+
+// a named function type is one too, and a field of another type can`t be called
+pub struct Named {
+pub:
+	type_idx Reader
+}
+
+pub fn idx[T](x T) int {
+	return x.type_idx()
+}
+
+pub fn run() {
+	read(Holder{})
+}
+'
+	})
+	assert !provided_calls(g, 'read', 'type_name').any(it.ends_with(':undeclared'))
+	assert !provided_calls(g, 'idx', 'type_idx').any(it.ends_with(':undeclared'))
+	data := graph_of({
+		'lib/app/app.v': 'module app
+
+pub struct Data {
+pub:
+	type_idx int
+}
+
+pub fn idx[T](x T) int {
+	return x.type_idx()
+}
+'
+	})
+	assert provided_calls(data, 'idx', 'type_idx') == ['type_idx:undeclared']
+}
+
+// what an interface asks of an implementer is what its body declares: a method written with a body
+// on the interface isn't, nor a static one, but one the body declares still is
+fn test_a_method_with_a_body_on_an_interface_is_not_asked_of_an_implementer() {
+	g := graph_of({
+		'lib/app/app.v': 'module app
+
+pub interface Spk {
+	say() int
+}
+
+pub fn (s Spk) extra() {}
+
+pub fn (mut s Spk) extra_mut() {}
+
+pub fn Spk.make() {}
+
+pub struct Plain {}
+
+pub fn (p Plain) say() int {
+	return 1
+}
+
+pub fn (p Plain) other() {}
+
+// it doesn`t have what the body declares
+pub struct Silent {}
+
+pub fn (s Silent) other() {}
+
+pub struct Decoy {}
+
+pub fn (d Decoy) say() int {
+	return 1
+}
+
+pub fn (d Decoy) other() {}
+
+pub fn (d Decoy) bye() {}
+
+pub fn (d Decoy) get() int {
+	return 1
+}
+
+pub fn own[T](x T) {
+	\$if T is Spk {
+		x.other()
+		x.say()
+	}
+}
+
+pub interface Inner {
+	hi() int
+}
+
+pub fn (i Inner) helper() {}
+
+pub interface Outer {
+	Inner
+	bye()
+}
+
+pub struct Duo {}
+
+pub fn (d Duo) hi() int {
+	return 1
+}
+
+pub fn (d Duo) bye() {}
+
+pub fn (d Duo) other() {}
+
+pub fn embedded[T](x T) {
+	\$if T.unaliased_typ is Outer {
+		x.other()
+	}
+}
+
+pub interface Gen[K] {
+	get() int
+}
+
+pub fn (g Gen[K]) body() {}
+
+pub struct Getter {}
+
+pub fn (g Getter) get() int {
+	return 1
+}
+
+pub fn (g Getter) other() {}
+
+// a generic interface isn`t read, so its members can`t leave an instance out
+pub fn generic_interface[T](x T) {
+	\$if T is Gen[int] {
+		x.other()
+	}
+}
+
+pub fn run() {
+	own(Plain{})
+	own(Silent{})
+	embedded(Duo{})
+	generic_interface(Getter{})
+}
+'
+	})
+	assert provided_calls(g, 'own', 'other') == ['lib.app.Plain.other:inferred']
+	assert provided_calls(g, 'own', 'say') == ['lib.app.Plain.say:inferred']
+	assert provided_calls(g, 'embedded', 'other') == ['lib.app.Duo.other:inferred']
+	assert provided_calls(g, 'generic_interface', 'other') == ['lib.app.Getter.other:inferred']
+	assert is_interface_member('fn (Spk) say() int')
+	assert is_interface_member('fn (Gen[K, V]) say()')
+	assert !is_interface_member('fn (s Spk) extra()')
+	assert !is_interface_member('fn (s Gen[K, V]) extra()')
+	assert !is_interface_member('fn (mut s Spk) extra()')
+	assert !is_interface_member('pub fn (s Spk) extra()')
+}
+
+// an instance is only left out of an interface check when the whole of it was read and the member
+// isn`t there: a member the lookups can`t pick one of, or don`t reach, keeps it
+fn test_a_member_the_lookup_cannot_decide_keeps_the_instance() {
+	g := graph_of({
+		'lib/app/app.v':         'module app
+
+import os
+
+pub interface HasM {
+	mc() int
+}
+
+pub interface HasTag {
+	tag int
+}
+
+pub interface HasClose {
+	mut:
+	close()
+}
+
+pub struct Lefty {
+pub:
+	tag int
+}
+
+pub fn (l Lefty) mc() int {
+	return 1
+}
+
+pub struct Righty {
+pub:
+	tag int
+}
+
+pub fn (r Righty) mc() int {
+	return 2
+}
+
+// the same member by two embeds
+pub struct Both {
+	Lefty
+	Righty
+}
+
+pub fn (b Both) other() {}
+
+// embeds, past what the lookups follow
+pub struct Deep1 {
+	Deep2
+}
+
+pub struct Deep2 {
+	Deep3
+}
+
+pub struct Deep3 {
+	Deep4
+}
+
+pub struct Deep4 {
+	Deep5
+}
+
+pub struct Deep5 {
+	Deep6
+}
+
+pub struct Deep6 {
+pub:
+	tag int
+}
+
+pub fn (d Deep6) mc() int {
+	return 3
+}
+
+pub fn (d Deep1) other() {}
+
+// a method on concrete instances of the type
+pub struct Box[T] {}
+
+pub fn (b Box[int]) mc() int {
+	return 4
+}
+
+pub fn (b Box[string]) mc() int {
+	return 5
+}
+
+pub fn (b Box[T]) other() {}
+
+// one copy per platform
+pub struct Doc {}
+
+pub fn (d Doc) other() {}
+
+// the method of a type outside the graph
+pub struct Mine {
+	os.File
+}
+
+pub fn (m Mine) other() {}
+
+// through an alias, to one with the method by two embeds
+pub type AlBoth = Both
+
+pub fn (a AlBoth) other() {}
+
+// embeds read in full, where nothing has the member
+pub struct Bare {}
+
+pub struct Wraps {
+	Bare
+}
+
+pub fn (w Wraps) other() {}
+
+pub struct Decoy {
+pub:
+	tag int
+}
+
+pub fn (d Decoy) mc() int {
+	return 6
+}
+
+pub fn (d Decoy) close() {}
+
+pub fn (d Decoy) other() {}
+
+pub fn by_method[T](x T) {
+	\$if T is HasM {
+		x.other()
+	}
+}
+
+pub fn by_field[T](x T) {
+	\$if T is HasTag {
+		x.other()
+	}
+}
+
+pub fn by_outside[T](x T) {
+	\$if T is HasClose {
+		x.other()
+	}
+}
+
+pub fn run() {
+	by_method(Both{})
+	by_method(Deep1{})
+	by_method(Box[int]{})
+	by_method(Doc{})
+	by_method(AlBoth{})
+	by_method(Wraps{})
+	by_field(Both{})
+	by_field(Deep1{})
+	by_field(Wraps{})
+	by_outside(Mine{})
+	by_outside(Wraps{})
+}
+'
+		'lib/far2/far2.v':         'module far2
+
+// the type of the name that has the method is another module`s
+pub struct Wraps {}
+
+pub fn (w Wraps) mc() int {
+	return 9
+}
+'
+		'lib/app/doc_nix.c.v':     'module app
+
+pub fn (d Doc) mc() int {
+	return 7
+}
+'
+		'lib/app/doc_windows.c.v': 'module app
+
+pub fn (d Doc) mc() int {
+	return 8
+}
+'
+	})
+	method := provided_calls(g, 'by_method', 'other')
+	for kept in ['Both', 'Deep1', 'Box[T]', 'Doc', 'AlBoth'] {
+		assert method.contains('lib.app.${kept}.other:inferred'), kept
+	}
+	assert !method.any(it.contains('Wraps')), method.str()
+	field := provided_calls(g, 'by_field', 'other')
+	for kept in ['Both', 'Deep1'] {
+		assert field.contains('lib.app.${kept}.other:inferred'), kept
+	}
+	assert !field.any(it.contains('Wraps')), field.str()
+	assert provided_calls(g, 'by_outside', 'other') == ['lib.app.Mine.other:inferred']
+}
+
+// a program's copies of a method per platform each have their own id, so no one of them can be picked:
+// the type has it, an alias's own included, whatever the alias names
+fn test_a_method_with_a_copy_per_platform_in_a_program_keeps_the_instance() {
+	files := {
+		'main.v':           'module main
+
+interface HasM {
+	mc() int
+}
+
+struct Doc {}
+
+fn (d Doc) other() {}
+
+struct Base {}
+
+type AlOwn = Base
+
+fn (a AlOwn) other() {}
+
+// what the alias names has no such method, and nor does this
+struct Lacking {}
+
+fn (l Lacking) other() {}
+
+type AlLacking = Base
+
+fn (a AlLacking) other() {}
+
+struct Dc {}
+
+fn (d Dc) mc() int {
+	return 0
+}
+
+fn (d Dc) other() {}
+
+fn am[T](x T) {
+	\$if T is HasM {
+		x.other()
+	}
+}
+
+fn main() {
+	am(Doc{})
+	am(AlOwn{})
+	am(Lacking{})
+	am(AlLacking{})
+}
+'
+		'plat_nix.c.v':     'module main
+
+fn (d Doc) mc() int {
+	return 1
+}
+
+fn (a AlOwn) mc() int {
+	return 1
+}
+'
+		'plat_windows.c.v': 'module main
+
+fn (d Doc) mc() int {
+	return 2
+}
+
+fn (a AlOwn) mc() int {
+	return 2
+}
+'
+	}
+	mut g := Graph{}
+	for rel, src in files {
+		syms, edges := extract_v_text(src, rel)
+		g.symbols << syms
+		g.edges << edges
+	}
+	disambiguate_ids(mut g)
+	resolve_edges(mut g)
+	other := g.edges.filter(it.kind == .calls && it.from.all_before('@') == 'main.am'
+		&& it.to.all_after_last('.') == 'other').map(it.to.all_before('@'))
+	assert 'main.Doc.other' in other, other.str()
+	assert 'main.AlOwn.other' in other, other.str()
+	assert 'main.Lacking.other' !in other, other.str()
+	assert 'main.AlLacking.other' !in other, other.str()
+}
+
+// the instance and the interface may each be generic, or of another module, and a type no
+// declaration names isn`t read
+fn test_an_interface_check_reads_each_way_of_naming_the_instance() {
+	g := graph_of({
+		'lib/app/app.v': 'module app
+
+pub interface Local {
+	ping(n int)
+}
+
+pub struct Good {}
+
+pub fn (g Good) ping(n int) {}
+
+pub struct Gen[T] {}
+
+pub fn (g Gen[T]) ping() {}
+
+pub struct Decoy {}
+
+pub fn (d Decoy) ping(n int) {}
+
+pub fn generic_inst[T](x T) {
+	\$if x is Local {
+		x.ping(1)
+	}
+}
+
+pub interface Both {
+	mut:
+	clear()
+	gone()
+}
+
+pub fn arr[T](mut x T) {
+	\$if x is Both {
+		x.clear()
+	}
+}
+
+pub interface Top {
+	Mid
+	top()
+}
+
+pub interface Mid {
+	Low
+}
+
+pub interface Low {
+	low()
+}
+
+pub struct Whole {}
+
+pub fn (w Whole) top() {}
+
+pub fn (w Whole) low() {}
+
+pub struct NoLow {}
+
+pub fn (n NoLow) top() {}
+
+pub fn (d Decoy) top() {}
+
+pub fn (d Decoy) low() {}
+
+pub fn (d Decoy) clear() {}
+
+pub fn (d Decoy) gone() {}
+
+pub fn two_levels[T](x T) {
+	\$if x is Top {
+		x.top()
+	}
+}
+
+pub fn run() {
+	generic_inst(Good{})
+	generic_inst(Gen[int]{})
+	mut a := []int{}
+	arr(mut a)
+	two_levels(Whole{})
+	two_levels(NoLow{})
+}
+'
+		'vlib/builtin/builtin.v': 'module builtin
+
+pub struct array {}
+
+pub fn (a array) clear() {}
+'
+		'lib/app/app_test.v': 'module app
+
+pub struct Tst {}
+
+pub fn (t Tst) tping() {}
+
+pub fn (t Tst) both() {}
+
+// it has no `tping`, read from the test file that declares it
+pub struct TstLack {}
+
+pub fn (t TstLack) both() {}
+
+fn test_tst() {
+	in_test(Tst{})
+	in_test(TstLack{})
+}
+'
+		'lib/app/more.v': 'module app
+
+pub interface Pinger {
+	tping()
+}
+
+pub struct TDecoy {}
+
+pub fn (t TDecoy) tping() {}
+
+pub fn (t TDecoy) both() {}
+
+pub struct TDecoy2 {}
+
+pub fn (t TDecoy2) both() {}
+
+pub fn in_test[T](x T) {
+	\$if x is Pinger {
+		x.tping()
+		x.both()
+	}
+}
+'
+	})
+	assert provided_calls(g, 'generic_inst', 'ping') == ['lib.app.Good.ping:inferred']
+	// an array has `clear` and no `gone`: it can`t implement the interface
+	assert provided_calls(g, 'arr', 'clear') == ['lib.app.Both.clear:inferred']
+	assert provided_calls(g, 'two_levels', 'top') == ['lib.app.Whole.top:inferred']
+	// an instance in a test file is read from there
+	assert provided_calls(g, 'in_test', 'tping') == ['lib.app.Tst.tping:inferred']
+	assert provided_calls(g, 'in_test', 'both') == ['lib.app.Tst.both:inferred']
+}
+
+// as a type of another module, called from a program
+fn test_an_interface_check_reads_an_instance_and_an_interface_of_another_module() {
+	g := graph_of({
+		'far/far.v': 'module far
+
+pub interface Reaches {
+	reach(n int)
+}
+
+pub struct GoodReach {}
+
+pub fn (g GoodReach) reach(n int) {}
+
+pub struct WrongReach {}
+
+pub fn (w WrongReach) reach() {}
+
+pub struct Wrong {}
+
+pub fn (w Wrong) ping() {}
+'
+		'main.v':    'module main
+
+import far
+import ext
+
+interface Local {
+	ping(n int)
+}
+
+struct Good {}
+
+fn (g Good) ping(n int) {}
+
+struct Decoy {}
+
+fn (d Decoy) ping(n int) {}
+
+fn (d Decoy) reach(n int) {}
+
+struct Decoy2 {}
+
+fn (d Decoy2) reach(n int) {}
+
+fn qual_inst[T](x T) {
+	\$if x is Local {
+		x.ping(1)
+	}
+}
+
+fn qual_iface[T](x T) {
+	\$if x is far.Reaches {
+		x.reach(1)
+	}
+}
+
+interface Nm {
+	nm() string
+}
+
+struct Dcl {}
+
+fn (d Dcl) nm() string {
+	return ""
+}
+
+// a type no declaration in the graph names isn`t read, and may declare the method
+fn strs[T](x T) {
+	\$if x is Nm {
+		x.str()
+	}
+}
+
+fn main() {
+	qual_inst(Good{})
+	qual_inst(far.Wrong{})
+	qual_iface(far.GoodReach{})
+	qual_iface(far.WrongReach{})
+	strs(Dcl{})
+	strs(ext.Thing{})
+}
+'
+	})
+	ping := g.edges.filter(it.kind == .calls && it.from.all_before('@') == 'main.qual_inst'
+		&& it.to.all_after_last('.') == 'ping').map(it.to.all_before('@'))
+	assert ping == ['main.Good.ping']
+	reach := g.edges.filter(it.kind == .calls && it.from.all_before('@') == 'main.qual_iface'
+		&& it.to.all_after_last('.') == 'reach').map(it.to.all_before('@'))
+	assert reach == ['far.GoodReach.reach']
+	assert !g.edges.any(it.kind == .calls && it.from.all_before('@') == 'main.strs'
+		&& it.to == 'str' && it.provenance == .undeclared)
+}
+
+// the method of a check nested in another is on whichever of the two interfaces declares it
+fn test_nested_interface_checks_find_the_method_on_either() {
+	g := graph_of({
+		'lib/app/app.v': 'module app
+
+pub interface Aa1 {
+	aa()
+}
+
+pub interface Bb1 {
+	bb()
+}
+
+pub struct Decoy1 {}
+
+pub fn (d Decoy1) bb() {}
+
+pub struct Decoy2 {}
+
+pub fn (d Decoy2) bb() {}
+
+pub fn by_type[T](x T) {
+	\$if T is Aa1 {
+		\$if T is Bb1 {
+			x.bb()
+		}
+	}
+}
+
+pub fn by_unaliased[T](x T) {
+	\$if T.unaliased_typ is Aa1 {
+		\$if T.unaliased_typ is Bb1 {
+			x.bb()
+		}
+	}
+}
+'
+	})
+	assert provided_calls(g, 'by_type', 'bb') == ['lib.app.Bb1.bb:inferred']
+	assert provided_calls(g, 'by_unaliased', 'bb') == ['lib.app.Bb1.bb:inferred']
+}
+
+// a pointer to an interface, like an array of one, is a concrete type, and V holds no implementer
+// to it
+fn test_a_check_for_a_pointer_to_an_interface_is_not_an_interface_check() {
+	g := graph_of({
+		'lib/app/app.v': 'module app
+
+pub interface Speaker {
+	speak() int
+}
+
+pub struct Dog {}
+
+pub fn (d Dog) speak() int {
+	return 1
+}
+
+pub fn (d Dog) only() {}
+
+pub struct Decoy {}
+
+pub fn (d Decoy) speak() int {
+	return 1
+}
+
+pub fn (d Decoy) only() {}
+
+pub fn by_type[T](x T) {
+	\$if T is &Speaker {
+		x.only()
+	}
+}
+
+pub fn run() {
+	d := Dog{}
+	by_type(d)
+	by_type(&d)
+}
+'
+	})
+	assert !provided_calls(g, 'by_type', 'only').any(it.contains('Dog'))
+}
+
+// `T.unaliased_typ is X` names X as `T is X` does: through an import`s alias or its selected names
+fn test_an_unaliased_check_reads_the_names_an_import_gives() {
+	g := graph_of({
+		'lib/sub/sub.v':     'module sub
+
+pub interface Iface {
+	m() int
+}
+'
+		'lib/pick/pick.v':   'module pick
+
+pub interface Picked {
+	m() int
+}
+'
+		'lib/app/app.v':     'module app
+
+import lib.sub as z
+
+pub struct Foo {}
+
+pub fn (f Foo) m() int {
+	return 1
+}
+
+pub struct Decoy {}
+
+pub fn (d Decoy) m() int {
+	return 2
+}
+
+pub fn plain[T](x T) {
+	\$if T is z.Iface {
+		x.m()
+	}
+}
+
+pub fn unaliased[T](x T) {
+	\$if T.unaliased_typ is z.Iface {
+		x.m()
+	}
+}
+
+pub fn run() {
+	plain(Foo{})
+	unaliased(Foo{})
+}
+'
+		'lib/app/picked.v':  'module app
+
+import lib.pick { Picked }
+
+pub fn selected[T](x T) {
+	\$if T.unaliased_typ is Picked {
+		x.m()
+	}
+}
+
+pub fn run2() {
+	selected(Foo{})
+}
+'
+	})
+	foo := ['lib.app.Foo.m:inferred']
+	assert provided_calls(g, 'plain', 'm') == foo
+	assert provided_calls(g, 'unaliased', 'm') == foo
+	assert provided_calls(g, 'selected', 'm') == foo
+}
+
+// the else of `$map` in a check for an array or a map is only ever the array
+fn test_a_nested_kind_check_narrows_the_stand_ins() {
+	g := graph_of({
+		'vlib/builtin/builtin.v': 'module builtin
+
+pub struct array {}
+
+pub fn (a array) clear() {}
+
+pub struct map {}
+
+pub fn (m map) clear() {}
+
+pub fn (m map) keys() {}
+'
+		'lib/app/app.v':          'module app
+
+pub fn plain[T](mut x T) {
+	\$if T is \$array_dynamic || T is \$map {
+		\$if T is \$map {
+			x.keys()
+		} \$else {
+			x.clear()
+		}
+	}
+}
+
+pub fn unaliased[T](mut x T) {
+	\$if T.unaliased_typ is \$array_dynamic || T.unaliased_typ is \$map {
+		\$if T.unaliased_typ is \$map {
+			x.keys()
+		} \$else {
+			x.clear()
+		}
+	}
+}
+'
+	})
+	assert provided_calls(g, 'plain', 'clear') == ['vlib.builtin.array.clear:inferred']
+	assert provided_calls(g, 'unaliased', 'clear') == ['vlib.builtin.array.clear:inferred']
+	assert provided_calls(g, 'plain', 'keys') == ['vlib.builtin.map.keys:extracted']
+}
+
+// `$if x is Foo` holds on a variable typed by a type parameter, `mut` or not, but never on `x &T`,
+// which reads the same to a recipe as `mut x T`
+fn test_a_type_check_on_a_pointer_parameter_does_not_narrow_it() {
+	g := graph_of({
+		'lib/app/app.v': 'module app
+
+pub struct Foo {}
+
+pub fn (f Foo) m() {}
+
+pub struct Bar {}
+
+pub fn (b Bar) m() {}
+
+pub fn pointer[T](x &T) {
+	\$if x is Foo {
+		x.m()
+	} \$else {
+		x.m()
+	}
+}
+
+pub fn by_mut[T](mut x T) {
+	\$if x is Foo {
+		x.m()
+	}
+}
+
+pub fn by_mut_pointer[T](mut x &T) {
+	\$if x is Foo {
+		x.m()
+	}
+}
+
+pub fn run() {
+	pointer(&Bar{})
+	mut f := Foo{}
+	by_mut(mut f)
+}
+'
+	})
+	assert provided_calls(g, 'pointer', 'm') == ['lib.app.Bar.m:inferred']
+	assert provided_calls(g, 'by_mut', 'm') == ['lib.app.Foo.m:inferred']
+	assert provided_calls(g, 'by_mut_pointer', 'm') == ['lib.app.Foo.m:inferred']
+}
+
+// a parameter written `&T`, `mut` or not, keeps builtin's fallback under `$if x is $map`: V calls
+// builtin's `clone` on `mut x T` even for an alias that declares its own. A variable typed T has only
+// its instances, and a method builtin doesn't have is the instance's on either
+fn test_a_kind_check_on_a_pointer_parameter_keeps_its_fallback() {
+	g := graph_of({
+		'vlib/builtin/builtin.v': 'module builtin
+
+pub struct map {}
+
+pub fn (m map) clone() map {
+	return m
+}
+'
+		'lib/app/app.v':          'module app
+
+pub struct Decoy1 {}
+
+pub fn (d Decoy1) clone() int {
+	return 1
+}
+
+pub fn (d Decoy1) tag() {}
+
+pub struct Decoy2 {}
+
+pub fn (d Decoy2) clone() int {
+	return 2
+}
+
+pub fn (d Decoy2) tag() {}
+
+pub type Own = map[string]int
+
+pub fn (o Own) clone() Own {
+	return o
+}
+
+pub fn (o Own) tag() {}
+
+pub fn alias_mut[T](mut x T) {
+	\$if x is \$map {
+		x.clone()
+	}
+}
+
+pub fn own_method_mut[T](mut x T) {
+	\$if x is \$map {
+		x.tag()
+	}
+}
+
+pub fn run() {
+	mut own := Own{}
+	alias_mut(mut own)
+	own_method_mut(mut own)
+}
+
+pub fn by_pointer[T](x &T) {
+	\$if x is \$map {
+		x.clone()
+	}
+}
+
+pub fn by_value[T](x T) {
+	\$if x is \$map {
+		x.clone()
+	}
+}
+
+pub fn by_mut[T](mut x T) {
+	\$if x is \$map {
+		x.clone()
+	}
+}
+
+pub fn by_mut_pointer[T](mut x &T) {
+	\$if x is \$map {
+		x.clone()
+	}
+}
+'
+	})
+	assert provided_calls(g, 'by_pointer', 'clone') == ['vlib.builtin.map.clone:inferred']
+	assert provided_calls(g, 'by_value', 'clone') == ['clone:extracted']
+	builtin := ['vlib.builtin.map.clone:inferred']
+	assert provided_calls(g, 'by_mut', 'clone') == builtin
+	assert provided_calls(g, 'by_mut_pointer', 'clone') == builtin
+	assert provided_calls(g, 'alias_mut', 'clone') == builtin
+	assert provided_calls(g, 'own_method_mut', 'tag') == ['lib.app.Own.tag:inferred']
+}
+
+// an alias of a pointer meets no test: V reads it as a pointer, written either way
+fn test_an_alias_of_a_pointer_meets_no_check() {
+	g := graph_of({
+		'lib/app/app.v': 'module app
+
+pub struct Foo {}
+
+pub type Pint = &int
+
+pub fn (a Pint) tag() {}
+
+pub type Pstr = &string
+
+pub fn (a Pstr) tag() {}
+
+pub type Pfoo = &Foo
+
+pub fn (a Pfoo) tag() {}
+
+pub fn in_else[T](v T) {
+	\$if T is \$int {
+	} \$else {
+		v.tag()
+	}
+}
+
+pub fn in_block[T](v T) {
+	\$if T is \$int {
+		v.tag()
+	}
+}
+
+pub fn unaliased[T](v T) {
+	\$if T.unaliased_typ is \$string {
+	} \$else {
+		v.tag()
+	}
+}
+
+pub fn named[T](v T) {
+	\$if T.unaliased_typ is Foo {
+	} \$else {
+		v.tag()
+	}
+}
+
+// V holds these for it, and doesn`t hold a struct
+pub fn alias_kind[T](v T) {
+	\$if T is \$alias {
+		v.tag()
+	}
+}
+
+pub fn pointer_kind[T](v T) {
+	\$if T is \$pointer {
+		v.tag()
+	}
+}
+
+pub fn run(p Pint, s Pstr, f Pfoo) {
+	alias_kind[Pint](p)
+	pointer_kind[Pint](p)
+	in_else[Pint](p)
+	in_block[Pint](p)
+	unaliased[Pstr](s)
+	named[Pfoo](f)
+}
+'
+	})
+	assert provided_calls(g, 'alias_kind', 'tag') == ['lib.app.Pint.tag:inferred']
+	assert provided_calls(g, 'pointer_kind', 'tag') == ['lib.app.Pint.tag:inferred']
+	assert provided_calls(g, 'in_else', 'tag') == ['lib.app.Pint.tag:inferred']
+	assert provided_calls(g, 'in_block', 'tag') == ['tag:extracted']
+	assert provided_calls(g, 'unaliased', 'tag') == ['lib.app.Pstr.tag:inferred']
+	assert provided_calls(g, 'named', 'tag') == ['lib.app.Pfoo.tag:inferred']
+}
+
+// a branch on a call has no variable: another call`s field is not of the branch
+fn test_a_branch_of_several_types_on_a_call_narrows_nothing() {
+	g := graph_of({
+		'lib/app/app.v': 'module app
+
+pub struct Base {}
+
+pub fn (b Base) tid() {}
+
+pub struct Rival {}
+
+pub fn (r Rival) tid() {}
+
+pub struct One {
+pub:
+	same &Base
+}
+
+pub struct Two {
+pub:
+	same &Base
+}
+
+pub struct Three {}
+
+pub type Sum = One | Two | Three
+
+pub struct Other {
+pub:
+	same &Rival
+}
+
+pub fn make() Sum {
+	return Three{}
+}
+
+pub fn other() Other {
+	return Other{}
+}
+
+pub fn no_path() {
+	match make() {
+		One, Two {
+			other().same.tid()
+		}
+		else {}
+	}
+}
+'
+	})
+	assert provided_calls(g, 'no_path', 'tid') == ['lib.app.Rival.tid:inferred']
+}
+
+// a field holds a function of a type named in another module too, and a field that only ends in the
+// name is another field
+fn test_a_function_field_is_read_by_its_whole_name_and_across_modules() {
+	g := graph_of({
+		'lib/far/far.v': 'module far
+
+pub type Reader = fn () int
+'
+		'lib/app/app.v': 'module app
+
+import lib.far
+
+pub struct FnHolder {
+pub:
+	type_idx far.Reader
+}
+
+pub fn idx[T](x T) int {
+	return x.type_idx()
+}
+'
+	})
+	assert !provided_calls(g, 'idx', 'type_idx').any(it.ends_with(':undeclared'))
+	suffix := graph_of({
+		'lib/app/app.v': 'module app
+
+pub struct Data {
+pub:
+	my_type_idx fn () int
+}
+
+pub fn idx[T](x T) int {
+	return x.type_idx()
+}
+'
+	})
+	assert provided_calls(suffix, 'idx', 'type_idx') == ['type_idx:undeclared']
+}
+// `JS.X.prototype.constructor()` builds a `JS.X`, whose methods are the binding's
+fn test_a_js_constructor_call_has_the_type_it_builds() {
+	g := graph_of({
+		'lib/app/app.js.v': 'module app
+
+pub interface JS.Array {
+	push(JS.Any) JS.Any
+}
+
+pub fn JS.Array.prototype.constructor(...any) JS.Array
+
+pub fn JS.Array.prototype.other() JS.Array
+
+pub fn JS.Array.make() JS.Array
+
+// decoys: a call that names no type could reach them by the name
+pub struct One {}
+
+pub fn (o One) push(x int) {}
+
+pub struct Two {}
+
+pub fn (o Two) push(x int) {}
+
+pub fn built() {
+	a := JS.Array.prototype.constructor()
+	a.push(1)
+}
+
+pub fn no_constructor() {
+	a := JS.Array.prototype.other()
+	a.push(1)
+}
+
+pub fn no_prototype() {
+	a := JS.Array.make()
+	a.push(1)
+}
+'
+	})
+	assert provided_calls(g, 'built', 'push') == ['lib.app.Array.push:inferred']
+	assert provided_calls(g, 'no_constructor', 'push') == ['push:extracted']
+	assert provided_calls(g, 'no_prototype', 'push') == ['push:extracted']
+}
 // a field loop's str() on a field that declares none stays unresolved: a field's type may be one
 // this can't read, and nothing says which
 fn test_a_str_on_any_field_that_declares_none_stays_unresolved() {

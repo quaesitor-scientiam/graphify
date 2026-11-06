@@ -1453,6 +1453,15 @@ fn resolve_edges(mut g Graph) {
 			else {}
 		}
 	}
+	mut iface_fns := map[string][]string{}
+	for s in g.symbols {
+		if s.kind == .method && is_interface_member(s.signature) {
+			owner := s.id.all_before('@').all_before_last('.')
+			if owner in iface_ids {
+				iface_fns[owner] << s.name
+			}
+		}
+	}
 	mut inf := Infer{
 		by_name:      by_name
 		const_calls:  const_calls
@@ -1472,6 +1481,7 @@ fn resolve_edges(mut g Graph) {
 		enum_ids:     enum_ids
 		dynamic_ids:  dynamic_ids
 		iface_ids:    iface_ids
+		iface_fns:    iface_fns
 		generics_of:  generics_of
 		tparams_of:   tparams_of
 		alias_by_name: alias_by_name

@@ -37,6 +37,7 @@ struct Infer {
 	generics_of  map[string][]string // free function id -> its type parameters
 	tparams_of   map[string][]string // method id -> its own type parameters
 	iface_ids    map[string]bool     // ids of interfaces
+	iface_fns    map[string][]string // interface id -> the names of the methods it declares
 	// type aliases by name, for a bare call that converts to one (alias_conversion)
 	alias_by_name map[string][]TypeCand
 mut:
@@ -489,6 +490,8 @@ fn (inf &Infer) follow_steps(e Edge, depth int) ?InferredType {
 		}
 	} else if start.starts_with('ct:') {
 		t = inf.comptime_type(start[3..], e.file)?
+	} else if start.starts_with('agf:') {
+		t = inf.aggregate_field(start[4..], e.file)?
 	} else if start.starts_with('g:') {
 		if c := inf.find_const(start[2..], e.file) {
 			if depth >= const_depth {
@@ -717,6 +720,40 @@ fn (inf &Infer) follow_steps(e Edge, depth int) ?InferredType {
 		return none
 	}
 	return t
+}
+
+// aggregate_field is the type of a field read off a variable matched by a branch of several types,
+// `spec` being the field and those types, joined by `|`: that of each type's field, when they all
+// have the one type (same_receiver_type). V lets them differ, and then no one type is known.
+fn (inf &Infer) aggregate_field(spec string, file string) ?InferredType {
+	parts := spec.split('|')
+	if parts.len < 3 {
+		return none
+	}
+	scope := inf.scope_of[file] or { FileScope{} }
+	mut found := InferredType{}
+	for i, typ in parts[1..] {
+		ft := inf.field_of(InferredType{ text: typ, mod: scope.mod, file: file }, parts[0], file, 0)?
+		if i == 0 {
+			found = ft
+		} else if !inf.same_receiver_type(ft, found) {
+			return none
+		}
+	}
+	return found
+}
+
+// same_receiver_type reports whether two fields, each read where it is declared, have one type as a
+// receiver, so past `&` and `?`, which a call looks through: as same_type decides it, or, where
+// that can't tell across modules, the same text naming only builtin types, `map[string]int`.
+fn (inf &Infer) same_receiver_type(a InferredType, b InferredType) bool {
+	bare := bare_type(a.text)
+	other := bare_type(b.text)
+	same := inf.same_type(InferredType{ ...a, text: bare }, other, b.file) or {
+		return bare == other
+			&& bare.split_any('[]&?,() ').all(it == '' || it == 'map' || it in primitive_types)
+	}
+	return same
 }
 
 // fields_of_elem is the type of the fields `path` (`name.first`) read off one element of the

@@ -1331,10 +1331,14 @@ fn (mut f V3File) extract_fn(id flat.NodeId, mut syms []Symbol, mut edges []Edge
 	}
 	mut locals := map[string]string{}
 	mut vars := map[string]string{}
+	mut mut_vars := []string{}
 	for pid in params {
 		pn := f.node(pid)
 		if pn.value_text() != '' && pn.value_text() != '_' {
 			vars[pn.value_text()] = if pn.typ_text() != '' { 't:' + f.type_text(pn.typ_text()) } else { '' }
+			if pn.is_mut {
+				mut_vars << pn.value_text()
+			}
 		}
 	}
 	// the `ctx` a veb route method uses without declaring it, which V declares for it
@@ -1363,6 +1367,7 @@ fn (mut f V3File) extract_fn(id flat.NodeId, mut syms []Symbol, mut edges []Edge
 		} else {
 			f.generic_params(line, 'fn ${source_name(name)}')
 		}
+		mut_vars:  mut_vars
 		locals:    locals
 		vars:      vars
 	}
@@ -1778,6 +1783,9 @@ struct V3CallCtx {
 	// builds are the conditions of the `$if` branches around the block being walked,
 	// outermost first, under which V compiles its calls (see built, Edge.build)
 	builds []string
+	// mut_vars are the `mut` parameters of the function being walked. A recipe can't tell `mut x T`
+	// from `x &T`, both `t:&T` (see holds_is_check)
+	mut_vars []string
 mut:
 	locals map[string]string
 	vars   map[string]string
@@ -1790,6 +1798,9 @@ mut:
 	// variable to (see comptime_kind_pin, field_any_step); and under
 	// `loop:<variable>` the type a field loop walks the fields of
 	pins map[string]string
+	// aggregates is what each variable matched by a branch of several types, `A, B { ... }`,
+	// may be, in the branch: those types (see aggregate_field_recipe)
+	aggregates map[string][]string
 }
 
 // TypeCheck is a variable, or a field of one (`x.base_type`), narrowed to a type by
@@ -1906,9 +1917,19 @@ fn comptime_type_is(cond string) (string, string) {
 	return parts[0], typ
 }
 
-// is_tparam_recipe reports whether a recipe is exactly a type parameter, `t:T`.
+// is_tparam_recipe reports whether a recipe is exactly a type parameter, `t:T`, or a `mut` parameter
+// of that type, which the parser writes `t:&T`.
 fn is_tparam_recipe(recipe string, tparams []string) bool {
-	return recipe.starts_with('t:') && recipe[2..] in tparams
+	return recipe.starts_with('t:') && recipe[2..].trim_left('&') in tparams
+}
+
+// holds_is_check reports whether V's `$if name is X` can hold for the variable `name` typed by a type
+// parameter, so that the block sees it as X: for `x T`, `mut x T` and `mut x &T`, but never for a
+// concrete X on `x &T`, whose test is of the pointer.
+fn (ctx V3CallCtx) holds_is_check(name string) bool {
+	recipe := ctx.vars[name] or { return false }
+	return is_tparam_recipe(recipe, ctx.tparams)
+		&& (!recipe.starts_with('t:&') || name in ctx.mut_vars)
 }
 
 // guarded is `ctx` with the comptime condition `cond` known to hold (`+`) or to fail
@@ -1944,6 +1965,31 @@ fn comptime_guard_tparam(cond string, tparams []string) bool {
 	lhs := parts[0]
 	name := if lhs.ends_with('.unaliased_typ') { lhs[..lhs.len - '.unaliased_typ'.len] } else { lhs }
 	return name in tparams
+}
+
+// comptime_kind_union reads a `$if` condition that tests one type parameter for any of several
+// kinds, `T.unaliased_typ is $array_dynamic || T.unaliased_typ is $map`, as one guard with the
+// kinds joined by `|`: `T.unaliased_typ is $array_dynamic|$map` (see guarded_instances). '' for
+// any other condition.
+fn comptime_kind_union(cond string, tparams []string) string {
+	parts := cond.trim_space().split(' || ')
+	if parts.len < 2 {
+		return ''
+	}
+	mut lhs := ''
+	mut kinds := []string{}
+	for p in parts {
+		if !comptime_guard_tparam(p, tparams) {
+			return ''
+		}
+		words := p.trim_space().split(' ')
+		if !words[2].starts_with('$') || (lhs != '' && words[0] != lhs) {
+			return ''
+		}
+		lhs = words[0]
+		kinds << words[2]
+	}
+	return '${lhs} is ${kinds.join('|')}'
 }
 
 // retyped is `ctx` with the type parameter `name` taken to be `typ`, in each
@@ -1996,6 +2042,9 @@ fn retype_recipe(recipe string, name string, typ string) string {
 	return alts.join(recipe_alt)
 }
 
+// js_constructor ends the name of a call that builds a JS binding's type.
+const js_constructor = '.prototype.constructor'
+
 // recipe_sep separates the steps of a type recipe. It is a control character
 // that never occurs in V source and that the batch protocol passes through.
 const recipe_sep = '\x05'
@@ -2024,6 +2073,19 @@ fn (ctx V3CallCtx) with_vars(names []string, recipes []string) V3CallCtx {
 			pins.delete('ret:' + name)
 		}
 	}
+	// so are aggregates, and a name declared or narrowed here is no longer one, nor is a path off
+	// it: `x.inner` of an `x` declared here is another variable's
+	mut aggregates := ctx.aggregates
+	if aggregates.len > 0 {
+		aggregates = aggregates.clone()
+		for name in names {
+			for path in aggregates.keys() {
+				if path == name || path.starts_with(name + '.') {
+					aggregates.delete(path)
+				}
+			}
+		}
+	}
 	for i, name in names {
 		locals.delete(name)
 		fallbacks.delete(name)
@@ -2031,10 +2093,11 @@ fn (ctx V3CallCtx) with_vars(names []string, recipes []string) V3CallCtx {
 	}
 	return V3CallCtx{
 		...ctx
-		locals:    locals
-		vars:      vars
-		fallbacks: fallbacks
-		pins:      pins
+		locals:     locals
+		vars:       vars
+		fallbacks:  fallbacks
+		pins:       pins
+		aggregates: aggregates
 	}
 }
 
@@ -2296,9 +2359,11 @@ fn (mut f V3File) walk(id flat.NodeId, ctx V3CallCtx, mut edges []Edge, mut seen
 				// `$if v is $map { v.clone() }`: a method the variable's type doesn't answer (a type
 				// parameter's, in `for v in m`) is builtin's for that kind. Its own type stays first:
 				// an alias of a map has its own methods, and a `[]Foo` its elements. A variable typed
-				// T keeps T alone, whose instances answer
+				// T keeps T alone, whose instances answer. One written `&T`, `mut` or not, doesn't: V
+				// calls builtin's `clone` on `mut x T` even for an alias that declares its own
 				if kid, kind_type := comptime_kind_var(n.value_text()) {
-					if kid in ctx.vars && !is_tparam_recipe(ctx.vars[kid], ctx.tparams) {
+					if kid in ctx.vars && (ctx.vars[kid].starts_with('t:&')
+						|| !is_tparam_recipe(ctx.vars[kid], ctx.tparams)) {
 						f.walk(kids[0], ctx.with_fallback(kid, 't:' + kind_type), mut edges, mut seen)
 						f.walk_list(kids[1..], ctx, mut edges, mut seen)
 						return ctx
@@ -2310,14 +2375,26 @@ fn (mut f V3File) walk(id flat.NodeId, ctx V3CallCtx, mut edges []Edge, mut seen
 					name = ''
 				}
 				if name != '' && name in ctx.tparams {
-					f.walk(kids[0], ctx.retyped(name, f.type_text(typ)), mut edges, mut seen)
-					f.walk_list(kids[1..], ctx.guarded('-', n.value_text()), mut edges, mut seen)
+					// the guard is for an interface, which keeps T (see guarded_instances), and names
+					// it as comptime_recipe reads it: `Picked` of `import m { Picked }` is `m.Picked`
+					checked := '${name} is ${f.type_text(typ)}'
+					f.walk(kids[0], ctx.retyped(name, f.type_text(typ)).guarded('+', checked), mut edges, mut
+						seen)
+					f.walk_list(kids[1..], ctx.guarded('-', checked), mut edges, mut seen)
 					return ctx
 				}
 				// `$if data is bool` on a variable of type T: `data` is a bool in the block
 				// and `$if attr is Custom` on an attribute in `$for attr in T.attributes` is a Custom
-				if name != '' && name in ctx.vars && (is_tparam_recipe(ctx.vars[name], ctx.tparams)
-					|| ctx.vars[name] == 't:builtin.VAttribute') {
+				// (a variable typed T keeps T for an interface, as `$if T is Custom` does)
+				if name != '' && ctx.holds_is_check(name) {
+					typed := ctx.vars[name][2..]
+					held := ctx.with_vars([name], ['ctp:' + typed + ':' + f.type_text(typ)]).guarded('+',
+						'${typed.trim_left('&')} is ${f.type_text(typ)}')
+					f.walk(kids[0], held, mut edges, mut seen)
+					f.walk_list(kids[1..], ctx, mut edges, mut seen)
+					return ctx
+				}
+				if name != '' && (ctx.vars[name] or { '' }) == 't:builtin.VAttribute' {
 					f.walk(kids[0], ctx.with_vars([name], ['ct:' + f.type_text(typ)]), mut edges, mut seen)
 					f.walk_list(kids[1..], ctx, mut edges, mut seen)
 					return ctx
@@ -2326,9 +2403,17 @@ fn (mut f V3File) walk(id flat.NodeId, ctx V3CallCtx, mut edges []Edge, mut seen
 			// `$if T.unaliased_typ is string { ... }` in a generic function: the block is
 			// compiled only for the instances of T that meet the condition, so its calls
 			// carry it as a guard, and the blocks after it carry the negation
-			if kids.len >= 1 && comptime_guard_tparam(n.value_text(), ctx.tparams) {
-				f.walk(kids[0], ctx.guarded('+', n.value_text()), mut edges, mut seen)
-				f.walk_list(kids[1..], ctx.guarded('-', n.value_text()), mut edges, mut seen)
+			guard := if comptime_guard_tparam(n.value_text(), ctx.tparams) {
+				// a type named as the walk names one for `$if T is X` (see type_text), which is the
+				// same type: `z.Iface` after `import lib.sub as z`, `Picked` of `import m { Picked }`
+				subject, named := comptime_type_is(n.value_text())
+				if named != '' { '${subject} is ${f.type_text(named)}' } else { n.value_text() }
+			} else {
+				comptime_kind_union(n.value_text(), ctx.tparams)
+			}
+			if kids.len >= 1 && guard != '' {
+				f.walk(kids[0], ctx.guarded('+', guard), mut edges, mut seen)
+				f.walk_list(kids[1..], ctx.guarded('-', guard), mut edges, mut seen)
 				return ctx
 			}
 			// `$if field.typ is int { x.$(field.name) }` in a field loop: the
@@ -2518,14 +2603,23 @@ fn (mut f V3File) walk(id flat.NodeId, ctx V3CallCtx, mut edges []Edge, mut seen
 		.fn_literal {
 			mut names := []string{}
 			mut recipes := []string{}
+			mut mut_vars := ctx.mut_vars.clone()
 			for k in kids {
 				p := f.node(k)
 				if p.kind == .param && p.value_text() != '' {
 					names << p.value_text()
 					recipes << if p.typ_text() != '' { 't:' + f.type_text(p.typ_text()) } else { '' }
+					mut_vars = mut_vars.filter(it != p.value_text())
+					if p.is_mut {
+						mut_vars << p.value_text()
+					}
 				}
 			}
 			mut inner := ctx.with_vars(names, recipes)
+			inner = V3CallCtx{
+				...inner
+				mut_vars: mut_vars
+			}
 			for k in kids {
 				p := f.node(k)
 				if p.kind == .param {
@@ -2561,7 +2655,33 @@ fn (f &V3File) match_branch_ctx(subject flat.NodeId, branch flat.NodeId, ctx V3C
 			return ctx.narrowed(path, 't:' + f.type_text(pt))
 		}
 	}
+	// `A, B { ... }`, whose patterns come first, as many as the branch's value says
+	count := f.node(branch).value_text().int()
+	if path != '' && count >= 2 && bk.len > count {
+		mut types := []string{cap: count}
+		for pat in bk[..count] {
+			pt := f.match_pattern_type(pat) or { return ctx }
+			types << f.type_text(pt)
+		}
+		mut aggregates := ctx.aggregates.clone()
+		aggregates[path] = types
+		return V3CallCtx{
+			...ctx
+			aggregates: aggregates
+		}
+	}
 	return ctx
+}
+
+// aggregate_field_recipe is the recipe of `x.name` where `x` is matched by a branch of several
+// types, or '' when it isn't: the field of each type, which V lets differ, so that it has a type
+// only when they agree (see aggregate_field). A method on `x` is no such read: V calls each type's.
+fn (f &V3File) aggregate_field_recipe(target flat.NodeId, name string, ctx V3CallCtx) string {
+	if ctx.aggregates.len == 0 {
+		return ''
+	}
+	types := ctx.aggregates[f.value_path(target)] or { return '' }
+	return 'agf:${name}|${types.join('|')}'
 }
 
 // always_leaves reports whether a block never runs past its end: its last statement is a
@@ -3205,6 +3325,10 @@ fn (f &V3File) recipe(id flat.NodeId, ctx V3CallCtx) string {
 					// another module's const or global, `os.args`
 					return 'g:' + f.imports[t.value_text()] + '.' + n.value_text()
 				}
+				agg := f.aggregate_field_recipe(kids[0], n.value_text(), ctx)
+				if agg != '' {
+					return agg
+				}
 				r := f.recipe(kids[0], ctx)
 				if r != '' {
 					return r + recipe_sep + 'f:' + n.value_text()
@@ -3226,6 +3350,11 @@ fn (f &V3File) recipe(id flat.NodeId, ctx V3CallCtx) string {
 				return ''
 			}
 			if !is_method {
+			// `JS.Array.prototype.constructor()` builds a `JS.Array`: the bindings declare no symbol
+			// to read that from (extract_fn), and each of them returns its own type
+			if name.starts_with('JS.') && name.ends_with(js_constructor) {
+				return 't:' + name[..name.len - js_constructor.len]
+			}
 			// a call of a function value (a parameter of function type) has its return type
 			if t := ctx.locals[name] {
 				if t.starts_with('fn') {
