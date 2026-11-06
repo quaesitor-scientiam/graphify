@@ -1681,7 +1681,9 @@ fn (mut f V3File) extract_globals(id flat.NodeId, mut syms []Symbol, mut edges [
 		f.walk_initializer(.global, g.value_text(), line, value, mut edges)
 		if typ != '' {
 			mut rseen := map[string]bool{}
-			f.add_type_ref('${f.mod_id}.${g.value_text()}', g.typ_text(), mut edges, mut rseen)
+			// named as its calls are, since separate_member_ids may give it another id
+			f.add_type_ref(initializer_from(.global, f.rel, line, g.value_text()), g.typ_text(), mut edges,
+				mut rseen)
 		}
 	}
 }
@@ -3366,6 +3368,9 @@ fn (f &V3File) recipe(id flat.NodeId, ctx V3CallCtx) string {
 				if v.starts_with('t:fn ') {
 					return v + recipe_sep + 'R'
 				}
+				// any other local of the name is what this calls (value_call), `f := mk`, and no
+				// function, constant or type elsewhere says what it returns: its own value does
+				return if v == '' || v.contains(recipe_alt) { '' } else { v + recipe_sep + 'R' }
 			}
 				mut rec := 'c:' + name
 				// `f[Config](x)`: the type arguments, `p:` steps in order,

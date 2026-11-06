@@ -881,7 +881,7 @@ fn visible_from(mod string, caller DeclSite, imports []string) bool {
 // sees_in_module reports whether a caller at this site sees a declaration of its own
 // module (directory) in `decl_file`, which is a `module main` file when `decl_main`:
 // always outside a standalone program; in one, when its `main` module is one program
-// (solo), when the declaration is in the caller's own file, or when the caller is a test in a directory with no `fn main` and the
+// (solo) and the declaration is in one of its files, when the declaration is in the caller's own file, or when the caller is a test in a directory with no `fn main` and the
 // declaration is in a `module main` file that is no test, as V builds such a test
 // with the directory's `module main` files (common.v beside vlib/wasm/tests/*_test.v),
 // not with a file of another module there (md5.v beside md5_test.v) nor another test
@@ -889,8 +889,8 @@ fn visible_from(mod string, caller DeclSite, imports []string) bool {
 // `decl_main` must come from the declaration's own file: a const's id is shared by
 // every file of the directory that declares it, so its site_of entry is any one's.
 fn (site DeclSite) sees_in_module(decl_file string, decl_main bool) bool {
-	return !site.is_main || site.solo || decl_file == site.file
-		|| (site.no_main && is_test_file(site.file) && decl_main && !is_test_file(decl_file))
+	return !site.is_main || decl_file == site.file
+		|| (decl_main && (site.solo || (site.no_main && is_test_file(site.file) && !is_test_file(decl_file))))
 }
 
 // generated_enum_mod is the module of the enum a static call names (`MyEnum` or
@@ -1571,7 +1571,7 @@ fn resolve_edges(mut g Graph) {
 				}
 				continue
 			}
-			// a conversion is one before any function of the name elsewhere (Infer.conversion),
+			// a conversion comes before a function of the name V can't see (Infer.conversion),
 			// and the tier below links it
 			mut here := ?CallResolution(none)
 			if e.is_method || e.to.contains('.') || inf.conversion(e) == none {
@@ -2212,15 +2212,9 @@ fn resolve_callee(e Edge, by_name map[string][]CallCand, site_of map[string]Decl
 				continue
 			}
 			if c.mod == caller.mod {
-				// an id with no site can't address one declaration, so it can't rule
-				// the module's own out, and this tier doesn't pick builtin's
-				site := site_of[site_key(c.id, c.file)] or {
-					site_of[c.id] or {
-						own = true
-						continue
-					}
-				}
-				if caller.sees_in_module(c.file, site.is_main) {
+				if caller.sees_in_module(c.file, (site_of[site_key(c.id, c.file)] or {
+					site_of[c.id] or { DeclSite{} }
+				}).is_main) {
 					own = true
 				}
 			} else if import_reaches(c.mod, 'builtin') {
@@ -2565,26 +2559,24 @@ fn alias_conversion(e Edge, alias_by_name map[string][]TypeCand, site_of map[str
 	return res.id
 }
 
-// type_conversion is the type a bare call converts to: an alias (alias_conversion), or a
-// struct or enum of the caller's own module, which only a `@[translated]` file can name in
-// lowercase and so call bare (`&debug_info(raw)`, `token(0)`). A struct and a function of one
-// name in a module don't compile, so there is nothing else it could be. A type of an imported
-// module needs its prefix.
+// type_conversion is the type a bare call that nothing else answers converts to: one of the
+// caller's own module (own_type_conversion), or an alias it can see (alias_conversion).
 fn type_conversion(e Edge, alias_by_name map[string][]TypeCand, by_type_name map[string][]TypeCand, site_of map[string]DeclSite, imports_of map[string][]string, scope_of map[string]FileScope) ?string {
-	if id := alias_conversion(e, alias_by_name, site_of, imports_of) {
+	if id := own_type_conversion(e, by_type_name, site_of, scope_of) {
 		return id
 	}
-	caller := caller_site(e, site_of)?
-	cands := by_type_name[e.to] or { return none }
-	return only_type_id(cands.filter(it.mod == caller.mod && !it.c && !it.js
-		&& !test_private(it.file, caller.file)
-		&& caller.sees_in_module(it.file, (scope_of[it.file] or { FileScope{} }).is_main)))
+	return alias_conversion(e, alias_by_name, site_of, imports_of)
 }
 
-// own_module_fn reports whether a plain function of this name is in the caller's module.
-fn own_module_fn(e Edge, by_name map[string][]CallCand, site_of map[string]DeclSite) bool {
-	caller := caller_site(e, site_of) or { return false }
-	return (by_name[e.to] or { return false }).any(!it.is_method && it.mod == caller.mod)
+// own_type_conversion is the type of the caller's own module, as far as the caller sees it, that
+// a bare call names: `&debug_info(raw)` or `token(0)` of a lowercase type, as a `@[translated]`
+// file has. A C or JS type is named with its host. A type of an imported module needs its prefix.
+fn own_type_conversion(e Edge, by_type_name map[string][]TypeCand, site_of map[string]DeclSite, scope_of map[string]FileScope) ?string {
+	cands := by_type_name[e.to] or { return none }
+	caller := caller_site(e, site_of)?
+	return only_type_id(cands.filter(it.mod == caller.mod && !it.declares_host('C') && !it.js
+		&& !test_private(it.file, caller.file)
+		&& caller.sees_in_module(it.file, (scope_of[it.file] or { FileScope{} }).is_main)))
 }
 
 fn rel_path(root string, path string) string {

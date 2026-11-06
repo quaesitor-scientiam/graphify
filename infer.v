@@ -211,21 +211,29 @@ fn (mut inf Infer) infer_call(e Edge) ?CallResolution {
 // plain call reaches: V takes it over a function of the name, in the same file or not, though
 // not one holding another value (`const f = g()` of an int). A value is known to hold one by a
 // literal or a written `fn` type, and the module is what the caller sees of it (sees_in_module).
+// One in another file for one platform isn't in every build, so it doesn't take a call from a
+// function of the name, which may be what another platform has.
 fn (inf &Infer) own_fn_value(e Edge) ?string {
 	cands := inf.fn_values[e.to] or { return none }
 	caller := caller_site(e, inf.site_of)?
 	return only_id(cands.filter(it.file == caller.file || (it.mod == caller.mod
-		&& !test_private(it.file, caller.file)
+		&& !is_platform_file(it.file) && !test_private(it.file, caller.file)
 		&& caller.sees_in_module(it.file, (inf.scope_of[it.file] or { FileScope{} }).is_main))))
 }
 
-// conversion is the type a plain call converts to (type_conversion), unless a function of the
-// name is in the caller's own module, which is the call: an alias builtin declares is visible
-// everywhere.
+// conversion is the type of the caller's own module (own_type_conversion) that a plain call
+// converts to before any other reading of it. Compiled programs show V takes it over a constant
+// holding a function and over a function of the module itself, but takes builtin's function over
+// the module's lowercase type.
 fn (inf &Infer) conversion(e Edge) ?string {
-	id := type_conversion(e, inf.alias_by_name, inf.by_type_name, inf.site_of, inf.imports_of,
-		inf.scope_of)?
-	return if own_module_fn(e, inf.by_name, inf.site_of) { none } else { id }
+	id := own_type_conversion(e, inf.by_type_name, inf.site_of, inf.scope_of)?
+	caller := caller_site(e, inf.site_of)?
+	for c in inf.by_name[e.to] or { []CallCand{} } {
+		if !c.is_method && !test_private(c.file, caller.file) && import_reaches(c.mod, 'builtin') {
+			return none
+		}
+	}
+	return id
 }
 
 // resolve_const_callee resolves a call of a name no function has to the one constant or
@@ -825,9 +833,17 @@ fn (inf &Infer) call_result(e Edge, to string, steps []string, depth int) ?Infer
 		kind: .calls
 		file: e.file
 	}
-	// what infer_call and resolve_edges take the call to be before any function of the name:
+	// what resolve_edges takes the call to be before any function of the name, in its order:
 	// `x := token(0)` is a token, and `y := f(1)` has the result of the function `f` holds
 	if !to.contains('.') {
+		if conv := inf.conversion(call) {
+			for c in inf.by_type_name[to] or { []TypeCand{} } {
+				if c.id == conv {
+					return c.as_type()
+				}
+			}
+			return none
+		}
 		if held := inf.own_fn_value(call) {
 			for c in inf.consts[to] or { []Symbol{} } {
 				if c.id == held && c.recipe.starts_with('t:') {
@@ -836,14 +852,6 @@ fn (inf &Infer) call_result(e Edge, to string, steps []string, depth int) ?Infer
 						mod:  c.parent
 						file: c.file
 					}
-				}
-			}
-			return none
-		}
-		if conv := inf.conversion(call) {
-			for c in inf.by_type_name[to] or { []TypeCand{} } {
-				if c.id == conv {
-					return c.as_type()
 				}
 			}
 			return none
