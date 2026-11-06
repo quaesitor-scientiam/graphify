@@ -207,16 +207,34 @@ fn (mut inf Infer) infer_call(e Edge) ?CallResolution {
 	return resolve_const_callee(e, inf.const_calls, inf.site_of, inf.imports_of, inf.scope_of)
 }
 
+// function_in_scope reports whether a plain call may be a function the caller can see: one of
+// builtin or of its own module, as far as it sees it, or in a method, a method of its receiver.
+// A type or a value holding a function takes a call only from what the caller can't see (a
+// function of the name in an unrelated module), which is all that keeps `token(0)` from such a
+// function. Where the caller sees both, V's order depends on more than a declaration says (a
+// generic function, the file's @[translated], the build), and the call stays what resolve_callee
+// makes it.
+fn (inf &Infer) function_in_scope(e Edge) bool {
+	caller := caller_site(e, inf.site_of) or { return false }
+	for c in inf.by_name[e.to] or { []CallCand{} } {
+		if c.is_method || test_private(c.file, caller.file) {
+			continue
+		}
+		if import_reaches(c.mod, 'builtin') || (c.mod == caller.mod
+			&& caller.sees_in_module(c.file, (inf.scope_of[c.file] or { FileScope{} }).is_main)) {
+			return true
+		}
+	}
+	return implicit_receiver_call(e, inf.by_name) != none
+}
+
 // own_fn_value is the constant or global of the caller's own module, holding a function, that a
-// plain call reaches: V takes it over a function of the name, in the same file or not, though
-// not one holding another value (`const f = g()` of an int). A value is known to hold one by a
-// literal or a written `fn` type, and the module is what the caller sees of it (sees_in_module).
-// One in another file for one platform isn't in every build, so it doesn't take a call from a
-// function of the name, which may be what another platform has. Where V reads the name as a method
-// of the receiver (generic_receiver_call), that is what it calls.
+// plain call reaches when it can see no function of the name (function_in_scope). A value is known
+// to hold one by a literal or a written `fn` type, and the module is what the caller sees of it
+// (sees_fn_value).
 fn (inf &Infer) own_fn_value(e Edge) ?string {
 	cands := inf.fn_values[e.to] or { return none }
-	if generic_receiver_call(e, inf.by_name, inf.tparams_of) != none {
+	if inf.function_in_scope(e) {
 		return none
 	}
 	caller := caller_site(e, inf.site_of)?
@@ -250,30 +268,11 @@ fn (inf &Infer) held_fn_result(call Edge, held string) ?InferredType {
 }
 
 // conversion is the type of the caller's own module (own_type_conversion) that a plain call
-// converts to before any other reading of it. Compiled programs show V takes it over a function
-// of the module itself, and over a constant holding a function when the caller's own file is
-// @[translated] (from any other file, V calls the constant). It takes builtin's function, a generic
-// function of the module, and a method of the receiver where generic_receiver_call says, over the
-// type. A type only in another file for one platform or flag isn't in every build, so it takes
-// nothing from them.
+// converts to before any other reading of it, where it can see no function of the name
+// (function_in_scope) and no constant holding one.
 fn (inf &Infer) conversion(e Edge) ?string {
 	id := own_type_conversion(e, inf.by_type_name, inf.site_of, inf.scope_of)?
-	caller := caller_site(e, inf.site_of)?
-	decls := (inf.by_type_name[e.to] or { []TypeCand{} }).filter(it.id == id)
-	if decls.all(it.file != caller.file && is_platform_file(it.file))
-		|| generic_receiver_call(e, inf.by_name, inf.tparams_of) != none {
-		return none
-	}
-	for c in inf.by_name[e.to] or { []CallCand{} } {
-		if c.is_method || test_private(c.file, caller.file) {
-			continue
-		}
-		if import_reaches(c.mod, 'builtin') || (c.generic && c.mod == caller.mod
-			&& caller.sees_in_module(c.file, (inf.scope_of[c.file] or { FileScope{} }).is_main)) {
-			return none
-		}
-	}
-	if !(inf.scope_of[caller.file] or { FileScope{} }).translated && inf.own_fn_value(e) != none {
+	if inf.function_in_scope(e) || inf.own_fn_value(e) != none {
 		return none
 	}
 	return id

@@ -442,23 +442,6 @@ fn (f &V3File) is_flag_enum(line int) bool {
 	return false
 }
 
-// is_translated reports whether the file has the attribute @[translated], alone or among others
-// (`@[has_globals; translated]`), above its `module` line on `mod_line`. Compiled: a file with no such
-// line gets nothing from the attribute, and V still refuses its lowercase types.
-fn (f &V3File) is_translated(mod_line int) bool {
-	for i in 0 .. int_min(mod_line, f.lines.len) {
-		t := f.lines[i].trim_space()
-		if t.starts_with('@[') {
-			for attr in t.trim_string_left('@[').trim_string_right(']').split(';') {
-				if attr.trim_space() == 'translated' {
-					return true
-				}
-			}
-		}
-	}
-	return false
-}
-
 // declares_extern reports whether `line` declares a `fn C.` or `fn JS.`
 // binding.
 fn (f &V3File) declares_extern(line int) bool {
@@ -704,29 +687,32 @@ fn source_name(name string) string {
 }
 
 // literal_captures are the names in a function literal's capture list, `a` and `b` of
-// `fn [a, mut b] () {}`, read from its source, as the flat AST keeps no node for them.
-fn (f &V3File) literal_captures(n flat.Node) []string {
+// `fn [a, mut b] () {}`, read from its source, as the flat AST keeps no node for them. none for a
+// literal with no source of its own there: the parser lowers a `$tmpl` in an expression to one that
+// it writes itself, capturing what the template names.
+fn (f &V3File) literal_captures(n flat.Node) ?[]string {
 	end := int_min(int(n.pos.end), f.src.len)
 	if n.pos.offset < 0 || n.pos.offset >= end {
-		return []
+		return none
 	}
 	head := f.src[n.pos.offset..end]
 	if !head.starts_with('fn') {
-		return []
+		return none
 	}
 	rest := head[2..].trim_left(' \t')
 	if !rest.starts_with('[') {
-		return []
+		return []string{}
 	}
 	return rest[1..].all_before(']').split(',').map(it.trim_space().all_after_last(' '))
 }
 
-// only_roots keeps the entries of a variable map whose variable, the `x` of a path `x.inner`,
-// is one of `names`.
-fn only_roots(vars map[string]string, names []string) map[string]string {
+// visible_in_literal keeps the entries of a variable map that a function literal sees: a variable
+// it captures (`names`), with any path off it (`x.inner`), and a `$for` loop's variable, typed as
+// builtin's comptime_for_types, which V lets it read without a capture.
+fn visible_in_literal(vars map[string]string, names []string) map[string]string {
 	mut kept := map[string]string{}
 	for name, value in vars {
-		if name.all_before('.') in names {
+		if name.all_before('.') in names || value.starts_with('t:builtin.') {
 			kept[name] = value
 		}
 	}
@@ -750,12 +736,6 @@ fn (mut f V3File) extract(root flat.NodeId) ([]Symbol, []Edge) {
 	}
 	f.mod_id = module_id(f.rel, declared)
 	mod_id := f.mod_id
-	// what the file says of itself and the signature doesn't: whether it is @[translated], and
-	// whether it has a `module` line (see FileScope)
-	mut file_flags := if module_written { '' } else { module_unwritten }
-	if f.is_translated(mod_line) {
-		file_flags += module_translated
-	}
 	syms << Symbol{
 		id:        mod_id
 		name:      mod_id
@@ -763,7 +743,7 @@ fn (mut f V3File) extract(root flat.NodeId) ([]Symbol, []Edge) {
 		signature: 'module ${declared}'
 		file:      f.rel
 		line:      mod_line
-		recipe:    file_flags
+		recipe:    if module_written { '' } else { module_unwritten }
 	}
 	// an import inside `$if mysql ? { import db.mysql }` counts too, as every
 	// branch of a `$if` does (extract_v3)
@@ -2675,12 +2655,16 @@ fn (mut f V3File) walk(id flat.NodeId, ctx V3CallCtx, mut edges []Edge, mut seen
 			}
 			// a literal sees the enclosing function's locals only as it captures them: `f(1)` in one
 			// that doesn't capture a local `f` is the module's function
-			captures := f.literal_captures(n)
-			mut inner := V3CallCtx{
-				...ctx
-				vars:   only_roots(ctx.vars, captures)
-				locals: only_roots(ctx.locals, captures)
-			}.with_vars(names, recipes)
+			seen_ctx := if captures := f.literal_captures(n) {
+				V3CallCtx{
+					...ctx
+					vars:   visible_in_literal(ctx.vars, captures)
+					locals: visible_in_literal(ctx.locals, captures)
+				}
+			} else {
+				ctx
+			}
+			mut inner := seen_ctx.with_vars(names, recipes)
 			inner = V3CallCtx{
 				...inner
 				mut_vars: mut_vars

@@ -774,7 +774,7 @@ lost. `type_idx` at three sites in tests went with the same rule. The seventh si
 `T.type_name()` in an `$else` no instance compiles, stays unresolved: V has no such function unless
 the type declares a static method of that name, so there is nothing to link to and nothing V writes.
 
-**Plain names (November 2026).** Five rules for a call that names its target. V's behaviour behind each
+**Plain names (November 2026).** Rules for a call that names its target. V's behaviour behind each
 comes from a compiled program, except where noted:
 
 - A `module main` test beside `module io` is not in io, so `copy()` is builtin's, though io declares
@@ -790,32 +790,32 @@ comes from a compiled program, except where noted:
   it declares the function; one outside the graph, or one that doesn't declare it, is passed over, unless
   the caller's own file is of that module: `module bar` with `import a.bar` wraps it, and keeps the raw name. `import stats_import` in vlib/v/preludes_js was read,
   not compiled.
-- A const or global holding a function in the caller's own module, as far as the caller sees it, is
-  the callee, as V takes it over a function of the name, in the same file or another, but not one
-  holding another value (`const f = g()` of an int, where V calls the function). Known to hold one
-  means a literal or a written `fn` type, so `const f = g` and a value typed by an alias aren't read
-  as one. One in another file for one platform doesn't take the call from a function of the name, and in
-  a method of a generic struct, or a generic method calling a generic method, a method of its receiver of the name is the callee. The value of such a call has the function's
-  result, read from the declaration the caller sees, as files of a directory share a const's id. A global sharing an id with a function or type has
-  an id of its own (`::global::`), as a const already did, and takes its type references with it.
-- A bare call of a type of the caller's own module, as far as the caller sees it, is a conversion
-  before any other reading, so `token(0)` no longer links to an unrelated module's `token`, and over a
-  function of the module itself, as V takes it (`foo(1)` under `type foo = int` and `fn foo`). It gives
-  way to builtin's function, to a generic function of the module, and in a method of a generic struct to
-  a method of its receiver, all of which V takes over the module's lowercase type. A constant holding a function wins
-  only unless the caller's own file is `@[translated]`. A type only in another file for one platform or
-  flag takes no call from a function, so where a build has both (`type foo` in a_nix.v, `fn foo` in
-  a_windows.v) the value is typed for the build without the type. The value of a conversion has its type.
-  An alias of an imported module or of builtin is still only tried after the function lookup, as before,
-  so `uintptr_t(x)` of a builtin alias can link to a uniquely named function elsewhere, or to a function
-  of the caller's own module, where V converts. A `type
-  JS.x` isn't told from a V type of the name (its signature drops the host).
+- A const or global holding a function, or a type, of the caller's own module takes a plain call only
+  from what the caller can't see: `token(0)` no longer links to an unrelated module's `token`. Where the
+  caller sees a function of the name (of its module, as far as it sees it, or builtin's) or its receiver
+  has a method of the name, the call stays what the function lookup makes it, as before. This is deliberate
+  and leaves some calls wrong, each as it was. V's order there depends on more than a declaration says: it
+  takes a const over a plain function and over a type from a file that isn't `@[translated]`, a conversion
+  over a plain function, a generic function over a type or const, and a receiver's method over a type or
+  const only in a generic struct or between generic methods. Three rounds of review kept finding more
+  shapes of it, none in the V tree, so the rule no longer models it.
+- A value is known to hold a function by a literal or a written `fn` type, so `const f = g` and a value
+  typed by an alias aren't read as one. Between a const holding a function and a type, both of the module,
+  the const takes the call. A call of a held function has the result of the declaration the caller sees,
+  as files of a directory share a const's id, and none from a file of no platform when the const is in one
+  platform's file. A global sharing an id with a function or type has an id of its own (`::global::`), as a
+  const already did, and takes its type references with it. Two programs of a directory that each declare
+  such a global share that id, so the reference goes to one program's type.
+- The value of a conversion has its type. A type of the module takes a call the lookup leaves open, unless
+  a method of the receiver has the name. An alias of an imported module or of builtin is still only tried
+  after the function lookup, as before, so `uintptr_t(x)` of a builtin alias can link to a uniquely named
+  function elsewhere, or to a function of the caller's own module, where V converts. A `type JS.x` isn't
+  told from a V type of the name (its signature drops the host).
 
 A local of the name is what a call of it reaches, and the value is what the local holds returns
-(`f := mk`), where a function, const or type of the name used to answer. A function literal sees only
-the locals it captures, read from its `fn [a, mut b]` list, as V allows it no others. A bare call in a method of a
-generic struct links its receiver's method, but its value is typed only when that method is the one the name
-resolves to; with another type's method of the name in the file, the value stays untyped, as before.
+(`f := mk`), where a function, const or type of the name used to answer. A function literal sees the
+locals it captures, read from its `fn [a, mut b]` list, and a `$for` loop's variable, which V lets it read
+without one. A `$tmpl` in an expression becomes a literal the parser writes, which keeps every local.
 
 On vlang `4e0cc6baa8`: unresolved calls 84 to 73. 14 call edges change, three of them wrong or
 accidental results corrected (`token`, `func3` to another module's function, and a `str` on a value of

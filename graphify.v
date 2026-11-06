@@ -886,12 +886,13 @@ fn visible_from(mod string, caller DeclSite, imports []string) bool {
 // with the directory's `module main` files (common.v beside vlib/wasm/tests/*_test.v),
 // not with a file of another module there (md5.v beside md5_test.v) nor another test
 // (b_test.c.v, which test_private, matching `_test.v` alone, would let through). A test with
-// no `module` line (vlib/io/io_test.v) is built alone.
+// no `module` line (vlib/io/io_test.v) is built alone, whatever is beside it.
 // `decl_main` must come from the declaration's own file: a const's id is shared by
 // every file of the directory that declares it, so its site_of entry is any one's.
 fn (site DeclSite) sees_in_module(decl_file string, decl_main bool) bool {
-	return !site.is_main || decl_file == site.file || (decl_main && (site.solo || (site.no_main
-		&& !site.module_unwritten && is_test_file(site.file) && !is_test_file(decl_file))))
+	test := is_test_file(site.file)
+	return !site.is_main || decl_file == site.file || (decl_main && !(test && site.module_unwritten)
+		&& (site.solo || (site.no_main && test && !is_test_file(decl_file))))
 }
 
 // generated_enum_mod is the module of the enum a static call names (`MyEnum` or
@@ -1036,7 +1037,6 @@ fn only_id(cands []CallCand) ?string {
 struct CallCand {
 	id        string
 	is_method bool
-	generic   bool   // a function with type parameters
 	mod       string // module the declaration lives in
 	file      string
 }
@@ -1236,7 +1236,6 @@ fn resolve_edges(mut g Graph) {
 			sc.mod = s.id
 			sc.declared = s.signature.all_after('module ')
 			sc.is_main = in_main_unit(s, mains)
-			sc.translated = s.recipe.contains(module_translated)
 			sc.module_unwritten = s.recipe.contains(module_unwritten)
 			scope_of[s.file] = sc
 		}
@@ -1247,7 +1246,6 @@ fn resolve_edges(mut g Graph) {
 			by_name[key] << CallCand{
 				id:        s.id
 				is_method: s.kind == .method
-				generic:   s.kind == .function && s.recipe != ''
 				mod:       s.parent // fn/method symbols hang off their module
 				file:      s.file
 			}
@@ -1707,7 +1705,7 @@ fn resolve_edges(mut g Graph) {
 			if !e.is_method && !e.to.contains('.') && e.to !in runtime_helpers {
 				ids := bare_builtin_call(e, by_name, site_of).filter(!unaddressable[it])
 				if ids.len > 0 && implicit_receiver_call(e, by_name) == none
-					&& type_conversion(e, alias_by_name, by_type_name, site_of, imports_of, scope_of) == none {
+					&& type_conversion(e, by_name, alias_by_name, by_type_name, site_of, imports_of, scope_of) == none {
 					for id in ids {
 						key := '${e.from}\x00${id}'
 						if at := seen_call[key] {
@@ -1761,11 +1759,9 @@ fn resolve_edges(mut g Graph) {
 		}
 		// a bare call of a type is a conversion to it: `uintptr_t(x)` under
 		// `type uintptr_t = usize`. Only the types the caller can see count (see
-		// type_conversion), and a method call is never one. A method of the receiver V reads the
-		// name as (generic_receiver_call) is what it calls (the tier below).
-		if e.kind == .calls && !e.is_method && !e.to.contains('.')
-			&& generic_receiver_call(e, by_name, tparams_of) == none {
-			if id := type_conversion(e, alias_by_name, by_type_name, site_of, imports_of, scope_of) {
+		// type_conversion), and a method call is never one.
+		if e.kind == .calls && !e.is_method && !e.to.contains('.') {
+			if id := type_conversion(e, by_name, alias_by_name, by_type_name, site_of, imports_of, scope_of) {
 				if !unaddressable[id] {
 					resolved << Edge{
 						from:       e.from
@@ -1976,20 +1972,6 @@ fn implicit_receiver_call(e Edge, by_name map[string][]CallCand) ?string {
 		if c.is_method && strip_generic_args(c.id.all_before('@')) == want {
 			return c.id
 		}
-	}
-	return none
-}
-
-// generic_receiver_call is implicit_receiver_call where V takes that method over a type or a
-// constant of the name, as compiled programs show: in a method of a generic struct, and in a
-// generic method calling a generic method of a plain struct. In any other method, `describe(1)`
-// is the conversion or the constant, an array's or map's `[` being no type parameter.
-fn generic_receiver_call(e Edge, by_name map[string][]CallCand, tparams_of map[string][]string) ?string {
-	id := implicit_receiver_call(e, by_name)?
-	owner := e.from.all_before('@').all_before_last('.').all_after_last('.')
-	if (owner.contains('[') && !owner.starts_with('[') && !owner.starts_with('map['))
-		|| (e.from in tparams_of && id in tparams_of) {
-		return id
 	}
 	return none
 }
@@ -2287,15 +2269,13 @@ mut:
 	is_main  bool              // in a standalone program, see main_unit_files
 	prefixes map[string]string // import path or alias -> import path
 	paths    map[string]bool   // the import paths themselves
-	// translated: the file says @[translated], so a bare `foo(1)` of a lowercase type is a
-	// conversion (see Infer.conversion); module_unwritten: it has no `module` line
-	translated       bool
+	// module_unwritten: the file has no `module` line
 	module_unwritten bool
 }
 
-// the flags extract keeps in a module symbol's recipe, which a module has no other use for
-const module_translated = 'translated'
-const module_unwritten = 'no_module_line,'
+// module_unwritten is what extract keeps in the recipe of a module symbol, which has no other use
+// for one, when its file has no `module` line (see sees_in_module)
+const module_unwritten = 'no_module_line'
 
 // resolve_by_receiver_type resolves a method call whose receiver type is known
 // (see walk_call) but whose type id is not `e.recv_type` verbatim: the type is
@@ -2600,10 +2580,13 @@ fn alias_conversion(e Edge, alias_by_name map[string][]TypeCand, site_of map[str
 }
 
 // type_conversion is the type a bare call that nothing else answers converts to: one of the
-// caller's own module (own_type_conversion), or an alias it can see (alias_conversion).
-fn type_conversion(e Edge, alias_by_name map[string][]TypeCand, by_type_name map[string][]TypeCand, site_of map[string]DeclSite, imports_of map[string][]string, scope_of map[string]FileScope) ?string {
-	if id := own_type_conversion(e, by_type_name, site_of, scope_of) {
-		return id
+// caller's own module (own_type_conversion), unless a method of the receiver has the name, or an
+// alias it can see (alias_conversion).
+fn type_conversion(e Edge, by_name map[string][]CallCand, alias_by_name map[string][]TypeCand, by_type_name map[string][]TypeCand, site_of map[string]DeclSite, imports_of map[string][]string, scope_of map[string]FileScope) ?string {
+	if implicit_receiver_call(e, by_name) == none {
+		if id := own_type_conversion(e, by_type_name, site_of, scope_of) {
+			return id
+		}
 	}
 	return alias_conversion(e, alias_by_name, site_of, imports_of)
 }
