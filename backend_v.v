@@ -442,6 +442,23 @@ fn (f &V3File) is_flag_enum(line int) bool {
 	return false
 }
 
+// is_translated reports whether the file has the attribute @[translated], alone or among others
+// (`@[has_globals; translated]`), above its `module` line on `mod_line`. Compiled: a file with no such
+// line gets nothing from the attribute, and V still refuses its lowercase types.
+fn (f &V3File) is_translated(mod_line int) bool {
+	for i in 0 .. int_min(mod_line, f.lines.len) {
+		t := f.lines[i].trim_space()
+		if t.starts_with('@[') {
+			for attr in t.trim_string_left('@[').trim_string_right(']').split(';') {
+				if attr.trim_space() == 'translated' {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
 // declares_extern reports whether `line` declares a `fn C.` or `fn JS.`
 // binding.
 fn (f &V3File) declares_extern(line int) bool {
@@ -686,21 +703,59 @@ fn source_name(name string) string {
 	return name.replace('__static__', '.')
 }
 
+// literal_captures are the names in a function literal's capture list, `a` and `b` of
+// `fn [a, mut b] () {}`, read from its source, as the flat AST keeps no node for them.
+fn (f &V3File) literal_captures(n flat.Node) []string {
+	end := int_min(int(n.pos.end), f.src.len)
+	if n.pos.offset < 0 || n.pos.offset >= end {
+		return []
+	}
+	head := f.src[n.pos.offset..end]
+	if !head.starts_with('fn') {
+		return []
+	}
+	rest := head[2..].trim_left(' \t')
+	if !rest.starts_with('[') {
+		return []
+	}
+	return rest[1..].all_before(']').split(',').map(it.trim_space().all_after_last(' '))
+}
+
+// only_roots keeps the entries of a variable map whose variable, the `x` of a path `x.inner`,
+// is one of `names`.
+fn only_roots(vars map[string]string, names []string) map[string]string {
+	mut kept := map[string]string{}
+	for name, value in vars {
+		if name.all_before('.') in names {
+			kept[name] = value
+		}
+	}
+	return kept
+}
+
 fn (mut f V3File) extract(root flat.NodeId) ([]Symbol, []Edge) {
 	mut syms := []Symbol{}
 	mut edges := []Edge{}
 	top := f.kids(root)
 	mut declared := 'main'
 	mut mod_line := 1
+	mut module_written := false
 	for id in top {
 		n := f.node(id)
 		if n.kind == .module_decl {
 			declared = n.value_text()
 			mod_line = f.line_of(n.pos.offset)
+			module_written = true
 		}
 	}
 	f.mod_id = module_id(f.rel, declared)
 	mod_id := f.mod_id
+	// what the file says of itself and the signature doesn't: whether it is @[translated], and
+	// whether it has a `module` line (see FileScope)
+	mut file_flags := if module_written { '' } else { module_unwritten }
+	if f.is_translated(mod_line) {
+		file_flags += module_translated
+	}
 	syms << Symbol{
 		id:        mod_id
 		name:      mod_id
@@ -708,6 +763,7 @@ fn (mut f V3File) extract(root flat.NodeId) ([]Symbol, []Edge) {
 		signature: 'module ${declared}'
 		file:      f.rel
 		line:      mod_line
+		recipe:    file_flags
 	}
 	// an import inside `$if mysql ? { import db.mysql }` counts too, as every
 	// branch of a `$if` does (extract_v3)
@@ -2617,7 +2673,14 @@ fn (mut f V3File) walk(id flat.NodeId, ctx V3CallCtx, mut edges []Edge, mut seen
 					}
 				}
 			}
-			mut inner := ctx.with_vars(names, recipes)
+			// a literal sees the enclosing function's locals only as it captures them: `f(1)` in one
+			// that doesn't capture a local `f` is the module's function
+			captures := f.literal_captures(n)
+			mut inner := V3CallCtx{
+				...ctx
+				vars:   only_roots(ctx.vars, captures)
+				locals: only_roots(ctx.locals, captures)
+			}.with_vars(names, recipes)
 			inner = V3CallCtx{
 				...inner
 				mut_vars: mut_vars

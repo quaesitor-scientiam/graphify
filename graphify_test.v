@@ -18073,8 +18073,9 @@ fn test_the_value_of_a_conversion_or_a_held_function_call_has_its_type() {
 	assert plain_calls(g, 'aliased', 'uint_t') == ['lib.gen.uint_t:inferred']
 }
 
-fn test_a_conversion_gives_way_to_a_function_of_the_callers_own_module() {
-	// builtin's alias of the name is visible everywhere; a function of the module is the call
+fn test_an_alias_of_builtin_is_tried_after_a_function_of_the_callers_own_module() {
+	// not what V does: compiled with a @[translated] builtin file, it converts. No builtin file
+	// declares a lowercase alias, and this is the order the disclosed limit describes
 	g := graph_of({
 		'vlib/builtin/alias.v': 'module builtin\n\npub type own_alias = int\n'
 		'lib/app/app.v':        'module app\n\nfn own_alias(n int) int {\n\treturn n\n}\n\nfn run() {\n\town_alias(1)\n}\n'
@@ -18283,4 +18284,268 @@ fn test_a_conversion_of_the_module_outranks_what_the_call_could_otherwise_be() {
 	assert plain_calls(g, 'conv', 'token') == ['lib.own.token:inferred']
 	assert plain_calls(g, 'conv_tt', 'tt') == ['lib.tt.tt:inferred']
 	assert plain_calls(g, 'conv_m', 'meth_t') == ['lib.tt.meth_t:inferred']
+}
+
+const which_types = 'pub struct Rrr {}\n\npub fn (r Rrr) which() string {\n\treturn ""\n}\n\npub struct Sss {}\n\npub fn (r Sss) which() string {\n\treturn ""\n}\n'
+
+// calls_from_file are the calls of `name` from the function `from` in `file`, a program's own
+fn calls_from_file(g Graph, from string, file string, name string) []string {
+	mut found := g.edges.filter(it.kind == .calls && it.from.all_before('@').all_after_last('.') == from
+		&& it.file == file && it.to.all_before('@').all_after_last('.') == name).map(it.to)
+	found.sort()
+	return found
+}
+
+fn test_a_generic_function_of_the_module_is_the_call_not_a_conversion() {
+	// compiled: `foo(1)` and `foo[int](1)` print `in generic` and the value is an Rrr, under an
+	// alias, an enum or a struct of the name, though a plain function of the name loses to it
+	g := extract_graph_of({
+		'lib/m/a.v': '@[translated]\nmodule m\n\npub type foo = int\n'
+		'lib/m/c.v': 'module m\n\n${which_types}\npub fn foo[T](x T) Rrr {\n\treturn Rrr{}\n}\n'
+		'lib/m/b.v': '@[translated]\nmodule m\n\nfn run() {\n\tx := foo(1)\n\tx.which()\n}\n\nfn run_args() {\n\tx := foo[int](1)\n\tx.which()\n}\n'
+	})
+	for from in ['run', 'run_args'] {
+		assert plain_calls(g, from, 'which') == ['lib.m.Rrr.which:inferred'], from
+		// the function: the type's edge would be inferred
+		assert plain_calls(g, from, 'foo') == ['lib.m.foo:extracted'], from
+	}
+}
+
+fn test_a_method_of_the_receiver_is_the_call_not_a_conversion_or_a_held_function() {
+	// compiled: each prints `in method`, the bare call in a method of Box[U] being its own
+	typ := extract_graph_of({
+		'lib/m/a.v': '@[translated]\nmodule m\n\npub struct describe {\n\ta int\n}\n\n${which_types}\npub struct Box[U] {\n\titem U\n}\n'
+		'lib/m/b.v': 'module m\n\npub fn (b Box[U]) describe(v int) Rrr {\n\treturn Rrr{}\n}\n\npub fn (b Box[U]) imp() string {\n\tx := describe(1)\n\treturn x.which()\n}\n'
+	})
+	assert plain_calls(typ, 'imp', 'which') == ['lib.m.Rrr.which:inferred']
+	assert plain_calls(typ, 'imp', 'describe').len == 1
+	assert plain_calls(typ, 'imp', 'describe')[0].contains('Box')
+	// another type's method of the name in the file leaves the call to the tier of the receiver's own
+	ambiguous := extract_graph_of({
+		'lib/a/a.v': '@[translated]\nmodule a\n\npub struct describe {\n\ta int\n}\n\npub struct Box[U] {\n\titem U\n}\n'
+		'lib/a/b.v': 'module a\n\npub struct Other {}\n\npub fn (o Other) describe(v int) int {\n\treturn v\n}\n\npub fn (b Box[U]) describe(v int) int {\n\treturn v\n}\n\npub fn (b Box[U]) imp() {\n\tdescribe(1)\n}\n'
+	})
+	assert plain_calls(ambiguous, 'imp', 'describe').len == 1
+	assert plain_calls(ambiguous, 'imp', 'describe')[0].contains('Box')
+	held := extract_graph_of({
+		'lib/k/a.v': 'module k\n\n${which_types}\npub struct Box[U] {\n\titem U\n}\n\nconst describe = fn (x int) Sss {\n\treturn Sss{}\n}\n'
+		'lib/k/b.v': 'module k\n\npub fn (b Box[U]) describe(v int) Rrr {\n\treturn Rrr{}\n}\n\npub fn (b Box[U]) imp() string {\n\tx := describe(1)\n\treturn x.which()\n}\n'
+	})
+	assert plain_calls(held, 'imp', 'which') == ['lib.k.Rrr.which:inferred']
+	assert plain_calls(held, 'imp', 'describe')[0].contains('Box')
+	// compiled: in a method of a struct that isn't generic, it prints 1, the conversion
+	plain := extract_graph_of({
+		'lib/p/p.v': '@[translated]\nmodule p\n\nstruct Box {}\n\ntype describe = int\n\nfn (b Box) describe(v int) string {\n\treturn ""\n}\n\nfn (b Box) imp() {\n\tdescribe(1)\n}\n'
+	})
+	assert plain_calls(plain, 'imp', 'describe').len == 1
+	assert !plain_calls(plain, 'imp', 'describe')[0].contains('Box')
+}
+
+fn test_only_a_translated_caller_converts_over_a_held_function() {
+	// compiled: a plain caller prints `in const`, a @[translated] one converts
+	decls := '@[translated]\nmodule m\n\npub type foo = int\n\n${which_types}\nconst foo = fn (x int) Rrr {\n\treturn Rrr{}\n}\n'
+	plain := extract_graph_of({
+		'lib/m/a.v': decls
+		'lib/m/b.v': 'module m\n\nfn run() {\n\tx := foo(1)\n\tx.which()\n}\n'
+	})
+	assert plain_calls(plain, 'run', 'foo').len == 1
+	assert plain_calls(plain, 'run', 'foo')[0].contains('::const::')
+	assert plain_calls(plain, 'run', 'which') == ['lib.m.Rrr.which:inferred']
+	translated := extract_graph_of({
+		'lib/m/a.v': decls
+		'lib/m/b.v': '@[translated]\nmodule m\n\nfn run() {\n\tfoo(1)\n}\n'
+	})
+	assert plain_calls(translated, 'run', 'foo').len == 1
+	assert !plain_calls(translated, 'run', 'foo')[0].contains('::const::')
+}
+
+fn test_a_type_of_one_platform_or_flag_does_not_take_the_call_from_a_function() {
+	// compiled without `-d custom`: `in fn`, and the value is an Rrr
+	g := extract_graph_of({
+		'lib/m/a_d_custom.v': '@[translated]\nmodule m\n\npub type foo = int\n'
+		'lib/m/c.v':          'module m\n\n${which_types}\npub fn foo(x int) Rrr {\n\treturn Rrr{}\n}\n'
+		'lib/m/b.v':          '@[translated]\nmodule m\n\nfn run() {\n\tx := foo(1)\n\tx.which()\n}\n'
+	})
+	assert plain_calls(g, 'run', 'which') == ['lib.m.Rrr.which:inferred']
+	// one declared in the caller's own file is in every build of that file
+	own := extract_graph_of({
+		'lib/m/a_d_custom.v': '@[translated]\nmodule m\n\npub type foo = int\n\nfn run() {\n\tfoo(1)\n}\n'
+		'lib/m/c.v':          'module m\n\npub fn foo(x int) int {\n\treturn x\n}\n'
+	})
+	assert plain_calls(own, 'run', 'foo') == ['lib.m.foo:inferred']
+}
+
+fn test_a_function_literal_sees_only_the_locals_it_captures() {
+	// compiled: `f` in a literal that doesn't capture it is the module's function, so `Rrr`
+	g := graph_of({
+		'lib/m/a.v': 'module m\n\n${which_types}\nfn f(x int) Rrr {\n\treturn Rrr{}\n}\n\nfn mks(x int) Sss {\n\treturn Sss{}\n}\n\nfn none_captured() string {\n\tf := mks\n\t_ = f\n\tg := fn () string {\n\t\tx := f(1)\n\t\treturn x.which()\n\t}\n\treturn g()\n}\n\nfn other_captured() string {\n\tf := mks\n\ty := 1\n\t_ = f\n\tg := fn [y] () string {\n\t\t_ = y\n\t\tx := f(1)\n\t\treturn x.which()\n\t}\n\treturn g()\n}\n\nfn param_uncaptured(f fn (int) Sss) string {\n\t_ = f\n\tg := fn () string {\n\t\tx := f(1)\n\t\treturn x.which()\n\t}\n\treturn g()\n}\n\nfn captured(s Sss, mut r Sss) string {\n\tg := fn [s, mut r] () string {\n\t\treturn s.which() + r.which()\n\t}\n\treturn g()\n}\n'
+	})
+	assert plain_calls(g, 'none_captured', 'which') == ['lib.m.Rrr.which:inferred']
+	assert plain_calls(g, 'other_captured', 'which') == ['lib.m.Rrr.which:inferred']
+	assert plain_calls(g, 'param_uncaptured', 'which') == ['lib.m.Rrr.which:inferred']
+	// what it does capture it still has
+	assert plain_calls(g, 'captured', 'which').map(it.all_before(':')) == ['lib.m.Sss.which']
+	// compiled: and it keeps what a field of it was narrowed to, which prints Aaa
+	narrowed := graph_of({
+		'lib/n/n.v': 'module n\n\nstruct Aaa {}\n\nfn (a Aaa) which() string {\n\treturn ``\n}\n\nstruct Bbb {}\n\nfn (b Bbb) which() string {\n\treturn ``\n}\n\ntype Sum = Aaa | Bbb\n\nstruct Sss {\n\tk Sum\n}\n\nfn t(s Sss) string {\n\tif s.k is Aaa {\n\t\tg := fn [s] () string {\n\t\t\treturn s.k.which()\n\t\t}\n\t\treturn g()\n\t}\n\treturn ``\n}\n'
+	})
+	assert plain_calls(narrowed, 't', 'which') == ['lib.n.Aaa.which:inferred']
+}
+
+fn test_a_held_function_is_read_from_the_const_the_caller_sees() {
+	// compiled: `v b.v` prints Bx.hello. A const's id is shared by every file of a directory.
+	types := 'pub struct Ax {}\n\npub fn (a Ax) hello() string {\n\treturn ""\n}\n\npub struct Bx {}\n\npub fn (b Bx) hello() string {\n\treturn ""\n}\n'
+	g := extract_graph_of({
+		'app/t.v': 'module app\n\n${types}'
+		'pr/a.v':  '${types}\nconst kf = fn () Ax {\n\treturn Ax{}\n}\n\nfn main() {\n\tx := kf()\n\tx.hello()\n}\n'
+		'pr/b.v':  '${types}\nconst kf = fn () Bx {\n\treturn Bx{}\n}\n\nfn main() {\n\tx := kf()\n\tx.hello()\n}\n'
+	})
+	assert calls_from_file(g, 'main', 'pr/a.v', 'hello').all(it.contains('Ax.hello'))
+	assert calls_from_file(g, 'main', 'pr/b.v', 'hello').all(it.contains('Bx.hello'))
+	assert calls_from_file(g, 'main', 'pr/b.v', 'hello').len == 1
+	// compiled on Windows: each platform's run uses its own file's const
+	plat := extract_graph_of({
+		'lib/x/t.v':         'module x\n\n${types}'
+		'lib/x/x_linux.c.v': 'module x\n\nconst kf = fn () Ax {\n\treturn Ax{}\n}\n\npub fn run() string {\n\tx := kf()\n\treturn x.hello()\n}\n'
+		'lib/x/x_windows.c.v': 'module x\n\nconst kf = fn () Bx {\n\treturn Bx{}\n}\n\npub fn run() string {\n\tx := kf()\n\treturn x.hello()\n}\n'
+	})
+	mut linked := plain_calls(plat, 'run', 'hello').map(it.all_before(':'))
+	linked.sort()
+	assert linked == ['lib.x.Ax.hello', 'lib.x.Bx.hello']
+}
+
+fn test_a_const_of_a_builtin_file_beside_a_program_is_seen() {
+	// compiled, `v .`: a `module builtin` file is in the program, and prints Rx.hello
+	g := extract_graph_of({
+		'app/b.v':    'module builtin\n\npub struct Rx {}\n\npub fn (r Rx) hello() string {\n\treturn ""\n}\n\npub struct Rz {}\n\npub fn (r Rz) hello() string {\n\treturn ""\n}\n\npub const kk = Rx{}\n\npub const kz = Rz{}\n'
+		'app/main.v': 'module main\n\nfn main() {\n\tc := kk\n\tc.hello()\n}\n'
+	})
+	assert plain_calls(g, 'main', 'hello') == ['app.Rx.hello:inferred']
+}
+
+fn test_a_module_importing_its_own_short_name_does_not_call_itself() {
+	// compiled: a wrapper `module bar` with `import a.bar` reaches a.bar, not itself, and the
+	// import outside the graph leaves the raw name
+	g := extract_graph_of({
+		'w/bar/bar.v': 'module bar\n\nimport a.bar\n\npub fn hello() string {\n\treturn bar.hello()\n}\n'
+	})
+	assert plain_calls(g, 'hello', 'hello') == ['a.bar.hello:extracted']
+}
+
+fn test_a_test_with_no_module_line_is_not_built_with_a_main_helper() {
+	// compiled: V builds a helper in only when the test writes `module main`, so these are the
+	// test's own `pick` and `foo`, and builtin's `copy`
+	helper := '@[translated]\nmodule main\n\nconst pick = fn () string {\n\treturn ""\n}\n\nconst copy = fn (mut d []u8, s []u8) int {\n\treturn 99\n}\n\ntype foo = int\n'
+	g := extract_graph_of({
+		'vlib/builtin/a.v': builtin_fns
+		'p/common.v':       helper
+		'p/x_test.v':       'fn pick() string {\n\treturn ""\n}\n\nfn foo(x int) string {\n\treturn ""\n}\n\nfn test_a() {\n\tpick()\n\tfoo(1)\n\tcopy(mut d, b)\n}\n'
+	})
+	assert plain_calls(g, 'test_a', 'pick') == ['p.pick:extracted']
+	assert plain_calls(g, 'test_a', 'foo') == ['p.foo@p/x_test.v:extracted']
+	assert plain_calls(g, 'test_a', 'copy')[0].starts_with('vlib.builtin.copy:')
+	// one writing it is
+	w := extract_graph_of({
+		'vlib/builtin/a.v': builtin_fns
+		'p/common.v':       helper
+		'p/x_test.v':       'module main\n\nfn test_a() {\n\tpick()\n}\n'
+	})
+	// with no function of the name, the const's id is the plain one
+	assert plain_calls(w, 'test_a', 'pick') == ['p.pick:inferred']
+}
+
+fn test_the_value_of_builtins_function_over_an_own_type_is_builtins() {
+	// compiled: `v := error('a')` under a local `struct error` is an IError
+	g := extract_graph_of({
+		'vlib/builtin/a.v': builtin_fns
+		'lib/own/own.v':    '@[translated]\nmodule own\n\nstruct error {\n\tx int\n}\n\nfn (e error) msg() string {\n\treturn ""\n}\n\nfn val() {\n\tv := error("a")\n\tv.msg()\n}\n'
+	})
+	assert plain_calls(g, 'val', 'msg') == ['vlib.builtin.IError.msg:inferred']
+}
+
+fn test_a_type_of_a_module_beside_a_program_is_read_by_its_own_file() {
+	// compiled in directory mode: prints `fn`. Whether a type's file is a `module main` one is
+	// that file's, not the caller's
+	g := extract_graph_of({
+		'solo/main.v': 'module main\n\nfn token(x int) string {\n\treturn ""\n}\n\nfn main() {\n\ttoken(0)\n}\n'
+		'solo/lib.v':  '@[translated]\nmodule lib\n\npub enum token {\n\tzero\n}\n'
+	})
+	assert plain_calls(g, 'main', 'token').len == 1
+	assert plain_calls(g, 'main', 'token')[0].contains('main.v')
+}
+
+fn test_a_test_with_no_module_line_reads_no_const_of_a_main_helper() {
+	// compiled: such a test can't read the helper's const, and one writing `module main` can,
+	// so of a const builtin has too, it reads builtin's
+	builtin_const := 'module builtin\n\npub struct Rx {}\n\npub fn (r Rx) hello() {}\n\npub struct Rz {}\n\npub fn (r Rz) hello() {}\n\npub const kk = Rx{}\n'
+	g := extract_graph_of({
+		'vlib/builtin/a.v': builtin_const
+		'p/common.v':       'module main\n\nconst kk = Rz{}\n'
+		'p/x_test.v':       'fn test_a() {\n\tc := kk\n\tc.hello()\n}\n'
+	})
+	assert plain_calls(g, 'test_a', 'hello') == ['vlib.builtin.Rx.hello:inferred']
+}
+
+fn test_a_generic_function_elsewhere_does_not_stop_a_conversion() {
+	// one of another module, or of a `module lib` file beside a program, is no function of
+	// the caller's: `tok(1)` is still the conversion
+	g := extract_graph_of({
+		'lib/x/x.v':    'module x\n\npub fn tok[T](v T) int {\n\treturn 0\n}\n'
+		'lib/own/o.v':  '@[translated]\nmodule own\n\nimport x\n\nenum tok {\n\tzero\n}\n\nfn conv() {\n\ttok(1)\n}\n'
+		'solo/main.v':  '@[translated]\nmodule main\n\nenum tk {\n\tzero\n}\n\nfn main() {\n\ttk(0)\n}\n'
+		'solo/lib.v':   'module lib\n\npub fn tk[T](v T) int {\n\treturn 0\n}\n'
+	})
+	assert plain_calls(g, 'conv', 'tok') == ['lib.own.tok:inferred']
+	assert plain_calls(g, 'main', 'tk').len == 1
+	assert plain_calls(g, 'main', 'tk')[0].ends_with(':inferred')
+}
+fn test_only_a_generic_receiver_or_two_generic_methods_take_a_bare_call_from_a_type_or_const() {
+	const_v := 'const describe = fn (x int) string {\n\treturn ""\n}\n'
+	// compiled: a generic method calling a generic method of a plain struct prints `in method`
+	both := extract_graph_of({
+		'lib/a/a.v': 'module a\n\nstruct Box {}\n\n${const_v}\nfn (b Box) describe[T](v T) string {\n\treturn ""\n}\n\nfn (b Box) imp[T](v T) string {\n\treturn describe(1)\n}\n'
+	})
+	assert plain_calls(both, 'imp', 'describe').len == 1
+	assert plain_calls(both, 'imp', 'describe')[0].contains('Box')
+	// compiled: a plain caller of a generic method prints `in const`
+	callee := extract_graph_of({
+		'lib/a/a.v': 'module a\n\nstruct Box {}\n\n${const_v}\nfn (b Box) describe[T](v T) string {\n\treturn ""\n}\n\nfn (b Box) imp() string {\n\treturn describe(1)\n}\n'
+	})
+	assert plain_calls(callee, 'imp', 'describe').len == 1
+	assert !plain_calls(callee, 'imp', 'describe')[0].contains('Box')
+	// compiled: a generic caller of a plain method converts, printing 1
+	caller := extract_graph_of({
+		'lib/a/a.v': '@[translated]\nmodule a\n\nstruct Box {}\n\ntype describe = int\n\nfn (b Box) describe(v int) string {\n\treturn ""\n}\n\nfn (b Box) imp[T](v T) {\n\tdescribe(1)\n}\n'
+	})
+	assert plain_calls(caller, 'imp', 'describe') == ['lib.a.describe:inferred']
+	// compiled: a method of an array or map of a local type converts too, printing 1. Its `[` is
+	// no type parameter
+	array := extract_graph_of({
+		'lib/a/a.v': '@[translated]\nmodule a\n\nstruct Foo {}\n\ntype describe = int\n\nfn (a []Foo) describe(v int) string {\n\treturn ""\n}\n\nfn (a []Foo) imp() {\n\tdescribe(1)\n}\n'
+	})
+	assert plain_calls(array, 'imp', 'describe') == ['lib.a.describe:inferred']
+	mapped := extract_graph_of({
+		'lib/a/a.v': '@[translated]\nmodule a\n\nstruct Foo {}\n\ntype describe = int\n\nfn (a map[string]Foo) describe(v int) string {\n\treturn ""\n}\n\nfn (a map[string]Foo) imp() {\n\tdescribe(1)\n}\n'
+	})
+	assert plain_calls(mapped, 'imp', 'describe') == ['lib.a.describe:inferred']
+}
+
+fn test_a_translated_attribute_is_read_among_the_files_others() {
+	// compiled: each converts, and the tree writes `@[has_globals; translated]`
+	decls := 'module m\n\ntype foo = int\n\nconst foo = fn (x int) int {\n\treturn x\n}\n\nfn run() {\n\tfoo(1)\n}\n'
+	for attrs in ['@[has_globals; translated]', '@[translated; has_globals]', '// a comment\n@[translated]\n'] {
+		g := extract_graph_of({
+			'lib/m/m.v': '${attrs}\n${decls}'
+		})
+		assert plain_calls(g, 'run', 'foo') == ['lib.m.foo:inferred'], attrs
+	}
+	// an attribute of a declaration below the `module` line, and a mention in a comment, are no
+	// attribute of the file: from such a file V calls the const
+	for head in ['${decls}\n@[translated]\nstruct S {}\n', '// @[translated]\n${decls}'] {
+		g := extract_graph_of({
+			'lib/m/m.v': head
+		})
+		assert plain_calls(g, 'run', 'foo').len == 1, head
+		assert plain_calls(g, 'run', 'foo')[0].contains('::const::'), head
+	}
 }

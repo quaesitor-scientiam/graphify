@@ -212,26 +212,69 @@ fn (mut inf Infer) infer_call(e Edge) ?CallResolution {
 // not one holding another value (`const f = g()` of an int). A value is known to hold one by a
 // literal or a written `fn` type, and the module is what the caller sees of it (sees_in_module).
 // One in another file for one platform isn't in every build, so it doesn't take a call from a
-// function of the name, which may be what another platform has.
+// function of the name, which may be what another platform has. Where V reads the name as a method
+// of the receiver (generic_receiver_call), that is what it calls.
 fn (inf &Infer) own_fn_value(e Edge) ?string {
 	cands := inf.fn_values[e.to] or { return none }
+	if generic_receiver_call(e, inf.by_name, inf.tparams_of) != none {
+		return none
+	}
 	caller := caller_site(e, inf.site_of)?
-	return only_id(cands.filter(it.file == caller.file || (it.mod == caller.mod
-		&& !is_platform_file(it.file) && !test_private(it.file, caller.file)
-		&& caller.sees_in_module(it.file, (inf.scope_of[it.file] or { FileScope{} }).is_main))))
+	return only_id(cands.filter(inf.sees_fn_value(it.file, it.mod, caller)))
+}
+
+// sees_fn_value reports whether a caller's plain call can reach a value holding a function that
+// is declared in `file` of module `mod` (see own_fn_value).
+fn (inf &Infer) sees_fn_value(file string, mod string, caller DeclSite) bool {
+	return file == caller.file || (mod == caller.mod && !is_platform_file(file)
+		&& !test_private(file, caller.file)
+		&& caller.sees_in_module(file, (inf.scope_of[file] or { FileScope{} }).is_main))
+}
+
+// held_fn_result is the result of calling the value `held` (own_fn_value), read from the
+// declaration the caller sees: a const's id is shared by every file of a directory, each with its
+// own value, and V refuses two that one build compiles together.
+fn (inf &Infer) held_fn_result(call Edge, held string) ?InferredType {
+	caller := caller_site(call, inf.site_of)?
+	decls := (inf.consts[call.to] or { []Symbol{} }).filter(it.id == held
+		&& it.recipe.starts_with('t:') && inf.sees_fn_value(it.file, it.parent, caller))
+	if decls.len == 0 {
+		return none
+	}
+	c := decls[0]
+	return InferredType{
+		text: fn_return(c.recipe[2..])?
+		mod:  c.parent
+		file: c.file
+	}
 }
 
 // conversion is the type of the caller's own module (own_type_conversion) that a plain call
-// converts to before any other reading of it. Compiled programs show V takes it over a constant
-// holding a function and over a function of the module itself, but takes builtin's function over
-// the module's lowercase type.
+// converts to before any other reading of it. Compiled programs show V takes it over a function
+// of the module itself, and over a constant holding a function when the caller's own file is
+// @[translated] (from any other file, V calls the constant). It takes builtin's function, a generic
+// function of the module, and a method of the receiver where generic_receiver_call says, over the
+// type. A type only in another file for one platform or flag isn't in every build, so it takes
+// nothing from them.
 fn (inf &Infer) conversion(e Edge) ?string {
 	id := own_type_conversion(e, inf.by_type_name, inf.site_of, inf.scope_of)?
 	caller := caller_site(e, inf.site_of)?
+	decls := (inf.by_type_name[e.to] or { []TypeCand{} }).filter(it.id == id)
+	if decls.all(it.file != caller.file && is_platform_file(it.file))
+		|| generic_receiver_call(e, inf.by_name, inf.tparams_of) != none {
+		return none
+	}
 	for c in inf.by_name[e.to] or { []CallCand{} } {
-		if !c.is_method && !test_private(c.file, caller.file) && import_reaches(c.mod, 'builtin') {
+		if c.is_method || test_private(c.file, caller.file) {
+			continue
+		}
+		if import_reaches(c.mod, 'builtin') || (c.generic && c.mod == caller.mod
+			&& caller.sees_in_module(c.file, (inf.scope_of[c.file] or { FileScope{} }).is_main)) {
 			return none
 		}
+	}
+	if !(inf.scope_of[caller.file] or { FileScope{} }).translated && inf.own_fn_value(e) != none {
+		return none
 	}
 	return id
 }
@@ -845,16 +888,7 @@ fn (inf &Infer) call_result(e Edge, to string, steps []string, depth int) ?Infer
 			return none
 		}
 		if held := inf.own_fn_value(call) {
-			for c in inf.consts[to] or { []Symbol{} } {
-				if c.id == held && c.recipe.starts_with('t:') {
-					return InferredType{
-						text: fn_return(c.recipe[2..])?
-						mod:  c.parent
-						file: c.file
-					}
-				}
-			}
-			return none
+			return inf.held_fn_result(call, held)
 		}
 	}
 	mut t := InferredType{}
@@ -1185,18 +1219,22 @@ fn (inf &Infer) find_const(name string, file string) ?Symbol {
 		// any of its sites tells them
 		csite := inf.site_of[c.id] or { DeclSite{} }
 		caller := DeclSite{
-			mod:     scope.mod
-			file:    file
-			is_main: scope.is_main
-			solo:    csite.solo
-			no_main: csite.no_main
+			mod:              scope.mod
+			file:             file
+			is_main:          scope.is_main
+			solo:             csite.solo
+			no_main:          csite.no_main
+			module_unwritten: scope.module_unwritten
 		}
 		if qual == '' && c.parent == scope.mod && (c.file == file
 			|| caller.sees_in_module(c.file, (inf.scope_of[c.file] or { FileScope{} }).is_main)) {
 			own << c
 		}
+		// builtin's, and that of a `module builtin` file of the caller's own directory, which V
+		// compiles in, with or without a `fn main` beside it
 		if (qual != '' && import_reaches(c.parent, qual))
-			|| (qual == '' && import_reaches(c.parent, 'builtin')) {
+			|| (qual == '' && (import_reaches(c.parent, 'builtin') || (c.parent == scope.mod
+				&& (inf.scope_of[c.file] or { FileScope{} }).declared == 'builtin'))) {
 			reachable << c
 		}
 	}
