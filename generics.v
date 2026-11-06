@@ -37,9 +37,10 @@ fn expand_type_param_calls(edges []Edge, sources []Edge, fields []Symbol, mut in
 	collect_call_sites(edges, funcs, mut inf, mut instances, mut flows, mut opaque)
 	collect_owner_instances(sources, fields, funcs, mut inf, mut instances, mut flows)
 	settle_flows(mut instances, flows)
-	// a call under a comptime check has a type with no instance at all (guarded_instances)
-	if instances.len == 0
-		&& !edges.any(it.guards != '' || (it.is_method && has_field_any(it.recv_recipe))) {
+	// a call under a comptime check has a type with no instance at all (guarded_instances), and
+	// only_v_provides needs none
+	if instances.len == 0 && !edges.any(it.guards != '' || (it.is_method
+		&& (has_field_any(it.recv_recipe) || it.to in v_provided_methods))) {
 		return edges
 	}
 	// the passes that look for new types only collect the calls they link; the expanded edges
@@ -401,12 +402,6 @@ fn expand_edges(edges []Edge, instances map[string][]InferredType, opaque map[st
 			continue
 		}
 		insts := guarded_instances(instances[instance_key(caller, recv_text)] or { []InferredType{} }, e.guards, recv_text, e.file, mut inf)
-		if insts.len == 0 {
-			if keep {
-				out << e
-			}
-			continue
-		}
 		mut ids := []string{}
 		for t in insts {
 			id := inf.method_on(t, e.to, instance_scope(t, e.file, inf), 0) or { continue }
@@ -414,9 +409,17 @@ fn expand_edges(edges []Edge, instances map[string][]InferredType, opaque map[st
 				ids << id
 			}
 		}
+		// with no instance that answers a method the block calls, its `$if T is Iface` makes it the
+		// interface's, as on a value of that type
+		if ids.len == 0 {
+			if id := guard_interface_method(e, recv_text, mut inf) {
+				ids << id
+			}
+		}
 		if ids.len == 0 {
 			if keep {
-				out << if !opaque[instance_key(caller, recv_text)] && written_for_all(e, insts, inf) {
+				out << if only_v_provides(e, inf) || (insts.len > 0
+					&& !opaque[instance_key(caller, recv_text)] && written_for_all(e, insts, inf)) {
 					Edge{
 						...e
 						provenance: .undeclared
@@ -465,6 +468,76 @@ fn written_for_all(e Edge, insts []InferredType, inf &Infer) bool {
 	}
 	return true
 }
+
+// guard_interface_method is the method of the call `e` on the interface a positive comptime
+// condition of the call holds the type parameter `tp` to, or none. Never `str()`, which V writes
+// for a type that declares none, an implementer of the interface or not.
+fn guard_interface_method(e Edge, tp string, mut inf Infer) ?string {
+	if e.guards == '' || e.to == 'str' {
+		return none
+	}
+	for g in e.guards.split(recipe_sep) {
+		if g.len < 3 {
+			continue
+		}
+		parts := g[1..].trim_space().split(' ')
+		if g[0] != `+` || parts.len != 3 || parts[0].trim_string_right('.unaliased_typ') != tp
+			|| parts[1] != 'is' || !names_one_interface(parts[2], e.file, inf) {
+			continue
+		}
+		scope := inf.scope_of[e.file] or { FileScope{} }
+		if id := inf.method_on(InferredType{ text: parts[2], mod: scope.mod, file: e.file }, e.to, e.file, 0) {
+			return id
+		}
+	}
+	return none
+}
+
+// only_v_provides reports whether the call `e` on a type parameter can only be a method V writes
+// for a sum type or interface: whichever instance it compiles for has the method, and nothing in
+// the graph declares one of the name, so no instance known or not need be read. A type that isn't
+// part of the graph could still declare it, as a struct may.
+fn only_v_provides(e Edge, inf &Infer) bool {
+	return e.to in v_provided_methods && e.to !in inf.by_name && !inf.has_fn_field(e.to)
+}
+
+// has_fn_field reports whether a struct declares a field `name` a call can be of: one of a function
+// type, written or named. A field of another type can't be called.
+fn (inf &Infer) has_fn_field(name string) bool {
+	suffix := '\x00${name}'
+	for key, text in inf.field_type {
+		if !key.ends_with(suffix) {
+			continue
+		}
+		bare := bare_type(text)
+		if holds_fns(bare) {
+			return true
+		}
+		cands := inf.by_type_name[strip_generic_args(bare).all_after_last('.')] or { continue }
+		if cands.any(holds_fns(inf.alias_of[it.id] or { '' })) {
+			return true
+		}
+	}
+	return false
+}
+
+// names_one_interface reports whether a comptime test names an interface itself, not a kind, an
+// array of one or a pointer to one (`[]Iface`, `&Iface`, each a concrete type), read in `file`.
+fn names_one_interface(test string, file string, inf &Infer) bool {
+	return !test.starts_with('$') && !test.starts_with('[') && !test.starts_with('&')
+		&& inf.names_interface(test, file)
+}
+
+// is_interface_member reports whether a method's signature is that of a method an interface's body
+// declares, `fn (Speaker) say()`, whose receiver has no name, which an implementer must have. A
+// method written with a body, `fn (s Speaker) shout()`, has one, and isn't asked of an implementer.
+fn is_interface_member(sig string) bool {
+	return sig.starts_with('fn (') && !sig.all_after('fn (').all_before(')').all_before('[').contains(' ')
+}
+
+// v_provided_methods are the methods V writes for a sum type or interface, and refuses or ignores a
+// declaration of.
+const v_provided_methods = ['type_name', 'type_idx']
 
 // passes_own_params reports whether the call `e`, linked to `id`, passes arguments to a
 // method with type parameters of its own, which they give types (see own_params).
@@ -704,6 +777,10 @@ fn chained_call_ids(e Edge, caller Symbol, tps []string, instances map[string][]
 	method := steps[steps.len - 1][2..]
 	mut ids := []string{}
 	for t in guarded_instances(instances[instance_key(caller, tp)] or { []InferredType{} }, e.guards, tp, e.file, mut inf) {
+		// one element of an array is what path_method_ids reads, not the voidptr builtin declares
+		if t.text.starts_with('[') && method in array_elem_methods {
+			continue
+		}
 		result_id := inf.method_on(t, method, instance_scope(t, e.file, inf), 0) or { continue }
 		result := inf.returns(result_id) or { continue }
 		id := inf.method_on(result, e.to, instance_scope(result, e.file, inf), 0) or { continue }
@@ -847,6 +924,10 @@ fn field_any_ids(e Edge, caller Symbol, tps []string, instances map[string][]Inf
 	}
 	mut ids := []string{}
 	for o in owners {
+		// builtin's `map` stands for a map (guarded_instances), and V's loop walks no field of one
+		if tp != '' && o.text == 'map' {
+			continue
+		}
 		// the type as its own module writes it, read in the file that declares it, as
 		// path_method_ids reads an instance
 		name := own_name(o)
@@ -1162,11 +1243,12 @@ fn param_types(sig string) []string {
 // condition on another type parameter does not apply, and a test that type_is does not
 // decide keeps the instance. When a positive condition names a type and no instance meets it,
 // the block still compiles for that type, as a function nothing in the tree instantiates with
-// it still says: `$if T.unaliased_typ is string` is `string`, read in `file`, and the kind `$map`
-// is builtin's `map`. This is what the walk does for `$if T is X`, which retypes a variable typed
-// T as X (backend_v.v, comptime_type_is) whatever the instances are; this covers the forms it
-// doesn't read, such as `T.unaliased_typ`. A bare name is read as the file's own module's, since
-// FileScope has no selective imports: `import m { Thing }` then `is Thing` stays unresolved.
+// it still says: `$if T.unaliased_typ is string` is `string`, read in `file`, and a kind is its
+// builtin type (builtin_of_kind), each of them when a condition names several kinds
+// (`$array_dynamic|$map`, see comptime_kind_union). This is what the walk does for `$if T is X`,
+// which retypes a variable typed T as X (backend_v.v, comptime_type_is) whatever the instances are;
+// this covers the forms it doesn't read, such as `T.unaliased_typ`. An interface has no stand-in: a
+// block under it keeps T, and guard_interface_method reads it for a method no instance answers.
 fn guarded_instances(insts []InferredType, guards string, tp string, file string, mut inf Infer) []InferredType {
 	if guards == '' {
 		return insts
@@ -1186,9 +1268,26 @@ fn guarded_instances(insts []InferredType, guards string, tp string, file string
 			continue
 		}
 		positive := g[0] == `+`
+		tests := parts[2].split('|')
+		// an interface is met by a type that has its methods (lacks_interface), not by its name (see
+		// type_is). The name is the guard's own file's: an instance's file may not see it, and would
+		// then compare the instance's name with it
+		undecided := names_one_interface(parts[2], file, inf)
+		// the block of `$if T is Foo`, the form the walk retypes, is only read for an interface: V's
+		// `is` also takes an alias of Foo, and Foo may be another type parameter
+		_, retyped := comptime_type_is(g[1..])
+		if positive && !unaliased && !undecided && retyped != '' {
+			continue
+		}
 		mut kept := []InferredType{}
 		for t in out {
-			holds := type_is(t, parts[2], unaliased, mut inf) or {
+			if undecided {
+				if !positive || !inf.lacks_interface(t, parts[2], file) {
+					kept << t
+				}
+				continue
+			}
+			holds := type_is_any(t, tests, unaliased, mut inf) or {
 				kept << t
 				continue
 			}
@@ -1196,8 +1295,20 @@ fn guarded_instances(insts []InferredType, guards string, tp string, file string
 				kept << t
 			}
 		}
-		named := if parts[2] == '$map' { 'map' } else { parts[2] }
-		if kept.len == 0 && positive && !named.starts_with('$') {
+		// a stand-in for each kind or for none: one alone would read as all the block calls
+		if kept.len == 0 && positive && tests.len > 1
+			&& tests.all(if _ := builtin_of_kind(it) { true } else { false }) {
+			scope := inf.scope_of[file] or { FileScope{} }
+			for test in tests {
+				kept << InferredType{
+					text: builtin_of_kind(test) or { continue }
+					mod:  scope.mod
+					file: file
+				}
+			}
+		}
+		named := builtin_of_kind(parts[2]) or { parts[2] }
+		if kept.len == 0 && positive && !named.starts_with('$') && !undecided {
 			scope := inf.scope_of[file] or { FileScope{} }
 			mut stand := InferredType{
 				text: named
@@ -1226,6 +1337,138 @@ fn guarded_instances(insts []InferredType, guards string, tp string, file string
 	return out
 }
 
+// builtin_of_kind is the builtin type every value of a comptime kind is, or none for another test:
+// `map`, or `[]`, an array of an element not known, whose `first()` has no type (bare `array`'s is
+// the voidptr builtin declares).
+fn builtin_of_kind(test string) ?string {
+	return match test {
+		'$map' { 'map' }
+		'$array_dynamic' { '[]' }
+		else { none }
+	}
+}
+
+// lacks_interface reports whether the instance `t` can't implement the interface `name` names in
+// `file`: of what the interface declares it has no method of a name, a method with another number
+// of parameters, or no field. It doesn't compare parameter types. false for a type no declaration
+// names, which isn't read, and `str()` is not looked for, since V writes it.
+fn (inf &Infer) lacks_interface(t InferredType, name string, file string) bool {
+	text := bare_type(t.text)
+	if is_named_type(text) {
+		named := strip_generic_args(text)
+		qual := if named.contains('.') { named.all_before_last('.') } else { '' }
+		inf.named_decl(named.all_after_last('.'), qual, t, t.file) or { return false }
+	}
+	scope := inf.scope_of[file] or { FileScope{} }
+	short := bare_type(name).all_after_last('.')
+	qual := if name.contains('.') { name.all_before_last('.') } else { '' }
+	decl := inf.find_type(short, qual, InferredType{ mod: scope.mod, file: file }, file) or {
+		return false
+	}
+	return inf.lacks_members(t, decl, instance_scope(t, file, inf), 0)
+}
+
+// lacks_members is lacks_interface for the declaration of an interface, or of one it embeds. A
+// member the lookups don't answer may still be there (see may_have_member), and a method they can't
+// pick one of has no one parameter count to compare.
+fn (inf &Infer) lacks_members(t InferredType, decl TypeCand, file string, depth int) bool {
+	for method in inf.iface_fns[decl.id] {
+		if method == 'str' {
+			continue
+		}
+		id := inf.method_on(t, method, file, 0) or {
+			if inf.may_have_member(t, method, true, file, 0) {
+				continue
+			}
+			return true
+		}
+		wanted := inf.sig_of['${decl.id}.${method}'] or { continue }
+		has := inf.sig_of[id] or { continue }
+		// past the receiver, which param_types would read as the parameters
+		if param_types(has.all_after(') ')).len != param_types(wanted.all_after(') ')).len {
+			return true
+		}
+	}
+	for field in inf.fields_of[decl.id] {
+		inf.field_of(t, field, file, 0) or {
+			if inf.may_have_member(t, field, false, file, 0) {
+				continue
+			}
+			return true
+		}
+	}
+	if depth < embed_depth {
+		for emb in inf.embedded(decl) {
+			if inf.lacks_members(t, emb, file, depth + 1) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// may_have_member reports whether `t` could have the method or field `name` that method_on or
+// field_of didn't answer, which also means they couldn't tell: a declaration they can't pick one of
+// (a copy per platform, `Box[int]` and `Box[string]`, a test file's, two embeds), an embed they don't
+// follow this deep or that's outside the graph, a type no declaration names. Only a type whose whole
+// declaration was read, with no such member, has none.
+fn (inf &Infer) may_have_member(t InferredType, name string, method bool, file string, depth int) bool {
+	text := bare_type(t.text)
+	if !is_named_type(text) {
+		return false
+	}
+	named := strip_generic_args(text)
+	short := named.all_after_last('.')
+	qual := if named.contains('.') { named.all_before_last('.') } else { '' }
+	decl := inf.named_decl(short, qual, t, file) or { return true }
+	if method {
+		for c in inf.by_name[name] or { []CallCand{} } {
+			id := c.id.all_before('@')
+			if c.is_method && c.mod == decl.mod && id.starts_with('${c.mod}.') && id.ends_with('.${name}')
+				&& strip_generic_args(id[c.mod.len + 1..id.len - name.len - 1]) == short {
+				return true
+			}
+		}
+	} else if '${decl.id}\x00${name}' in inf.field_type {
+		return true
+	}
+	// past its own, an alias has what it names
+	if target := inf.alias_of[decl.id] {
+		return bare_type(target) == text || depth >= embed_depth
+			|| inf.may_have_member(InferredType{ text: target, mod: decl.mod, file: decl.file }, name, method, file, depth + 1)
+	}
+	embeds := inf.embedded(decl)
+	if embeds.len != (inf.embeds_of[decl.id] or { []Edge{} }).len {
+		return true
+	}
+	if embeds.len > 0 && depth >= embed_depth {
+		return true
+	}
+	return embeds.any(inf.may_have_member(it.as_type(), name, method, file, depth + 1))
+}
+
+// type_is_any reports whether an instance meets any of `tests`: none when none of them is met and
+// type_is doesn't decide one. A kind sees through an alias however the condition is written, as V's
+// does, except `$bool`, which an alias of bool never meets, even as `T.unaliased_typ`.
+fn type_is_any(t InferredType, tests []string, unaliased bool, mut inf Infer) ?bool {
+	mut undecided := false
+	for test in tests {
+		through := test != '$bool' && (unaliased || test.starts_with('$'))
+		holds := type_is(t, test, through, mut inf) or {
+			undecided = true
+			continue
+		}
+		if holds {
+			return true
+		}
+	}
+	return if undecided { none } else { false }
+}
+
+// type_is_kinds are the comptime kinds type_is decides.
+const type_is_kinds = ['$interface', '$option', '$array_dynamic', '$array_fixed', '$map', '$enum',
+	'$sumtype', '$int', '$float', '$bool', '$string']
+
 // type_is reports whether the type an instance stands for meets a comptime test: a
 // kind (`$interface`, `$option`, `$array_dynamic`, `$array_fixed`, `$map`, `$enum`,
 // `$sumtype`, `$int`, `$float`, `$bool`, `$string`) or a type's name. none for a test
@@ -1234,6 +1477,12 @@ fn type_is(t InferredType, test string, unaliased bool, mut inf Infer) ?bool {
 	u := if unaliased { inf.unalias(t, t.file) } else { t }
 	raw := u.text.trim_space()
 	text := bare_type(raw)
+	// an alias of a pointer, `type Pint = &int`, meets no type's name nor a kind read here, unaliased
+	// or not. It does meet `$alias` and `T.unaliased_typ is $pointer`, which aren't, so stay undecided
+	if unaliased && raw.starts_with('&') && bare_type(t.text) != text
+		&& (!test.starts_with('$') || test in type_is_kinds) {
+		return false
+	}
 	if !test.starts_with('$') {
 		// an interface, or a generic one, is met by a type that has its methods, which is
 		// not read here, so such a test keeps every instance
@@ -1260,7 +1509,8 @@ fn type_is(t InferredType, test string, unaliased bool, mut inf Infer) ?bool {
 			return text.starts_with('[') && !text.starts_with('[]')
 		}
 		'$map' {
-			return text.starts_with('map[')
+			// bare `map` is the stand-in builtin_of_kind gives
+			return text.starts_with('map[') || text == 'map'
 		}
 		'$int' {
 			return text in ['int', 'i8', 'i16', 'i32', 'i64', 'u8', 'u16', 'u32', 'u64', 'isize',

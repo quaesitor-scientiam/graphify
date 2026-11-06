@@ -657,13 +657,10 @@ Not typed by an argument: a result used directly (`id(x).run()`), nested (`id(id
 an `if` or `match` value, a method's own type parameter, a result around a parameter (`[]T`),
 and a parameter such as `fn () T`.
 
-Still unresolved, looked at and left: `drop_owned`'s `drop`, under `$if T is OwnershipDrop`:
-an interface keeps the value typed `T`, and no instance in the tree gives it a `drop`. A generic struct instantiated from another module,
+Still unresolved, looked at and left: a generic struct instantiated from another module,
 `codec.Store[codec.Paper]{}` in app, gives its methods no instance: the owner is keyed
 as written (`codec.Store`), not by its module's id. A call on the result of its method is
-typed, on master too, and a test now holds that. A field of a match branch with two types
-(`OptionType, ResultType { typ.base_type }`), listed here before, has no unresolved edge on
-this tree, on master either.
+typed, on master too, and a test now holds that.
 
 **What V provides, and more receivers typed (November 2026).** The commonest names left were
 `str`, `contains`, `keys`, `type_name` and `clone`, nearly all on a receiver the graph could
@@ -698,7 +695,8 @@ not type or a method V writes:
   parameter such as `map[K]V`, leaves it unresolved, since the type may declare one. A function
   with no known instance stays unresolved too. Only call sites of a generic function or a method's
   own parameter are tracked as opaque: a generic struct's parameter is taken from its known
-  instances alone, and a function value (`h := g[Foo]`) is no call site.
+  instances alone, and a function value (`h := g[Foo]`) is no call site. `type_idx` and `type_name`
+  have a rule of their own, below.
 
 Compiled programs settle the rule for a narrowed value: `x.str()` on a sum type that declares
 `str` calls the variant's own or the one V writes, and never the sum type's, while any other
@@ -715,6 +713,66 @@ branches among them; on `x.$method()`'s result, which has no type here; on a fie
 `x.$(f.name)`, whose field may be of a type this can't read; on a generic result used directly
 (`id(x).str()`), or of a parameter around one (`pop(mut t Queue[T]) T`); and in a lambda, whose
 untyped parameters aren't read.
+
+**The calls left in regular code (November 2026).** Of those 87, seven sites were outside tests.
+Six resolve; the seventh has no callee. Compiled programs settled each rule:
+
+- `$if T is Iface` and `$if x is Iface` on a variable typed `T`, `mut x T` included, keep `T`, whose
+  instances answer. With no instance that answers, the call is the interface's own method, as on a
+  value of that type (`guard_interface_method`): `drop_owned`'s `drop` and `decode_value`'s
+  `from_json_null`. Not `str()`, which V writes for a type that declares none. The check is read in
+  the guard's own file, named as `type_text` resolves it, since an instance in another module may
+  not see the interface's name and a selective import's is `m.Iface`. An instance that declares the
+  method keeps its edge: `encode_value` still reaches each `to_json`. `mut x T`, which the parser
+  writes `&T`, now counts as a variable typed `T` for these checks. `$if x is $map` still gives any
+  parameter written `&T` builtin's fallback: V calls builtin's `clone` and `keys` on `mut x T` even for
+  an alias that declares its own. On `x T` the alias's still comes first, as it always has, though V
+  calls builtin's there too.
+  `$if x is Foo` for a concrete `Foo` holds on `mut x T` and `mut x &T` but never on `x &T`, whose
+  recipe is the same, so only a `mut` parameter is retyped (`holds_is_check`). The retyped block is
+  `Foo`, so `mut x T` with `T` an alias of `Foo` no longer reaches the alias's own method, the limit
+  `x T` has always had. `T.unaliased_typ is Iface` reads the same as `T is Iface`, names included
+  (`z.Iface` of `import lib.sub as z`). `&Iface`, like `[]Iface`, is a concrete type, not an interface
+  check. An instance that can't implement the interface is left out of the block
+  (`lacks_interface`): it lacks a method the interface's body declares (not one written with a body
+  on the interface, `is_interface_member`) or a field, or a method has another number of parameters.
+  Parameter types aren't compared. It is left out only when its whole declaration was read
+  (`may_have_member`): a member the lookups can't pick one of (two embeds, a copy per platform,
+  `Box[int]` and `Box[string]`) or don't reach (past `embed_depth`, an embed outside the graph) keeps
+  it. An alias each build declares in its own file is read as one build's type, so an instance that
+  only another build's type lets implement the interface is left out. A call of a generic function in the block records no condition, so `helper(x)` still gives
+  `helper` every instance of `T`, as `$if T is Iface` always has. `$if T is Foo` for a concrete `Foo`
+  narrows no instance in its block: V's `is` also takes an alias of `Foo`, and `Foo` may be another
+  type parameter. Its `else` does leave `Foo` out.
+- `$if T is $array_dynamic || T is $map` is one guard, `$array_dynamic|$map` (`comptime_kind_union`),
+  for kinds of one parameter only. With no instance of those kinds the call is on builtin's `array`
+  and `map`, one edge each, as `$map` alone already was: `decode_struct_field`'s `clear`. When a kind
+  has no builtin type (`$array`, `$int`) there is no stand-in at all, since one alone would read as
+  the whole callee. A kind sees through an alias however it is written, as V's does, except `$bool`,
+  which an alias of bool never meets. An alias of a pointer (`type Pint = &int`) meets no type's name and no kind read here,
+  unaliased or not, though V holds `$alias` and `$pointer` for it, which stay undecided; `T` that is itself `&int` still reads as `int`, as it always has, though V says it isn't.
+  An alias of an array with its own `clear`, which no call site shows, isn't reached. The array
+  stands in as `[]`, an element not known, so `x.first().m()` is not the `voidptr` bare `array`
+  declares; `chained_call_ids` no longer takes that `voidptr` for an element of a real `[]Foo`
+  instance; and a `$for` over the fields of builtin's `map`, standing in, walks none, as V's does.
+- `type_idx` and `type_name` on a type parameter are undeclared when nothing in the graph declares a
+  function or method of that name, or a field of a function type (`only_v_provides`), whatever is known of its
+  instances: each instance that compiles has it, and V refuses a sum type that declares one. `$for v
+  in T.variants` is no proof that `T` is a sum type, since a struct with its own `type_idx` compiles
+  through such a function. A type outside the graph may still declare it, and then the edge says V's.
+- `x.field` where `x` is matched by a branch of several types (`First, Second { ... }`) has the type
+  of the field when each type's agrees as a receiver (`same_receiver_type`, through `same_type`, so
+  `Foo` in its own module and `lib.Foo` in another are one). V lets them differ, and then it stays
+  unknown. A method on `x` is V's call of each type's, which no one edge names. Declaring `x` again
+  ends it for `x.inner` as well as `x`.
+- `JS.X.prototype.constructor()` is a `JS.X`, as each of the ten such bindings in vlib declares. No
+  symbol records it (`extract_fn` keeps no `fn JS.` binding), so the name is what is read:
+  `promise_race`'s `push`. Other `JS.` calls still have no result type.
+
+On vlang `f7e5a403ff`: unresolved calls 87 to 78, with none newly unresolved and no resolved edge
+lost. `type_idx` at three sites in tests went with the same rule. The seventh site, redis's
+`T.type_name()` in an `$else` no instance compiles, stays unresolved: V has no such function unless
+the type declares a static method of that name, so there is nothing to link to and nothing V writes.
 
 The raw edge is retained and `explain` reports ambiguous callers rather than
 inventing links. A future opt-in deep mode could run the checker over a whole
