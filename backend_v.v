@@ -687,9 +687,10 @@ fn source_name(name string) string {
 }
 
 // literal_captures are the names in a function literal's capture list, `a` and `b` of
-// `fn [a, mut b] () {}`, read from its source, as the flat AST keeps no node for them. none for a
-// literal with no source of its own there: the parser lowers a `$tmpl` in an expression to one that
-// it writes itself, capturing what the template names.
+// `fn [a, mut b] () {}`, read from its source, as the flat AST keeps no node for them; comments and
+// line breaks may stand anywhere in it. none for a literal with no source of its own there: the
+// parser lowers a `$tmpl` in an expression to one that it writes itself, capturing what the
+// template names.
 fn (f &V3File) literal_captures(n flat.Node) ?[]string {
 	end := int_min(int(n.pos.end), f.src.len)
 	if n.pos.offset < 0 || n.pos.offset >= end {
@@ -699,11 +700,71 @@ fn (f &V3File) literal_captures(n flat.Node) ?[]string {
 	if !head.starts_with('fn') {
 		return none
 	}
-	rest := head[2..].trim_left(' \t')
-	if !rest.starts_with('[') {
+	mut i := 2
+	for i < head.len {
+		next := past_comment(head, i)
+		if next != i {
+			i = next
+		} else if head[i].is_space() {
+			i++
+		} else {
+			break
+		}
+	}
+	if i >= head.len || head[i] != `[` {
 		return []string{}
 	}
-	return rest[1..].all_before(']').split(',').map(it.trim_space().all_after_last(' '))
+	i++
+	mut list := []u8{}
+	for i < head.len && head[i] != `]` {
+		next := past_comment(head, i)
+		if next != i {
+			i = next
+			continue
+		}
+		list << head[i]
+		i++
+	}
+	mut names := []string{}
+	for part in list.bytestr().split(',') {
+		// `mut b`: the name comes last
+		words := part.fields()
+		if words.len > 0 {
+			names << words.last()
+		}
+	}
+	return names
+}
+
+// past_comment is the offset after the `//` or `/* */` comment at `i` in `s`, which V lets nest, or
+// `i` when none starts there.
+fn past_comment(s string, i int) int {
+	if i + 1 >= s.len || s[i] != `/` {
+		return i
+	}
+	if s[i + 1] == `/` {
+		return s.index_after('\n', i) or { s.len }
+	}
+	if s[i + 1] != `*` {
+		return i
+	}
+	mut depth := 0
+	mut at := i
+	for at + 1 < s.len {
+		if s[at] == `/` && s[at + 1] == `*` {
+			depth++
+			at += 2
+		} else if s[at] == `*` && s[at + 1] == `/` {
+			depth--
+			at += 2
+			if depth == 0 {
+				return at
+			}
+		} else {
+			at++
+		}
+	}
+	return s.len
 }
 
 // visible_in_literal keeps the entries of a variable map that a function literal sees: a variable

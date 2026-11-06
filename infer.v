@@ -208,24 +208,42 @@ fn (mut inf Infer) infer_call(e Edge) ?CallResolution {
 }
 
 // function_in_scope reports whether a plain call may be a function the caller can see: one of
-// builtin or of its own module, as far as it sees it, or in a method, a method of its receiver.
-// A type or a value holding a function takes a call only from what the caller can't see (a
-// function of the name in an unrelated module), which is all that keeps `token(0)` from such a
-// function. Where the caller sees both, V's order depends on more than a declaration says (a
-// generic function, the file's @[translated], the build), and the call stays what resolve_callee
-// makes it.
+// builtin or of its own module, as far as it sees it, one of a `module main` or `module builtin` file
+// of its directory, or in a method, a method of its receiver. The `module main` files may be
+// one program though the directory has a second `fn main`, in a test or for another platform, and
+// counting one the caller doesn't see only leaves the call as the lookup makes it. A type or a
+// value holding a function takes a call only from what the caller can't see (a function of the
+// name in an unrelated module), which is all that keeps `token(0)` from such a function. Where the
+// caller may see both, V's order depends on more than a declaration says (a generic function, the
+// file's @[translated], the build), and the call stays what resolve_callee makes it.
 fn (inf &Infer) function_in_scope(e Edge) bool {
 	caller := caller_site(e, inf.site_of) or { return false }
 	for c in inf.by_name[e.to] or { []CallCand{} } {
 		if c.is_method || test_private(c.file, caller.file) {
 			continue
 		}
-		if import_reaches(c.mod, 'builtin') || (c.mod == caller.mod
-			&& caller.sees_in_module(c.file, (inf.scope_of[c.file] or { FileScope{} }).is_main)) {
+		if import_reaches(c.mod, 'builtin') {
+			return true
+		}
+		decl := inf.scope_of[c.file] or { FileScope{} }
+		if c.mod == caller.mod && (caller.sees_in_module(c.file, decl.is_main)
+			|| ((decl.is_main || decl.declared == 'builtin') && !caller.built_alone())) {
 			return true
 		}
 	}
 	return implicit_receiver_call(e, inf.by_name) != none
+}
+
+// type_conversion is the type a bare call that nothing else answers converts to: one of the
+// caller's own module (own_type_conversion), when it can see no function of the name, or an alias
+// it can see (alias_conversion).
+fn (inf &Infer) type_conversion(e Edge) ?string {
+	if !inf.function_in_scope(e) {
+		if id := own_type_conversion(e, inf.by_type_name, inf.site_of, inf.scope_of) {
+			return id
+		}
+	}
+	return alias_conversion(e, inf.alias_by_name, inf.site_of, inf.imports_of)
 }
 
 // own_fn_value is the constant or global of the caller's own module, holding a function, that a
@@ -875,7 +893,7 @@ fn (inf &Infer) call_result(e Edge, to string, steps []string, depth int) ?Infer
 		kind: .calls
 		file: e.file
 	}
-	// what resolve_edges takes the call to be before any function of the name, in its order:
+	// what resolve_edges takes the call to be where the caller sees no function of the name:
 	// `x := token(0)` is a token, and `y := f(1)` has the result of the function `f` holds
 	if !to.contains('.') {
 		if conv := inf.conversion(call) {

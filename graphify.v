@@ -890,9 +890,14 @@ fn visible_from(mod string, caller DeclSite, imports []string) bool {
 // `decl_main` must come from the declaration's own file: a const's id is shared by
 // every file of the directory that declares it, so its site_of entry is any one's.
 fn (site DeclSite) sees_in_module(decl_file string, decl_main bool) bool {
-	test := is_test_file(site.file)
-	return !site.is_main || decl_file == site.file || (decl_main && !(test && site.module_unwritten)
-		&& (site.solo || (site.no_main && test && !is_test_file(decl_file))))
+	return !site.is_main || decl_file == site.file || (decl_main && !site.built_alone()
+		&& (site.solo || (site.no_main && is_test_file(site.file) && !is_test_file(decl_file))))
+}
+
+// built_alone reports whether a caller at this site is a test with no `module` line, which V builds
+// without the `module main` files beside it.
+fn (site DeclSite) built_alone() bool {
+	return site.module_unwritten && is_test_file(site.file)
 }
 
 // generated_enum_mod is the module of the enum a static call names (`MyEnum` or
@@ -1047,7 +1052,7 @@ struct DeclSite {
 	file    string
 	is_main bool // in a standalone program, see main_unit_files
 	// solo is set when the module's only `fn main` is this one's: the module
-	// is one program, so its files are one another's module (see resolve_edges)
+	// is one program, so its `module main` files are one another's (see sees_in_module)
 	solo bool
 	// no_main is set when the module has no `fn main` at all: a directory of
 	// translated or test files, built together. A type's lookup (type_in_scope)
@@ -1140,8 +1145,8 @@ fn resolve_edges(mut g Graph) {
 	// (see below): one that does is called as one, and it is the fallback when no
 	// function of that name fits (see infer_call)
 	mut const_calls := map[string][]CallCand{}
-	// fn_values holds those known to hold a function itself, which V takes over a
-	// function of the name (see infer_call)
+	// fn_values holds those known to hold a function itself, which takes a call the caller
+	// sees no function for (see own_fn_value)
 	mut fn_values := map[string][]CallCand{}
 	mut by_type_name := map[string][]TypeCand{}
 	// type aliases by name, for a bare call of one (see alias_conversion)
@@ -1705,7 +1710,7 @@ fn resolve_edges(mut g Graph) {
 			if !e.is_method && !e.to.contains('.') && e.to !in runtime_helpers {
 				ids := bare_builtin_call(e, by_name, site_of).filter(!unaddressable[it])
 				if ids.len > 0 && implicit_receiver_call(e, by_name) == none
-					&& type_conversion(e, by_name, alias_by_name, by_type_name, site_of, imports_of, scope_of) == none {
+					&& inf.type_conversion(e) == none {
 					for id in ids {
 						key := '${e.from}\x00${id}'
 						if at := seen_call[key] {
@@ -1761,7 +1766,7 @@ fn resolve_edges(mut g Graph) {
 		// `type uintptr_t = usize`. Only the types the caller can see count (see
 		// type_conversion), and a method call is never one.
 		if e.kind == .calls && !e.is_method && !e.to.contains('.') {
-			if id := type_conversion(e, by_name, alias_by_name, by_type_name, site_of, imports_of, scope_of) {
+			if id := inf.type_conversion(e) {
 				if !unaddressable[id] {
 					resolved << Edge{
 						from:       e.from
@@ -2230,6 +2235,9 @@ fn resolve_callee(e Edge, by_name map[string][]CallCand, site_of map[string]Decl
 					site_of[c.id] or { DeclSite{} }
 				}).is_main) {
 					own = true
+				} else if import_reaches(c.mod, 'builtin') {
+					// a test in a builtin directory that isn't built with it: still builtin's
+					builtins << c
 				}
 			} else if import_reaches(c.mod, 'builtin') {
 				builtins << c
@@ -2577,18 +2585,6 @@ fn alias_conversion(e Edge, alias_by_name map[string][]TypeCand, site_of map[str
 	caller := caller_site(e, site_of) or { return none }
 	res := type_in_scope(cands, caller, imports_of)?
 	return res.id
-}
-
-// type_conversion is the type a bare call that nothing else answers converts to: one of the
-// caller's own module (own_type_conversion), unless a method of the receiver has the name, or an
-// alias it can see (alias_conversion).
-fn type_conversion(e Edge, by_name map[string][]CallCand, alias_by_name map[string][]TypeCand, by_type_name map[string][]TypeCand, site_of map[string]DeclSite, imports_of map[string][]string, scope_of map[string]FileScope) ?string {
-	if implicit_receiver_call(e, by_name) == none {
-		if id := own_type_conversion(e, by_type_name, site_of, scope_of) {
-			return id
-		}
-	}
-	return alias_conversion(e, alias_by_name, site_of, imports_of)
 }
 
 // own_type_conversion is the type of the caller's own module, as far as the caller sees it, that

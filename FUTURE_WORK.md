@@ -786,14 +786,15 @@ comes from a compiled program, except where noted:
   it this way, since a type's text can name the alias.
 - An import with no such function in a module it reaches may name a module a file beside the caller
   declares (`import c` with c.v in the directory, as in vlib/v/tests/testdata/enum_in_builtin). A directory
-  build of V takes that, and a single-file build refuses it. A module the import reaches comes first when
-  it declares the function; one outside the graph, or one that doesn't declare it, is passed over, unless
+  build of V takes that, over a module the import reaches, and a single-file build refuses it. A call can't
+  say which build it is in, so a module the import reaches comes first when it declares the function, as in
+  a single-file build; one outside the graph, or one that doesn't declare it, is passed over, unless
   the caller's own file is of that module: `module bar` with `import a.bar` wraps it, and keeps the raw name. `import stats_import` in vlib/v/preludes_js was read,
   not compiled.
 - A const or global holding a function, or a type, of the caller's own module takes a plain call only
   from what the caller can't see: `token(0)` no longer links to an unrelated module's `token`. Where the
-  caller sees a function of the name (of its module, as far as it sees it, or builtin's) or its receiver
-  has a method of the name, the call stays what the function lookup makes it, as before. This is deliberate
+  caller may see a function of the name (of its module, as far as it sees it, of a `module main` or `module builtin` file of
+  its directory, or builtin's) or its receiver has a method of the name, the call stays what the function lookup makes it, as before. This is deliberate
   and leaves some calls wrong, each as it was. V's order there depends on more than a declaration says: it
   takes a const over a plain function and over a type from a file that isn't `@[translated]`, a conversion
   over a plain function, a generic function over a type or const, and a receiver's method over a type or
@@ -802,15 +803,16 @@ comes from a compiled program, except where noted:
 - A value is known to hold a function by a literal or a written `fn` type, so `const f = g` and a value
   typed by an alias aren't read as one. Between a const holding a function and a type, both of the module,
   the const takes the call. A call of a held function has the result of the declaration the caller sees,
-  as files of a directory share a const's id, and none from a file of no platform when the const is in one
-  platform's file. A global sharing an id with a function or type has an id of its own (`::global::`), as a
+  as files of a directory share a const's id. One in a platform's file isn't read from another file, of that
+  platform or none, so a call there can still link to an unrelated module's function, as before. A global sharing an id with a function or type has an id of its own (`::global::`), as a
   const already did, and takes its type references with it. Two programs of a directory that each declare
   such a global share that id, so the reference goes to one program's type.
 - The value of a conversion has its type. A type of the module takes a call the lookup leaves open, unless
   a method of the receiver has the name. An alias of an imported module or of builtin is still only tried
   after the function lookup, as before, so `uintptr_t(x)` of a builtin alias can link to a uniquely named
   function elsewhere, or to a function of the caller's own module, where V converts. A `type JS.x` isn't
-  told from a V type of the name (its signature drops the host).
+  told from a V type of the name (its signature drops the host). A call of a local and a conversion of one
+  name in one function share an edge, as they did.
 
 A local of the name is what a call of it reaches, and the value is what the local holds returns
 (`f := mk`), where a function, const or type of the name used to answer. A function literal sees the
