@@ -878,6 +878,48 @@ What stays open or as it was:
 - `str()` on a `&u8`, a C string's included, links to u8's `str`, as a receiver's `&` is looked through
   everywhere, where V prints the pointer. A rune's `str` took the literal's call before.
 
+**Static calls on a type parameter, string loops and variadics (November 2026).** A static call on a
+type parameter, `T.parse(mut p)`, is each instance's static: its own, or through an alias the first
+type that declares it (`static_along`, which alias statics use too). For an enum with no `from` or
+`from_string` of its own it is the one V generates. As for a method on a type parameter, the declared
+statics are linked, and the call is V's only when every instance is known, each gets it from V, and
+no call site gave the parameter a type this can't read (`opaque`). It keeps the comptime guards it is
+under, so an instance a `$if T is $enum` leaves out of the `$else` doesn't reach the call. With no
+instance it stays open. The variable of a `$for` over a string's `split`, `split_any` or `fields`
+is a string, as V's checker types it. Each argument of a variadic `...T` gives `T`, past the
+parameter list too, and a spread `...xs` gives the elements of `xs` (`spread_step`), for the
+function's instances and for its result (`arg_result`).
+
+On vlang `95a0d5191f`: unresolved calls 64 to 59, the five sites of these shapes. What stays open or as
+it was:
+
+- `T.zero()` isn't taken as V's for a `@[flag]` enum, as nothing here records which enums are flags.
+  None is in vlang.
+- An instance of a generic struct, `T.make()` with `T` a `Box[int]`, finds no static, and V refuses the
+  call. An instance given through a pointer, `build(&f)`, is read as the type it points to, `Foo`, as
+  for every call on a type parameter, so `Foo.make` is linked, though V refuses `T.make()` for `&Foo`.
+- A static call in the block of `$if T is Foo` reaches every instance's static, not only Foo's: that
+  block keeps every instance (guarded_instances), since the walk retypes a variable typed `T` there
+  but not a call on `T` itself. `build[Bar]` then links `Bar.make`, which V never compiles there. The
+  `$else` does leave Foo out. No such call is in vlang at 95a0d5191f, 4e0cc6baa8 or the frozen copy,
+  native-backend, graphify's own source or the 27 project folders: none of them changed an edge except
+  at the five sites and native-backend's vendored copies of them.
+- An enum's generated `from` through an alias instance (`T` a `type Al = Color`) stays open, as through
+  the alias directly, though both compilers build it.
+- V3 builds `each(...xs)` with `T` the array, `[]Bar`, and prints `['[]']`, but `first(...xs)` with `T`
+  the element, as `-old-compiler` builds both, and vlang's own generics_test.v asserts the element for
+  `max('krkr', ...a)`. The element is taken. Of vlang's spreads into a generic `...T` (calls of `arrays.concat`,
+  `arrays.group`, `max` and `reflected_collect` among them), only the two into `varargs` in
+  arraydecompose_nonvariadic_test.v change an edge: `varargs(...args)` passes on `call`'s `int`,
+  `f64`, `string` and `Any`, and `varargs(...c)` adds `Any`, whose `str` V writes either way.
+- In native-backend, which holds two clones of builtin, the vendored copies of vlang's tests reach no
+  primitive's `str`: none of the 101 call edges there that reach one on master comes from them. So
+  `method_on` finds no `str` for `varargs`' `int`, `f64` and `string` in those copies, `no_method`
+  takes each as V's, as for `u128`, and the two copies of `varargs` are now labelled V's.
+- Calls whose type comes from a field loop's argument (`f(val.$(field.name))`, which leaves the
+  instances opaque), from `x.$method()`'s result, or from a generic call's result used directly, around
+  a parameter (`pop(mut t Queue[T])`) or of a method's own type parameter, stay as they were.
+
 The raw edge is retained and `explain` reports ambiguous callers rather than
 inventing links. A future opt-in deep mode could run the checker over a whole
 project, but given the small remainder, it would need to address these

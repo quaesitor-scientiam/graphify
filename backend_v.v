@@ -1966,8 +1966,11 @@ fn (ctx V3CallCtx) narrowed(name string, recipe string) V3CallCtx {
 	return out
 }
 
-// comptime_for_types are the builtin types of a `$for` loop's variable, by what it walks.
+// comptime_for_types are the builtin types of a `$for` loop's variable, by what it walks. The
+// parser names a loop over a call `strings` (`$for part in 'a/b'.split('/')`), whose parts V
+// requires to be strings.
 const comptime_for_types = {
+	'strings':    'string'
 	'params':     'FunctionParam'
 	'fields':     'FieldData'
 	'attributes': 'VAttribute'
@@ -3222,6 +3225,12 @@ fn (f &V3File) recipe(id flat.NodeId, ctx V3CallCtx) string {
 		}
 		.prefix {
 			if kids.len == 1 {
+				// `...xs` spreads an array into a variadic parameter: the array's recipe, ended by
+				// spread_step, which nothing follows (collect_call_sites and arg_result read it)
+				if n.op == .none && n.value_text() == '...' {
+					r := f.recipe(kids[0], ctx)
+					return if r != '' { r + recipe_sep + spread_step } else { '' }
+				}
 				if n.op in [.amp, .mul, .minus, .bit_not] {
 					return f.recipe(kids[0], ctx)
 				}
@@ -4045,8 +4054,14 @@ fn (mut f V3File) record_call(callee_id flat.NodeId, args []flat.NodeId, ctx V3C
 	// `f()` where `f` is a variable or parameter calls a function value
 	value_call := !is_method && name in ctx.vars
 	// a method call keeps the comptime conditions it is under (see guarded), so calls
-	// under different ones are different edges
-	guards := if is_method { ctx.guards.join(recipe_sep) } else { '' }
+	// under different ones are different edges; so does a static call on a type parameter,
+	// `T.parse()`, which reaches each instance's static (see expand_edges)
+	guards := if is_method || (name.contains('__static__')
+		&& name.all_before('__static__') in ctx.tparams) {
+		ctx.guards.join(recipe_sep)
+	} else {
+		''
+	}
 	key := '${name}\x00${rt}\x00${recipe}\x00${value_call}\x00${guards}'
 	// the builds that compile this call site (Edge.build)
 	mut build := ''
@@ -4083,6 +4098,11 @@ fn (mut f V3File) record_call(callee_id flat.NodeId, args []flat.NodeId, ctx V3C
 
 // arg_site_end ends each call site's argument recipes in an edge's arg_sites.
 const arg_site_end = '\x08'
+
+// spread_step ends the recipe of a spread argument, `...xs`: the values of a variadic parameter
+// taken from the array xs. follow_steps knows no such step, so only the readers of call
+// arguments that strip it, collect_call_sites and arg_result, read such a recipe.
+const spread_step = '...'
 
 // arg_site is the recipes of a call's arguments, joined by \x0b. One with no
 // recipe is ''.

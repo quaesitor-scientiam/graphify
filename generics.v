@@ -158,15 +158,32 @@ fn collect_call_sites(edges []Edge, funcs map[string]Symbol, mut inf Infer, mut 
 				continue
 			}
 			args := site.split('\x0b')
-			for j, recipe in args {
-				if recipe == '' || j >= ptypes.len {
+			variadic := if ptypes.len > 0 && ptypes.last().starts_with('...') {
+				ptypes.last()
+			} else {
+				''
+			}
+			for j, arg in args {
+				if arg == '' || (j >= ptypes.len && variadic == '') {
 					continue
+				}
+				// each argument at or past a variadic parameter, `args ...T`, is one of its values,
+				// a T, unless it spreads an array of them, `...xs`, a []T
+				mut ptype := if j < ptypes.len { ptypes[j] } else { variadic }
+				mut recipe := arg
+				if ptype.starts_with('...') {
+					if recipe.ends_with(recipe_sep + spread_step) {
+						recipe = recipe[..recipe.len - recipe_sep.len - spread_step.len]
+						ptype = '[]' + ptype[3..]
+					} else {
+						ptype = ptype[3..]
+					}
 				}
 				for tp in tps {
 					// a function-typed parameter, `h fn () H`, is typed by what the function its argument
 					// names returns: the argument is a function-typed value, or a function named as a value
-					returns_tp := (fn_return(ptypes[j]) or { '' }) == tp
-					if ptypes[j] != tp && ptypes[j] != '[]' + tp && !returns_tp {
+					returns_tp := (fn_return(ptype) or { '' }) == tp
+					if ptype != tp && ptype != '[]' + tp && !returns_tp {
 						continue
 					}
 					edge := Edge{
@@ -178,7 +195,7 @@ fn collect_call_sites(edges []Edge, funcs map[string]Symbol, mut inf Infer, mut 
 					mut text := bare_type(t.text)
 					if returns_tp {
 						text = bare_type(fn_return(text) or { continue })
-					} else if ptypes[j] != tp {
+					} else if ptype != tp {
 						if !text.starts_with('[]') {
 							continue
 						}
@@ -292,6 +309,67 @@ fn expand_edges(edges []Edge, instances map[string][]InferredType, opaque map[st
 	// (see merge_call_edges)
 	mut field_edges := []Edge{}
 	for e in edges {
+		// a static call on a type parameter, `T.parse(mut p)`, is each instance's static: its own,
+		// or through an alias the first type that declares it (static_along), or for an enum the
+		// `from` and `from_string` V generates. As for a method call below, the declared ones are
+		// linked, and the call is V's only when every instance is known and gets it from V
+		if e.kind == .calls && !e.is_method && e.provenance != .undeclared && !e.to.contains('.')
+			&& e.to.contains('__static__') {
+			if caller := funcs[e.from] {
+				tp := e.to.all_before('__static__')
+				if tp in generic_params(caller) {
+					method := e.to.all_after('__static__')
+					key := instance_key(caller, tp)
+					insts := guarded_instances(instances[key] or { []InferredType{} }, e.guards,
+						tp, e.file, mut inf)
+					mut ids := []string{}
+					mut generated := 0
+					// an instance of a generic struct, `Box[int]`, finds no static: V refuses `T.make()` there
+					for t in insts {
+						scope := instance_scope(t, e.file, inf)
+						if id := inf.type_static(t, method, scope) {
+							if id !in ids {
+								ids << id
+							}
+						} else if method in ['from', 'from_string'] && inf.is_enum(t, scope) {
+							generated++
+						}
+					}
+					if ids.len == 0 {
+						if keep {
+							out << if insts.len > 0 && generated == insts.len && !opaque[key] {
+								Edge{
+									...e
+									provenance: .undeclared
+								}
+							} else {
+								e
+							}
+						}
+						continue
+					}
+					for id in ids {
+						ne := Edge{
+							from:       e.from
+							to:         id
+							kind:       .calls
+							file:       e.file
+							provenance: .inferred
+							arg_sites:  e.arg_sites
+							lines:      e.lines
+							build:      e.build
+						}
+						if keep {
+							out << ne
+						}
+						if passes_own_params(e, id, funcs) {
+							reached << ne
+						}
+					}
+					continue
+				}
+			}
+		}
 		if e.kind != .calls || !e.is_method || e.to.contains('.') || e.provenance == .undeclared {
 			if keep {
 				out << e
