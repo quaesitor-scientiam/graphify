@@ -778,8 +778,8 @@ the type declares a static method of that name, so there is nothing to link to a
 comes from a compiled program, except where noted:
 
 - A `module main` test beside `module io` is not in io, so `copy()` is builtin's, though io declares
-  one. `sees_in_module` is the test, and a one-`fn main` program now sees only `module main` files of
-  its directory, not a `module lib` file beside it. A main helper of the directory is what a test
+  one. `sees_in_module` is the test, and a one-`fn main` program now sees the `module main` files of
+  its directory, and a `module builtin` file V compiles in, not a `module lib` file beside it. A main helper of the directory is what a test
   writing `module main` is built with; a test with no `module` line, as vlib/io/io_test.v, is built alone.
 - A callee's prefix is an import path first: `jj.start()` under `import benchmark as jj` comes out
   as `benchmark.start`, though `import x.benchmark` takes `benchmark` as its alias. Only callees read
@@ -807,17 +807,24 @@ comes from a compiled program, except where noted:
   platform or none, so a call there can still link to an unrelated module's function, as before. A global sharing an id with a function or type has an id of its own (`::global::`), as a
   const already did, and takes its type references with it. Two programs of a directory that each declare
   such a global share that id, so the reference goes to one program's type.
-- The value of a conversion has its type. A type of the module takes a call the lookup leaves open, unless
-  a method of the receiver has the name. An alias of an imported module or of builtin is still only tried
+- The value of a conversion has its type. A struct or enum of the module takes a call the lookup leaves open,
+  unless the caller may see a function of the name or a method of the receiver has it; an alias of the module
+  takes such a call either way, as before. An alias of an imported module or of builtin is still only tried
   after the function lookup, as before, so `uintptr_t(x)` of a builtin alias can link to a uniquely named
   function elsewhere, or to a function of the caller's own module, where V converts. A `type JS.x` isn't
   told from a V type of the name (its signature drops the host). A call of a local and a conversion of one
-  name in one function share an edge, as they did.
+  name in one function share an edge, as they did. A call in a const's initializer is judged from the one
+  file kept for the const's id, so where two programs of a directory declare that const, one program's call
+  can take the other's answer, as on master.
 
 A local of the name is what a call of it reaches, and the value is what the local holds returns
 (`f := mk`), where a function, const or type of the name used to answer. A function literal sees the
 locals it captures, read from its `fn [a, mut b]` list, and a `$for` loop's variable, which V lets it read
-without one. A `$tmpl` in an expression becomes a literal the parser writes, which keeps every local.
+without one. A `$tmpl` in an expression becomes a literal the parser writes, which keeps every local, with
+one limit. Its position is in the text the parser generated, not in the file, so it is told by what the file
+holds at that offset: a literal starts `fn`, then a list or its parameters, and ends in `}`, as all 3681
+literals in vlib, examples, cmd and S:/vProjects do. A file that holds all of that there by chance drops the
+template's locals. Of the 94 files using `$tmpl` in those trees, none does.
 
 On vlang `4e0cc6baa8`: unresolved calls 84 to 73. 14 call edges change, three of them wrong or
 accidental results corrected (`token`, `func3` to another module's function, and a `str` on a value of

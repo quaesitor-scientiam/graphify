@@ -690,14 +690,16 @@ fn source_name(name string) string {
 // `fn [a, mut b] () {}`, read from its source, as the flat AST keeps no node for them; comments and
 // line breaks may stand anywhere in it. none for a literal with no source of its own there: the
 // parser lowers a `$tmpl` in an expression to one that it writes itself, capturing what the
-// template names.
+// template names, whose position is in the text it generated, not in this file. It is told by what
+// the file holds there: a literal starts `fn`, then a list or its parameters, and ends in `}`. A
+// file that happens to hold all that at the position reads as one, which the docs disclose.
 fn (f &V3File) literal_captures(n flat.Node) ?[]string {
 	end := int_min(int(n.pos.end), f.src.len)
 	if n.pos.offset < 0 || n.pos.offset >= end {
 		return none
 	}
 	head := f.src[n.pos.offset..end]
-	if !head.starts_with('fn') {
+	if !head.starts_with('fn') || !head.ends_with('}') {
 		return none
 	}
 	mut i := 2
@@ -711,7 +713,10 @@ fn (f &V3File) literal_captures(n flat.Node) ?[]string {
 			break
 		}
 	}
-	if i >= head.len || head[i] != `[` {
+	if i >= head.len || (head[i] != `[` && head[i] != `(`) {
+		return none
+	}
+	if head[i] == `(` {
 		return []string{}
 	}
 	i++
@@ -3478,7 +3483,7 @@ fn (f &V3File) recipe(id flat.NodeId, ctx V3CallCtx) string {
 				}
 				// any other local of the name is what this calls (value_call), `f := mk`, and no
 				// function, constant or type elsewhere says what it returns: its own value does
-				return if v == '' || v.contains(recipe_alt) { '' } else { v + recipe_sep + 'R' }
+				return if v == '' { '' } else { v + recipe_sep + 'R' }
 			}
 				mut rec := 'c:' + name
 				// `f[Config](x)`: the type arguments, `p:` steps in order,

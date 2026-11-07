@@ -209,7 +209,7 @@ fn (mut inf Infer) infer_call(e Edge) ?CallResolution {
 
 // function_in_scope reports whether a plain call may be a function the caller can see: one of
 // builtin or of its own module, as far as it sees it, one of a `module main` or `module builtin` file
-// of its directory, or in a method, a method of its receiver. The `module main` files may be
+// of its directory, unless the caller is a test built alone, or in a method, a method of its receiver. The `module main` files may be
 // one program though the directory has a second `fn main`, in a test or for another platform, and
 // counting one the caller doesn't see only leaves the call as the lookup makes it. A type or a
 // value holding a function takes a call only from what the caller can't see (a function of the
@@ -1215,7 +1215,7 @@ fn (inf &Infer) comptime_type(name string, file string) ?InferredType {
 
 // find_const is the const or global that `name` names from `file`: one of
 // its module's (in a standalone program, of its own file, unless its `main`
-// module is one program), or of builtin;
+// module is one program), of builtin, or of a `module builtin` file of its directory;
 // with a module path, `os.args`, one of that module's.
 fn (inf &Infer) find_const(name string, file string) ?Symbol {
 	short := name.all_after_last('.')

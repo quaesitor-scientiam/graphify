@@ -18578,6 +18578,7 @@ fn test_a_program_with_no_module_line_is_built_with_its_helper() {
 	})
 	assert plain_calls(g, 'main', 'helper') == ['p.helper:inferred']
 }
+
 fn test_a_capture_list_is_read_past_comments_and_line_breaks() {
 	// compiled: each calls the captured local, and `b.m()` is the captured Baz's
 	for list in ['/* c */ [f]', '\n\t[f]', '[mut\tf]', '[\n\tg, // count\n\tf,\n]', '[f /* the local */]'] {
@@ -18714,4 +18715,88 @@ fn test_a_function_of_a_builtin_file_beside_a_program_keeps_the_call_from_a_type
 		'src/b.v': 'module builtin\n\npub struct Baz {}\n\npub fn tok(x int) Baz {\n\treturn Baz{}\n}\n'
 	})
 	assert plain_calls(g, 'caller', 'tok') == ['src.tok@src/b.v:extracted']
+}
+
+fn test_a_template_whose_position_holds_fn_text_keeps_its_locals() {
+	// compiled: prints `hello Sss`. A lowered template's literal has a position in the text the parser
+	// generated, here byte 5 of the file: `fn first`, which is no literal, and `fn (r Zed) ...`, which
+	// could start one but doesn't end there.
+	dir := os.join_path(os.temp_dir(), 'graphify_tmpl_pos_${os.getpid()}')
+	os.mkdir_all(dir) or { panic(err) }
+	defer {
+		os.rmdir_all(dir) or {}
+	}
+	os.write_file(os.join_path(dir, 'x.txt'), 'hello @{r.which()}\n') or { panic(err) }
+	body := '${which_types}\nfn wrap(s string) string {\n\treturn s\n}\n\nfn t() string {\n\tr := Sss{}\n\treturn wrap(\$tmpl("x.txt"))\n}\n'
+	calls_with := fn [dir, body] (head string) []string {
+		path := os.join_path(dir, 'a.v')
+		os.write_file(path, head + body) or { panic(err) }
+		mut g := Graph{}
+		syms, edges := extract_v_file(path, 'lib/m/a.v')
+		g.symbols << syms
+		g.edges << edges
+		resolve_edges(mut g)
+		return plain_calls(g, 't', 'which').map(it.all_before(':'))
+	}
+	// the literal's span ends at byte 97 here, so these three hold a `}` at byte 96
+	no_fn := '// x\n// ( ${'c'.repeat(86)}}\n'
+	no_list := '// x\nfn first() {\n// ${'c'.repeat(75)}}\n}\n\n'
+	fooled := '// x\nfn (r Zed) later() {\n// ${'c'.repeat(67)}}\n}\n\nstruct Zed {}\n\n'
+	for head in ['// x\nfn first() {}\n\n', '// x\nfn (r Zed) later() {}\n\nstruct Zed {}\n\n', no_fn, no_list] {
+		assert calls_with(head) == ['lib.m.Sss.which'], head
+	}
+	// the limit FUTURE_WORK.md discloses: all of a literal's shape there by chance reads as one, and
+	// the template loses its locals, where V still prints `hello Sss`
+	assert calls_with(fooled) == ['which']
+}
+
+fn test_a_comment_in_or_before_a_capture_list_is_no_capture() {
+	// compiled: each prints the module's `f`, as the literal doesn't capture the local `f`, whatever a
+	// comment beside the list says
+	for list in ['// c\n', '/* a /* b */ c */ ', '[g, // f\n]', '[/* f /* f */ f */ g]'] {
+		g := graph_of({
+			'lib/m/a.v': 'module m\n\nfn f(x int) int {\n\treturn x\n}\n\nfn caller() {\n\tmut f := fn (x int) string {\n\t\treturn ""\n\t}\n\t_ = f\n\tg := 1\n\t_ = g\n\th := fn ${list} () {\n\t\tf(1)\n\t}\n\th()\n}\n'
+		})
+		assert plain_calls(g, 'caller', 'f') == ['lib.m.f:extracted'], list
+	}
+}
+
+fn test_an_alias_of_builtin_is_a_conversion_from_any_module() {
+	// a type of the caller's own module isn't the only one a bare call converts to
+	g := extract_graph_of({
+		'vlib/builtin/alias.v': 'module builtin\n\npub type wide_t = int\n'
+		'lib/app/app.v':        'module app\n\nfn run() {\n\twide_t(1)\n}\n'
+	})
+	assert plain_calls(g, 'run', 'wide_t') == ['vlib.builtin.wide_t:inferred']
+}
+
+fn test_a_const_naming_a_function_or_holding_a_call_is_not_read_as_holding_one() {
+	// not what V does, which calls the const: only a literal or a written `fn` type says a value holds
+	// a function, and the disclosed limit leaves the rest to the function lookup
+	g := extract_graph_of({
+		'lib/a/a.v': 'module a\n\nfn mk() fn () {\n\treturn fn () {}\n}\n\nfn real() {}\n\nconst by_call = mk()\n\nconst by_name = real\n\nfn run() {\n\tby_call()\n\tby_name()\n}\n'
+		'lib/b/b.v': 'module b\n\npub fn by_call() {}\n\npub fn by_name() {}\n'
+	})
+	assert plain_calls(g, 'run', 'by_call') == ['lib.b.by_call:extracted']
+	assert plain_calls(g, 'run', 'by_name') == ['lib.b.by_name:extracted']
+}
+
+fn test_a_dotted_import_may_name_a_module_beside_the_file() {
+	// compiled, `v run .`: prints `beside`, by the last part of the path, though a.c exists and lacks it
+	g := extract_graph_of({
+		'run/main.v': 'module main\n\nimport a.c\n\nfn main() {\n\tprintln(c.pick())\n}\n'
+		'run/c.v':    'module c\n\npub fn pick() string {\n\treturn "beside"\n}\n'
+		'a/c/c.v':    'module c\n\npub fn other() string {\n\treturn "real"\n}\n'
+	})
+	assert plain_calls(g, 'main', 'pick') == ['run.pick:extracted']
+}
+
+fn test_a_copy_in_a_top_level_if_of_a_test_is_built_alone_too() {
+	// such a copy's site is kept per file: it still says the test has no `module` line
+	g := extract_graph_of({
+		'p/common.v': 'module main\n\nfn pick() string {\n\treturn ""\n}\n'
+		'p/x_test.v': 'const pick = fn () string {\n\treturn ""\n}\n\n\$if linux {\n\tfn go_on() {\n\t\tpick()\n\t}\n} \$else {\n\tfn go_on() {\n\t\tpick()\n\t}\n}\n\nfn test_a() {\n\tgo_on()\n}\n'
+		'q/o.v':      'module o\n\npub fn other() {}\n'
+	})
+	assert plain_calls(g, 'go_on', 'pick') == ['p::const::pick:inferred']
 }
