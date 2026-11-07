@@ -405,15 +405,23 @@ fn (inf &Infer) no_method(t InferredType, name string, file string) ?string {
 	if name == 'wait' && (text.starts_with('thread') || text.starts_with('[]thread')) {
 		return ''
 	}
-	// `str()` on a primitive the builtin doesn't declare one for (`u128`), or on a
+	// `str()` on a primitive the builtin doesn't declare one for (`u128`, a `&char`), or on a
 	// thread, which V writes as `thread(int)`
-	if name == 'str' && (text in primitive_types || is_thread_type(text) || text.starts_with('chan ')) {
+	if name == 'str' && (text in primitive_types || text == 'char' || is_thread_type(text)
+		|| text.starts_with('chan ')) {
 		return ''
 	}
 	if text.starts_with('[') && (name in array_builtins || name == 'str') {
 		return ''
 	}
 	if text.starts_with('map[') && name == 'str' {
+		return ''
+	}
+	// V writes `str()` for an anonymous struct or union. anon_type makes up its name, and a
+	// literal whose members V types later, `union {}` or `union { text: text }`, has the word
+	// `union` from the parser, which no type can be named
+	if name == 'str' && (text.starts_with('_VAnonStruct') || text.starts_with('_VAnonUnion')
+		|| text == 'union') {
 		return ''
 	}
 	if is_named_type(text) {
@@ -868,6 +876,43 @@ fn (inf &Infer) fields_of_elem(t InferredType, path string, file string) ?Inferr
 	return cur
 }
 
+// alias_static is the static method a call through an alias reaches: the first type along the
+// aliases that declares it, each read in the scope of the alias before it. `MyAlias.new()` after
+// `type MyAlias = MyStruct` is `MyStruct.new`, as compiled programs print, and through `type Aaa =
+// Bbb` and `type Bbb = Ccc` it is `Bbb.new` when Bbb has one. none for a call the type it names
+// answers itself, which the lookup links, and for any other call. V's old compiler skips to the
+// last type of a chain, and only the default one is followed.
+fn (inf &Infer) alias_static(e Edge) ?string {
+	if !e.to.contains('__static__') {
+		return none
+	}
+	method := e.to.all_after('__static__')
+	file := if e.file != '' { e.file } else { (inf.site_of[e.from] or { return none }).file }
+	mut cur := InferredType{
+		text: e.to.all_before('__static__')
+		mod:  (inf.scope_of[file] or { FileScope{} }).mod
+		file: file
+	}
+	for i in 0 .. embed_depth {
+		text := bare_type(cur.text)
+		short := text.all_after_last('.')
+		qual := if text.contains('.') { text.all_before_last('.') } else { '' }
+		decl := inf.find_type(short, qual, cur, file)?
+		own := (inf.by_name['${short}__static__${method}'] or { []CallCand{} }).filter(it.mod == decl.mod
+			&& !test_private(it.file, file))
+		if own.len > 0 {
+			return if i == 0 { none } else { only_id(own) }
+		}
+		target := inf.alias_of[decl.id] or { return none }
+		cur = InferredType{
+			text: target
+			mod:  decl.mod
+			file: decl.file
+		}
+	}
+	return none
+}
+
 // call_result is the return type of the call `to` made from e's file, its
 // generic arguments (the `p:` steps of `steps`) put in place of its parameters.
 fn (inf &Infer) call_result(e Edge, to string, steps []string, depth int) ?InferredType {
@@ -892,6 +937,9 @@ fn (inf &Infer) call_result(e Edge, to string, steps []string, depth int) ?Infer
 		to:   to
 		kind: .calls
 		file: e.file
+	}
+	if id := inf.alias_static(call) {
+		return inf.returns(id)
 	}
 	// what resolve_edges takes the call to be where the caller sees no function of the name:
 	// `x := token(0)` is a token, and `y := f(1)` has the result of the function `f` holds

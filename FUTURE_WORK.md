@@ -830,6 +830,36 @@ On vlang `4e0cc6baa8`: unresolved calls 84 to 73. 14 call edges change, three of
 accidental results corrected (`token`, `func3` to another module's function, and a `str` on a value of
 a local function, now `[]string.str`), and 3 globals get `::global::` ids, with their `defines` edges.
 
+A `c'x'` literal is a `&u8`, where it used to read as a rune: `typeof` says so on both of V's compilers,
+and the C they generate calls u8's `vstring`. `str()` on an anonymous struct or union is one V writes, including a literal whose
+members V types later (`union {}`, `union { text: text }`), which the parser names only `union`. A
+static call on a type a selective import names (`Box.make()` after `import mod { Box }`) is that
+module's. A static call through an alias is the first type along the aliases that declares it:
+`MyAlias.new()` after `type MyAlias = MyStruct` is `MyStruct.new`, and the value of the call has that
+method's result. V's default compiler stops at a middle alias with its own `new`, and `-old-compiler`
+skips to the last type, so a chain follows the default. Through an alias each build declares in its
+own file (`ssl.SSLConn`), the call reaches each build's type, under that build, as a method call
+through it does.
+
+On vlang `95a0d5191f`: unresolved calls 73 to 64. 11 call edges go and 9 come, all of these shapes.
+What stays open or as it was:
+
+- `T.type_name()` isn't V's: V refuses it when it is reached, and vlib/db/redis/redis.v:614 only
+  compiles because that `$else` is never taken.
+- A selective import's path that the tree's root cuts off, `import net.http { Box }` in a tree rooted
+  at `net`, stays open, as a function's does, where a unique name used to link it. Extracting vlib/net,
+  vlib/v, vlib/x, vlib/x/json2, vlib/net/http, vlib/v/tests, vlib/db, vlib/veb and cmd alone lost no
+  such edge.
+- A static call through an alias to a method declared per platform stays open, and so does one of an
+  enum's generated methods through an alias (`E2.from_string`).
+- Through an alias each build declares, a static that a further alias's type declares (`SSLConn =
+  opn.Conn`, `Conn = Inner`, `Inner.new()`) is linked with no build: the build is found by the type
+  the per-build alias names. V3 refuses that call; `-old-compiler` makes it in that build only.
+- A field read off an anonymous literal (`v.nested.str()` on `struct { nested: union {} }`) has no type
+  here, so the call stays what name matching makes it.
+- `str()` on a `&u8`, a C string's included, links to u8's `str`, as a receiver's `&` is looked through
+  everywhere, where V prints the pointer. A rune's `str` took the literal's call before.
+
 The raw edge is retained and `explain` reports ambiguous callers rather than
 inventing links. A future opt-in deep mode could run the checker over a whole
 project, but given the small remainder, it would need to address these
