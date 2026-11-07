@@ -686,17 +686,118 @@ fn source_name(name string) string {
 	return name.replace('__static__', '.')
 }
 
+// literal_captures are the names in a function literal's capture list, `a` and `b` of
+// `fn [a, mut b] () {}`, read from its source, as the flat AST keeps no node for them; comments and
+// line breaks may stand anywhere in it. none for a literal with no source of its own there: the
+// parser lowers a `$tmpl` in an expression to one that it writes itself, capturing what the
+// template names, whose position is in the text it generated, not in this file. It is told by what
+// the file holds there: a literal starts `fn`, then a list or its parameters, and ends in `}`. A
+// file that happens to hold all that at the position reads as one, which the docs disclose.
+fn (f &V3File) literal_captures(n flat.Node) ?[]string {
+	end := int_min(int(n.pos.end), f.src.len)
+	if n.pos.offset < 0 || n.pos.offset >= end {
+		return none
+	}
+	head := f.src[n.pos.offset..end]
+	if !head.starts_with('fn') || !head.ends_with('}') {
+		return none
+	}
+	mut i := 2
+	for i < head.len {
+		next := past_comment(head, i)
+		if next != i {
+			i = next
+		} else if head[i].is_space() {
+			i++
+		} else {
+			break
+		}
+	}
+	if i >= head.len || (head[i] != `[` && head[i] != `(`) {
+		return none
+	}
+	if head[i] == `(` {
+		return []string{}
+	}
+	i++
+	mut list := []u8{}
+	for i < head.len && head[i] != `]` {
+		next := past_comment(head, i)
+		if next != i {
+			i = next
+			continue
+		}
+		list << head[i]
+		i++
+	}
+	mut names := []string{}
+	for part in list.bytestr().split(',') {
+		// `mut b`: the name comes last
+		words := part.fields()
+		if words.len > 0 {
+			names << words.last()
+		}
+	}
+	return names
+}
+
+// past_comment is the offset after the `//` or `/* */` comment at `i` in `s`, which V lets nest, or
+// `i` when none starts there.
+fn past_comment(s string, i int) int {
+	if i + 1 >= s.len || s[i] != `/` {
+		return i
+	}
+	if s[i + 1] == `/` {
+		return s.index_after('\n', i) or { s.len }
+	}
+	if s[i + 1] != `*` {
+		return i
+	}
+	mut depth := 0
+	mut at := i
+	for at + 1 < s.len {
+		if s[at] == `/` && s[at + 1] == `*` {
+			depth++
+			at += 2
+		} else if s[at] == `*` && s[at + 1] == `/` {
+			depth--
+			at += 2
+			if depth == 0 {
+				return at
+			}
+		} else {
+			at++
+		}
+	}
+	return s.len
+}
+
+// visible_in_literal keeps the entries of a variable map that a function literal sees: a variable
+// it captures (`names`), with any path off it (`x.inner`), and a `$for` loop's variable, typed as
+// builtin's comptime_for_types, which V lets it read without a capture.
+fn visible_in_literal(vars map[string]string, names []string) map[string]string {
+	mut kept := map[string]string{}
+	for name, value in vars {
+		if name.all_before('.') in names || value.starts_with('t:builtin.') {
+			kept[name] = value
+		}
+	}
+	return kept
+}
+
 fn (mut f V3File) extract(root flat.NodeId) ([]Symbol, []Edge) {
 	mut syms := []Symbol{}
 	mut edges := []Edge{}
 	top := f.kids(root)
 	mut declared := 'main'
 	mut mod_line := 1
+	mut module_written := false
 	for id in top {
 		n := f.node(id)
 		if n.kind == .module_decl {
 			declared = n.value_text()
 			mod_line = f.line_of(n.pos.offset)
+			module_written = true
 		}
 	}
 	f.mod_id = module_id(f.rel, declared)
@@ -708,6 +809,7 @@ fn (mut f V3File) extract(root flat.NodeId) ([]Symbol, []Edge) {
 		signature: 'module ${declared}'
 		file:      f.rel
 		line:      mod_line
+		recipe:    if module_written { '' } else { module_unwritten }
 	}
 	// an import inside `$if mysql ? { import db.mysql }` counts too, as every
 	// branch of a `$if` does (extract_v3)
@@ -1681,7 +1783,9 @@ fn (mut f V3File) extract_globals(id flat.NodeId, mut syms []Symbol, mut edges [
 		f.walk_initializer(.global, g.value_text(), line, value, mut edges)
 		if typ != '' {
 			mut rseen := map[string]bool{}
-			f.add_type_ref('${f.mod_id}.${g.value_text()}', g.typ_text(), mut edges, mut rseen)
+			// named as its calls are, since separate_member_ids may give it another id
+			f.add_type_ref(initializer_from(.global, f.rel, line, g.value_text()), g.typ_text(), mut edges,
+				mut rseen)
 		}
 	}
 }
@@ -2615,7 +2719,18 @@ fn (mut f V3File) walk(id flat.NodeId, ctx V3CallCtx, mut edges []Edge, mut seen
 					}
 				}
 			}
-			mut inner := ctx.with_vars(names, recipes)
+			// a literal sees the enclosing function's locals only as it captures them: `f(1)` in one
+			// that doesn't capture a local `f` is the module's function
+			seen_ctx := if captures := f.literal_captures(n) {
+				V3CallCtx{
+					...ctx
+					vars:   visible_in_literal(ctx.vars, captures)
+					locals: visible_in_literal(ctx.locals, captures)
+				}
+			} else {
+				ctx
+			}
+			mut inner := seen_ctx.with_vars(names, recipes)
 			inner = V3CallCtx{
 				...inner
 				mut_vars: mut_vars
@@ -3366,6 +3481,9 @@ fn (f &V3File) recipe(id flat.NodeId, ctx V3CallCtx) string {
 				if v.starts_with('t:fn ') {
 					return v + recipe_sep + 'R'
 				}
+				// any other local of the name is what this calls (value_call), `f := mk`, and no
+				// function, constant or type elsewhere says what it returns: its own value does
+				return if v == '' { '' } else { v + recipe_sep + 'R' }
 			}
 				mut rec := 'c:' + name
 				// `f[Config](x)`: the type arguments, `p:` steps in order,

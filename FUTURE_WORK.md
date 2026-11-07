@@ -774,6 +774,62 @@ lost. `type_idx` at three sites in tests went with the same rule. The seventh si
 `T.type_name()` in an `$else` no instance compiles, stays unresolved: V has no such function unless
 the type declares a static method of that name, so there is nothing to link to and nothing V writes.
 
+**Plain names (November 2026).** Rules for a call that names its target. V's behaviour behind each
+comes from a compiled program, except where noted:
+
+- A `module main` test beside `module io` is not in io, so `copy()` is builtin's, though io declares
+  one. `sees_in_module` is the test, and a one-`fn main` program now sees the `module main` files of
+  its directory, and a `module builtin` file V compiles in, not a `module lib` file beside it. A main helper of the directory is what a test
+  writing `module main` is built with; a test with no `module` line, as vlib/io/io_test.v, is built alone.
+- A callee's prefix is an import path first: `jj.start()` under `import benchmark as jj` comes out
+  as `benchmark.start`, though `import x.benchmark` takes `benchmark` as its alias. Only callees read
+  it this way, since a type's text can name the alias.
+- An import with no such function in a module it reaches may name a module a file beside the caller
+  declares (`import c` with c.v in the directory, as in vlib/v/tests/testdata/enum_in_builtin). A directory
+  build of V takes that, over a module the import reaches, and a single-file build refuses it. A call can't
+  say which build it is in, so a module the import reaches comes first when it declares the function, as in
+  a single-file build; one outside the graph, or one that doesn't declare it, is passed over, unless
+  the caller's own file is of that module: `module bar` with `import a.bar` wraps it, and keeps the raw name. `import stats_import` in vlib/v/preludes_js was read,
+  not compiled.
+- A const or global holding a function, or a type, of the caller's own module takes a plain call only
+  from what the caller can't see: `token(0)` no longer links to an unrelated module's `token`. Where the
+  caller may see a function of the name (of its module, as far as it sees it, of a `module main` or `module builtin` file of
+  its directory, or builtin's) or its receiver has a method of the name, the call stays what the function lookup makes it, as before. This is deliberate
+  and leaves some calls wrong, each as it was. V's order there depends on more than a declaration says: it
+  takes a const over a plain function and over a type from a file that isn't `@[translated]`, a conversion
+  over a plain function, a generic function over a type or const, and a receiver's method over a type or
+  const only in a generic struct or between generic methods. Three rounds of review kept finding more
+  shapes of it, none in the V tree, so the rule no longer models it.
+- A value is known to hold a function by a literal or a written `fn` type, so `const f = g` and a value
+  typed by an alias aren't read as one. Between a const holding a function and a type, both of the module,
+  the const takes the call. A call of a held function has the result of the declaration the caller sees,
+  as files of a directory share a const's id. One in a platform's file isn't read from another file, of that
+  platform or none, so a call there can still link to an unrelated module's function, as before. A global sharing an id with a function or type has an id of its own (`::global::`), as a
+  const already did, and takes its type references with it. Two programs of a directory that each declare
+  such a global share that id, so the reference goes to one program's type.
+- The value of a conversion has its type. A struct or enum of the module takes a call the lookup leaves open,
+  unless the caller may see a function of the name or a method of the receiver has it; an alias of the module
+  takes such a call either way, as before. An alias of an imported module or of builtin is still only tried
+  after the function lookup, as before, so `uintptr_t(x)` of a builtin alias can link to a uniquely named
+  function elsewhere, or to a function of the caller's own module, where V converts. A `type JS.x` isn't
+  told from a V type of the name (its signature drops the host). A call of a local and a conversion of one
+  name in one function share an edge, as they did. A call in a const's initializer is judged from the one
+  file kept for the const's id, so where two programs of a directory declare that const, one program's call
+  can take the other's answer, as on master.
+
+A local of the name is what a call of it reaches, and the value is what the local holds returns
+(`f := mk`), where a function, const or type of the name used to answer. A function literal sees the
+locals it captures, read from its `fn [a, mut b]` list, and a `$for` loop's variable, which V lets it read
+without one. A `$tmpl` in an expression becomes a literal the parser writes, which keeps every local, with
+one limit. Its position is in the text the parser generated, not in the file, so it is told by what the file
+holds at that offset: a literal starts `fn`, then a list or its parameters, and ends in `}`, as all 3681
+literals in vlib, examples, cmd and S:/vProjects do. A file that holds all of that there by chance drops the
+template's locals. Of the 94 files using `$tmpl` in those trees, none does.
+
+On vlang `4e0cc6baa8`: unresolved calls 84 to 73. 14 call edges change, three of them wrong or
+accidental results corrected (`token`, `func3` to another module's function, and a `str` on a value of
+a local function, now `[]string.str`), and 3 globals get `::global::` ids, with their `defines` edges.
+
 The raw edge is retained and `explain` reports ambiguous callers rather than
 inventing links. A future opt-in deep mode could run the checker over a whole
 project, but given the small remainder, it would need to address these

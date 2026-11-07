@@ -790,24 +790,29 @@ fn in_main_unit(s Symbol, mains map[string]bool) bool {
 
 // separate_member_ids gives a field or const whose id is also another kind of
 // symbol's id an id of its own, `<parent>::field::<name>` or
-// `<parent>::const::<name>`, in the form import ids already use. V lets a
+// `<parent>::const::<name>`, in the form import ids already use, and a global
+// whose id is a function's or type's `<parent>::global::<name>`. V lets a
 // method share its name with a field of its receiver type (`Server.username`
 // in vlib/crypto/scram is both) and a const share its name with a function, and
 // both used to come out as one id, so a `calls` edge to the method pointed as
 // much at the field. The function, method or type keeps the plain id because
-// edges point at it; fields and consts are only ever reached by their
-// `defines` edge, which is rebuilt here.
+// edges point at it. Nothing has resolved to a const's or global's id yet, and
+// its `defines` edge is rebuilt here.
 fn separate_member_ids(mut g Graph) {
 	mut other := map[string]bool{}
+	mut decl := map[string]bool{}
 	for s in g.symbols {
 		if s.kind != .field && s.kind != .constant {
 			other[s.id] = true
+			if s.kind != .global {
+				decl[s.id] = true
+			}
 		}
 	}
 	mut renamed := false
 	for i in 0 .. g.symbols.len {
 		s := g.symbols[i]
-		if (s.kind == .field || s.kind == .constant) && other[s.id] {
+		if ((s.kind == .field || s.kind == .constant) && other[s.id]) || (s.kind == .global && decl[s.id]) {
 			g.symbols[i].id = '${s.parent}::${s.kind}::${s.name}'
 			renamed = true
 		}
@@ -876,16 +881,23 @@ fn visible_from(mod string, caller DeclSite, imports []string) bool {
 // sees_in_module reports whether a caller at this site sees a declaration of its own
 // module (directory) in `decl_file`, which is a `module main` file when `decl_main`:
 // always outside a standalone program; in one, when its `main` module is one program
-// (solo), when the declaration is in the caller's own file, or when the caller is a test in a directory with no `fn main` and the
+// (solo) and the declaration is in one of its files, when the declaration is in the caller's own file, or when the caller is a test writing `module main` in a directory with no `fn main` and the
 // declaration is in a `module main` file that is no test, as V builds such a test
 // with the directory's `module main` files (common.v beside vlib/wasm/tests/*_test.v),
 // not with a file of another module there (md5.v beside md5_test.v) nor another test
-// (b_test.c.v, which test_private, matching `_test.v` alone, would let through).
+// (b_test.c.v, which test_private, matching `_test.v` alone, would let through). A test with
+// no `module` line (vlib/io/io_test.v) is built alone, whatever is beside it.
 // `decl_main` must come from the declaration's own file: a const's id is shared by
 // every file of the directory that declares it, so its site_of entry is any one's.
 fn (site DeclSite) sees_in_module(decl_file string, decl_main bool) bool {
-	return !site.is_main || site.solo || decl_file == site.file
-		|| (site.no_main && is_test_file(site.file) && decl_main && !is_test_file(decl_file))
+	return !site.is_main || decl_file == site.file || (decl_main && !site.built_alone()
+		&& (site.solo || (site.no_main && is_test_file(site.file) && !is_test_file(decl_file))))
+}
+
+// built_alone reports whether a caller at this site is a test with no `module` line, which V builds
+// without the `module main` files beside it.
+fn (site DeclSite) built_alone() bool {
+	return site.module_unwritten && is_test_file(site.file)
 }
 
 // generated_enum_mod is the module of the enum a static call names (`MyEnum` or
@@ -1040,13 +1052,15 @@ struct DeclSite {
 	file    string
 	is_main bool // in a standalone program, see main_unit_files
 	// solo is set when the module's only `fn main` is this one's: the module
-	// is one program, so its files are one another's module (see resolve_edges)
+	// is one program, so its `module main` files are one another's (see sees_in_module)
 	solo bool
 	// no_main is set when the module has no `fn main` at all: a directory of
 	// translated or test files, built together. A type's lookup (type_in_scope)
 	// takes the module as one program for this, and a test's calls and consts see
 	// its `module main` files (sees_in_module).
 	no_main bool
+	// module_unwritten is set when the declaration's file has no `module` line
+	module_unwritten bool
 }
 
 // TypeCand is one declaration that a raw type name (on an `embeds` or
@@ -1131,6 +1145,9 @@ fn resolve_edges(mut g Graph) {
 	// (see below): one that does is called as one, and it is the fallback when no
 	// function of that name fits (see infer_call)
 	mut const_calls := map[string][]CallCand{}
+	// fn_values holds those known to hold a function itself, which takes a call the caller
+	// sees no function for (see own_fn_value)
+	mut fn_values := map[string][]CallCand{}
 	mut by_type_name := map[string][]TypeCand{}
 	// type aliases by name, for a bare call of one (see alias_conversion)
 	mut alias_by_name := map[string][]TypeCand{}
@@ -1193,6 +1210,13 @@ fn resolve_edges(mut g Graph) {
 	mut id_mixed := map[string]bool{}
 	mut imports_of := map[string][]string{} // file -> modules it imports
 	mut scope_of := map[string]FileScope{} // file -> what a callee prefix can name
+	// a file's module symbol comes first among its own, but nothing holds a merged graph to that
+	mut module_unwritten_in := map[string]bool{}
+	for s in g.symbols {
+		if s.kind == .mod_ && s.recipe.contains(module_unwritten) {
+			module_unwritten_in[s.file] = true
+		}
+	}
 	for s in g.symbols {
 		// an import the parser implies (`sync` for a channel) is a dependency,
 		// but the file can't name anything through it, so it widens neither
@@ -1201,6 +1225,7 @@ fn resolve_edges(mut g Graph) {
 			imports_of[s.file] << s.name
 			mut sc := scope_of[s.file] or { FileScope{} }
 			sc.prefixes[s.name] = s.name
+			sc.paths[s.name] = true
 			// the alias and the path as written are only on the signature:
 			// `import x.json2 as json`, and `from x.json2` when the path redirects
 			if s.signature.contains(' as ') {
@@ -1216,6 +1241,7 @@ fn resolve_edges(mut g Graph) {
 			sc.mod = s.id
 			sc.declared = s.signature.all_after('module ')
 			sc.is_main = in_main_unit(s, mains)
+			sc.module_unwritten = s.recipe.contains(module_unwritten)
 			scope_of[s.file] = sc
 		}
 		if s.kind == .function || s.kind == .method {
@@ -1240,6 +1266,13 @@ fn resolve_edges(mut g Graph) {
 				id:   s.id
 				mod:  s.parent
 				file: s.file
+			}
+			if s.recipe.starts_with('t:fn ') || s.recipe.starts_with('t:fn(') {
+				fn_values[s.name] << CallCand{
+					id:   s.id
+					mod:  s.parent
+					file: s.file
+				}
 			}
 		}
 		if s.kind == .type_alias && s.id.starts_with('C.') {
@@ -1276,11 +1309,12 @@ fn resolve_edges(mut g Graph) {
 		if s.kind in [SymbolKind.function, .method, .struct_, .interface_, .type_alias, .constant, .global, .field] {
 			mod := decl_mod(s, struct_mod)
 			site_of[s.id] = DeclSite{
-				mod:     mod
-				file:    s.file
-				is_main: in_main_unit(s, mains)
-				solo:    main_count[mod] == 1
-				no_main: main_count[mod] == 0
+				mod:              mod
+				file:             s.file
+				is_main:          in_main_unit(s, mains)
+				solo:             main_count[mod] == 1
+				no_main:          main_count[mod] == 0
+				module_unwritten: module_unwritten_in[s.file]
 			}
 		}
 		// id_count/id_main/id_files feed the build-unit-aware duplicate check
@@ -1366,11 +1400,12 @@ fn resolve_edges(mut g Graph) {
 			&& (!unaddressable[s.id] || (id_files[s.id] or { []string{} }).all(it == s.file)) {
 			mod := decl_mod(s, struct_mod)
 			site_of[site_key(s.id, s.file)] = DeclSite{
-				mod:     mod
-				file:    s.file
-				is_main: in_main_unit(s, mains)
-				solo:    main_count[mod] == 1
-				no_main: main_count[mod] == 0
+				mod:              mod
+				file:             s.file
+				is_main:          in_main_unit(s, mains)
+				solo:             main_count[mod] == 1
+				no_main:          main_count[mod] == 0
+				module_unwritten: module_unwritten_in[s.file]
 			}
 		}
 	}
@@ -1465,6 +1500,7 @@ fn resolve_edges(mut g Graph) {
 	mut inf := Infer{
 		by_name:      by_name
 		const_calls:  const_calls
+		fn_values:    fn_values
 		by_type_name: by_type_name
 		site_of:      site_of
 		imports_of:   imports_of
@@ -1554,9 +1590,14 @@ fn resolve_edges(mut g Graph) {
 				}
 				continue
 			}
+			// a conversion comes before a function of the name V can't see (Infer.conversion),
+			// and the tier below links it
+			mut here := ?CallResolution(none)
+			if e.is_method || e.to.contains('.') || inf.conversion(e) == none {
+				here = inf.infer_call(e)
+			}
 			// what the call is in a build that takes another side of an alias
 			// (build_worlds), where that differs from what it is here
-			here := inf.infer_call(e)
 			mut in_builds := []CallResolution{}
 			// a call on any field that infer_call left to expand_type_param_calls is not one
 			// to link through another build's name match first
@@ -1669,7 +1710,7 @@ fn resolve_edges(mut g Graph) {
 			if !e.is_method && !e.to.contains('.') && e.to !in runtime_helpers {
 				ids := bare_builtin_call(e, by_name, site_of).filter(!unaddressable[it])
 				if ids.len > 0 && implicit_receiver_call(e, by_name) == none
-					&& alias_conversion(e, alias_by_name, site_of, imports_of) == none {
+					&& inf.type_conversion(e) == none {
 					for id in ids {
 						key := '${e.from}\x00${id}'
 						if at := seen_call[key] {
@@ -1721,11 +1762,11 @@ fn resolve_edges(mut g Graph) {
 			}
 			seen_call[key] = resolved.len
 		}
-		// a bare call of a type alias is a conversion to it: `uintptr_t(x)` under
-		// `type uintptr_t = usize`. Only the aliases the caller can see count (see
-		// alias_conversion), and a method call is never one.
+		// a bare call of a type is a conversion to it: `uintptr_t(x)` under
+		// `type uintptr_t = usize`. Only the types the caller can see count (see
+		// type_conversion), and a method call is never one.
 		if e.kind == .calls && !e.is_method && !e.to.contains('.') {
-			if id := alias_conversion(e, alias_by_name, site_of, imports_of) {
+			if id := inf.type_conversion(e) {
 				if !unaddressable[id] {
 					resolved << Edge{
 						from:       e.from
@@ -2179,9 +2220,9 @@ fn resolve_callee(e Edge, by_name map[string][]CallCand, site_of map[string]Decl
 	// A plain `error()` names a function of the caller's own module or, when
 	// there is none, of builtin: another module's function needs its prefix,
 	// and a selective import's names already carry one (see callee in
-	// backend_v.v), so `log.error` is no candidate here. In a standalone
-	// program the "own module" is every program in its directory, which only
-	// makes this skip more often.
+	// backend_v.v), so `log.error` is no candidate here. A standalone program's
+	// own module is what it is built with (sees_in_module), not its directory:
+	// `copy()` in a `module main` test beside `module io` is builtin's.
 	if !e.is_method && !e.to.contains('.') && !e.to.contains('__static__') {
 		mut own := false
 		mut builtins := []CallCand{}
@@ -2190,7 +2231,14 @@ fn resolve_callee(e Edge, by_name map[string][]CallCand, site_of map[string]Decl
 				continue
 			}
 			if c.mod == caller.mod {
-				own = true
+				if caller.sees_in_module(c.file, (site_of[site_key(c.id, c.file)] or {
+					site_of[c.id] or { DeclSite{} }
+				}).is_main) {
+					own = true
+				} else if import_reaches(c.mod, 'builtin') {
+					// a test in a builtin directory that isn't built with it: still builtin's
+					builtins << c
+				}
 			} else if import_reaches(c.mod, 'builtin') {
 				builtins << c
 			}
@@ -2228,7 +2276,14 @@ mut:
 	declared string            // the name on the file's `module` line
 	is_main  bool              // in a standalone program, see main_unit_files
 	prefixes map[string]string // import path or alias -> import path
+	paths    map[string]bool   // the import paths themselves
+	// module_unwritten: the file has no `module` line
+	module_unwritten bool
 }
+
+// module_unwritten is what extract keeps in the recipe of a module symbol, which has no other use
+// for one, when its file has no `module` line (see sees_in_module)
+const module_unwritten = 'no_module_line'
 
 // resolve_by_receiver_type resolves a method call whose receiver type is known
 // (see walk_call) but whose type id is not `e.recv_type` verbatim: the type is
@@ -2306,7 +2361,9 @@ fn resolve_qualified_callee(e Edge, by_name map[string][]CallCand, site_of map[s
 	cands := by_name[e.to.all_after_last('.')] or { return none }
 	file := if e.file != '' { e.file } else { (site_of[e.from] or { return none }).file }
 	scope := scope_of[file] or { return none }
-	imported := scope.prefixes[prefix] or { '' }
+	// a callee's prefix is a path first: `jj.start()` under `import benchmark as jj` comes
+	// out as `benchmark.start`, though `import x.benchmark` takes `benchmark` as its alias
+	imported := if scope.paths[prefix] { prefix } else { scope.prefixes[prefix] or { '' } }
 	mut fits := []CallCand{}
 	for c in cands {
 		if c.is_method {
@@ -2325,6 +2382,16 @@ fn resolve_qualified_callee(e Edge, by_name map[string][]CallCand, site_of map[s
 		} else if imported != '' && import_reaches(c.mod, imported) && importable(c.id, c.file, file, site_of) {
 			fits << c
 		}
+	}
+	// an import with no such function in a module it reaches may name a module a file beside
+	// the caller declares: `import c` with c.v in the directory, which a directory build of V
+	// takes (vlib/v/tests/testdata/enum_in_builtin) and a single-file one refuses, and `import
+	// stats_import` in vlib/v/preludes_js, a file V adds to a test's own build. A file of that
+	// module is a wrapper of the import, `module bar` with `import a.bar`, not its own target.
+	declared := imported.all_after_last('.')
+	if fits.len == 0 && imported != '' && scope.declared != declared {
+		fits = cands.filter(!it.is_method && it.mod == scope.mod && !test_private(it.file, file)
+			&& (scope_of[it.file] or { FileScope{} }).declared == declared)
 	}
 	id := only_id(if imported != '' { exact_calls(fits, imported) } else { fits })?
 	return CallResolution{
@@ -2518,6 +2585,17 @@ fn alias_conversion(e Edge, alias_by_name map[string][]TypeCand, site_of map[str
 	caller := caller_site(e, site_of) or { return none }
 	res := type_in_scope(cands, caller, imports_of)?
 	return res.id
+}
+
+// own_type_conversion is the type of the caller's own module, as far as the caller sees it, that
+// a bare call names: `&debug_info(raw)` or `token(0)` of a lowercase type, as a `@[translated]`
+// file has. A C or JS type is named with its host. A type of an imported module needs its prefix.
+fn own_type_conversion(e Edge, by_type_name map[string][]TypeCand, site_of map[string]DeclSite, scope_of map[string]FileScope) ?string {
+	cands := by_type_name[e.to] or { return none }
+	caller := caller_site(e, site_of)?
+	return only_type_id(cands.filter(it.mod == caller.mod && !it.declares_host('C') && !it.js
+		&& !test_private(it.file, caller.file)
+		&& caller.sees_in_module(it.file, (scope_of[it.file] or { FileScope{} }).is_main)))
 }
 
 fn rel_path(root string, path string) string {

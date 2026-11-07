@@ -19,6 +19,7 @@ module graphify
 struct Infer {
 	by_name      map[string][]CallCand
 	const_calls  map[string][]CallCand // constants and globals by name: the fallback for a call (see infer_call)
+	fn_values    map[string][]CallCand // those known to hold a function itself (see infer_call)
 	by_type_name map[string][]TypeCand
 	site_of      map[string]DeclSite
 	imports_of   map[string][]string
@@ -185,6 +186,14 @@ fn (mut inf Infer) infer_call(e Edge) ?CallResolution {
 			}
 		}
 	}
+	if !e.is_method {
+		if id := inf.own_fn_value(e) {
+			return CallResolution{
+				id:       id
+				inferred: true
+			}
+		}
+	}
 	if r := resolve_callee(e, inf.by_name, inf.site_of, inf.imports_of) {
 		return r
 	}
@@ -196,6 +205,95 @@ fn (mut inf Infer) infer_call(e Edge) ?CallResolution {
 		return none
 	}
 	return resolve_const_callee(e, inf.const_calls, inf.site_of, inf.imports_of, inf.scope_of)
+}
+
+// function_in_scope reports whether a plain call may be a function the caller can see: one of
+// builtin or of its own module, as far as it sees it, one of a `module main` or `module builtin` file
+// of its directory, unless the caller is a test built alone, or in a method, a method of its receiver. The `module main` files may be
+// one program though the directory has a second `fn main`, in a test or for another platform, and
+// counting one the caller doesn't see only leaves the call as the lookup makes it. A type or a
+// value holding a function takes a call only from what the caller can't see (a function of the
+// name in an unrelated module), which is all that keeps `token(0)` from such a function. Where the
+// caller may see both, V's order depends on more than a declaration says (a generic function, the
+// file's @[translated], the build), and the call stays what resolve_callee makes it.
+fn (inf &Infer) function_in_scope(e Edge) bool {
+	caller := caller_site(e, inf.site_of) or { return false }
+	for c in inf.by_name[e.to] or { []CallCand{} } {
+		if c.is_method || test_private(c.file, caller.file) {
+			continue
+		}
+		if import_reaches(c.mod, 'builtin') {
+			return true
+		}
+		decl := inf.scope_of[c.file] or { FileScope{} }
+		if c.mod == caller.mod && (caller.sees_in_module(c.file, decl.is_main)
+			|| ((decl.is_main || decl.declared == 'builtin') && !caller.built_alone())) {
+			return true
+		}
+	}
+	return implicit_receiver_call(e, inf.by_name) != none
+}
+
+// type_conversion is the type a bare call that nothing else answers converts to: one of the
+// caller's own module (own_type_conversion), when it can see no function of the name, or an alias
+// it can see (alias_conversion).
+fn (inf &Infer) type_conversion(e Edge) ?string {
+	if !inf.function_in_scope(e) {
+		if id := own_type_conversion(e, inf.by_type_name, inf.site_of, inf.scope_of) {
+			return id
+		}
+	}
+	return alias_conversion(e, inf.alias_by_name, inf.site_of, inf.imports_of)
+}
+
+// own_fn_value is the constant or global of the caller's own module, holding a function, that a
+// plain call reaches when it can see no function of the name (function_in_scope). A value is known
+// to hold one by a literal or a written `fn` type, and the module is what the caller sees of it
+// (sees_fn_value).
+fn (inf &Infer) own_fn_value(e Edge) ?string {
+	cands := inf.fn_values[e.to] or { return none }
+	if inf.function_in_scope(e) {
+		return none
+	}
+	caller := caller_site(e, inf.site_of)?
+	return only_id(cands.filter(inf.sees_fn_value(it.file, it.mod, caller)))
+}
+
+// sees_fn_value reports whether a caller's plain call can reach a value holding a function that
+// is declared in `file` of module `mod` (see own_fn_value).
+fn (inf &Infer) sees_fn_value(file string, mod string, caller DeclSite) bool {
+	return file == caller.file || (mod == caller.mod && !is_platform_file(file)
+		&& !test_private(file, caller.file)
+		&& caller.sees_in_module(file, (inf.scope_of[file] or { FileScope{} }).is_main))
+}
+
+// held_fn_result is the result of calling the value `held` (own_fn_value), read from the
+// declaration the caller sees: a const's id is shared by every file of a directory, each with its
+// own value, and V refuses two that one build compiles together.
+fn (inf &Infer) held_fn_result(call Edge, held string) ?InferredType {
+	caller := caller_site(call, inf.site_of)?
+	decls := (inf.consts[call.to] or { []Symbol{} }).filter(it.id == held
+		&& it.recipe.starts_with('t:') && inf.sees_fn_value(it.file, it.parent, caller))
+	if decls.len == 0 {
+		return none
+	}
+	c := decls[0]
+	return InferredType{
+		text: fn_return(c.recipe[2..])?
+		mod:  c.parent
+		file: c.file
+	}
+}
+
+// conversion is the type of the caller's own module (own_type_conversion) that a plain call
+// converts to before any other reading of it, where it can see no function of the name
+// (function_in_scope) and no constant holding one.
+fn (inf &Infer) conversion(e Edge) ?string {
+	id := own_type_conversion(e, inf.by_type_name, inf.site_of, inf.scope_of)?
+	if inf.function_in_scope(e) || inf.own_fn_value(e) != none {
+		return none
+	}
+	return id
 }
 
 // resolve_const_callee resolves a call of a name no function has to the one constant or
@@ -795,6 +893,21 @@ fn (inf &Infer) call_result(e Edge, to string, steps []string, depth int) ?Infer
 		kind: .calls
 		file: e.file
 	}
+	// what resolve_edges takes the call to be where the caller sees no function of the name:
+	// `x := token(0)` is a token, and `y := f(1)` has the result of the function `f` holds
+	if !to.contains('.') {
+		if conv := inf.conversion(call) {
+			for c in inf.by_type_name[to] or { []TypeCand{} } {
+				if c.id == conv {
+					return c.as_type()
+				}
+			}
+			return none
+		}
+		if held := inf.own_fn_value(call) {
+			return inf.held_fn_result(call, held)
+		}
+	}
 	mut t := InferredType{}
 	mut id := ''
 	if call.to.contains('.') {
@@ -1102,7 +1215,7 @@ fn (inf &Infer) comptime_type(name string, file string) ?InferredType {
 
 // find_const is the const or global that `name` names from `file`: one of
 // its module's (in a standalone program, of its own file, unless its `main`
-// module is one program), or of builtin;
+// module is one program), of builtin, or of a `module builtin` file of its directory;
 // with a module path, `os.args`, one of that module's.
 fn (inf &Infer) find_const(name string, file string) ?Symbol {
 	short := name.all_after_last('.')
@@ -1123,18 +1236,22 @@ fn (inf &Infer) find_const(name string, file string) ?Symbol {
 		// any of its sites tells them
 		csite := inf.site_of[c.id] or { DeclSite{} }
 		caller := DeclSite{
-			mod:     scope.mod
-			file:    file
-			is_main: scope.is_main
-			solo:    csite.solo
-			no_main: csite.no_main
+			mod:              scope.mod
+			file:             file
+			is_main:          scope.is_main
+			solo:             csite.solo
+			no_main:          csite.no_main
+			module_unwritten: scope.module_unwritten
 		}
 		if qual == '' && c.parent == scope.mod && (c.file == file
 			|| caller.sees_in_module(c.file, (inf.scope_of[c.file] or { FileScope{} }).is_main)) {
 			own << c
 		}
+		// builtin's, and that of a `module builtin` file of the caller's own directory, which V
+		// compiles in, with or without a `fn main` beside it
 		if (qual != '' && import_reaches(c.parent, qual))
-			|| (qual == '' && import_reaches(c.parent, 'builtin')) {
+			|| (qual == '' && (import_reaches(c.parent, 'builtin') || (c.parent == scope.mod
+				&& (inf.scope_of[c.file] or { FileScope{} }).declared == 'builtin'))) {
 			reachable << c
 		}
 	}
