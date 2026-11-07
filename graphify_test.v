@@ -18860,8 +18860,9 @@ fn test_str_on_an_anonymous_struct_or_union_is_one_v_writes() {
 	assert plain_calls(g, 'a_method_it_lacks', 'other') == ['other:extracted']
 }
 
-// compiled with V3: through `type Aaa = Bbb` and `type Bbb = Ccc`, `Aaa.new()` prints `Bbb.new`
-// when Bbb has one. `-old-compiler` prints `Ccc.new`, and only the default is followed.
+// compiled: through `type Aaa = Bbb` and `type Bbb = Ccc`, V3 prints `Bbb.new` for `Aaa.new()`, and
+// `-old-compiler` prints `Ccc.new`. V3 looks one alias deep, so it refuses `Aaa.end()`, which only
+// Ccc declares and `-old-compiler` prints `Ccc.end` for. The first type that declares it is taken.
 fn test_a_static_call_through_a_chain_of_aliases_is_the_first_that_declares_it() {
 	g := extract_graph_of({
 		'p/a.v': 'module main\n\nstruct Ccc {}\n\nfn Ccc.new() {}\n\nfn Ccc.end() {}\n\ntype Bbb = Ccc\n\nfn Bbb.new() {}\n\ntype Aaa = Bbb\n\nfn middle() {\n\tAaa.new()\n}\n\nfn end_of_chain() {\n\tAaa.end()\n}\n\nfn no_such() {\n\tAaa.none_declares()\n}\n\nfn main() {}\n'
@@ -18921,17 +18922,22 @@ fn test_a_static_call_through_an_alias_each_build_declares_reaches_each_builds_t
 	assert built('shared', 'mbd.Box__static__new') == ['inferred|']
 }
 
-// compiled: `x.str()` on a C string, a `&u8`, and on a `&char` parameter runs on either compiler, and no rune's `str` takes it, nor an unrelated type's. Here no `u8.str` is declared, as is true of no real builtin, to show what the rule does with none. Its value is a string.
+// compiled: `x.str()` on a C string, a `&u8`, and on a `&char` parameter runs on either compiler, and no rune's `str` takes it, nor an unrelated type's. Here no `u8.str` is declared, as is true of no real builtin, to show what the rule does with none. A `&char` has the builtin's own `str` (vlib/builtin/int.v), which V calls. Its value is a string.
 fn test_str_on_a_c_string_is_one_v_writes() {
 	g := extract_graph_of({
-		'vlib/builtin/b.v': 'module builtin\n\npub struct string {}\n\npub fn (s string) len_of() int {\n\treturn 0\n}\n\npub fn (r rune) str() string {\n\treturn ""\n}\n'
+		'vlib/builtin/b.v': 'module builtin\n\npub struct string {}\n\npub fn (s string) len_of() int {\n\treturn 0\n}\n\npub fn (r rune) str() string {\n\treturn ""\n}\n\npub fn (cptr &char) str() string {\n\treturn ""\n}\n'
 		'q/o.v':            'module q\n\npub struct Qqq {}\n\npub fn (o Qqq) len_of() int {\n\treturn 0\n}\n\npub fn (o Qqq) str() string {\n\treturn ""\n}\n'
 		'p/a.v':            'module main\n\nfn local() {\n\tx := c\'abc\'\n\tx.str()\n}\n\nfn param(p &char) {\n\tp.str()\n}\n\nfn value() {\n\tx := c\'abc\'\n\ts := x.str()\n\ts.len_of()\n}\n\nfn a_rune() {\n\tr := `c`\n\tr.str()\n}\n\nfn main() {}\n'
 	})
 	assert plain_calls(g, 'local', 'str') == ['str:undeclared']
-	assert plain_calls(g, 'param', 'str') == ['str:undeclared']
+	assert plain_calls(g, 'param', 'str') == ['vlib.builtin.char.str:inferred']
 	assert plain_calls(g, 'value', 'len_of') == ['vlib.builtin.string.len_of:inferred']
 	assert plain_calls(g, 'a_rune', 'str') == ['vlib.builtin.rune.str:inferred']
+	// without the builtin's `&char` str in the graph the call stays open: V doesn't write it
+	bare := extract_graph_of({
+		'p/a.v': 'module main\n\nfn param(p &char) {\n\tp.str()\n}\n\nfn main() {}\n'
+	})
+	assert plain_calls(bare, 'param', 'str') == ['str:extracted']
 }
 
 // an alias in another file of the caller's module is seen; another test's static method isn't,

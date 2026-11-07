@@ -405,10 +405,9 @@ fn (inf &Infer) no_method(t InferredType, name string, file string) ?string {
 	if name == 'wait' && (text.starts_with('thread') || text.starts_with('[]thread')) {
 		return ''
 	}
-	// `str()` on a primitive the builtin doesn't declare one for (`u128`, a `&char`), or on a
+	// `str()` on a primitive the builtin doesn't declare one for (`u128`), or on a
 	// thread, which V writes as `thread(int)`
-	if name == 'str' && (text in primitive_types || text == 'char' || is_thread_type(text)
-		|| text.starts_with('chan ')) {
+	if name == 'str' && (text in primitive_types || is_thread_type(text) || text.starts_with('chan ')) {
 		return ''
 	}
 	if text.starts_with('[') && (name in array_builtins || name == 'str') {
@@ -880,8 +879,9 @@ fn (inf &Infer) fields_of_elem(t InferredType, path string, file string) ?Inferr
 // aliases that declares it, each read in the scope of the alias before it. `MyAlias.new()` after
 // `type MyAlias = MyStruct` is `MyStruct.new`, as compiled programs print, and through `type Aaa =
 // Bbb` and `type Bbb = Ccc` it is `Bbb.new` when Bbb has one. none for a call the type it names
-// answers itself, which the lookup links, and for any other call. V's old compiler skips to the
-// last type of a chain, and only the default one is followed.
+// answers itself, which the lookup links, and for any other call. The compilers differ on a chain:
+// V3 looks one alias deep and refuses a static it doesn't find there, and `-old-compiler` skips to
+// the last type. The first that declares it is V3's answer wherever V3 builds the call.
 fn (inf &Infer) alias_static(e Edge) ?string {
 	if !e.to.contains('__static__') {
 		return none

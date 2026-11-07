@@ -836,8 +836,9 @@ members V types later (`union {}`, `union { text: text }`), which the parser nam
 static call on a type a selective import names (`Box.make()` after `import mod { Box }`) is that
 module's. A static call through an alias is the first type along the aliases that declares it:
 `MyAlias.new()` after `type MyAlias = MyStruct` is `MyStruct.new`, and the value of the call has that
-method's result. V's default compiler stops at a middle alias with its own `new`, and `-old-compiler`
-skips to the last type, so a chain follows the default. Through an alias each build declares in its
+method's result. On a chain the compilers differ: V3 looks one alias deep and refuses a static it
+doesn't find there, and `-old-compiler` skips to the last type. The first type that declares it is
+V3's answer wherever V3 builds the call. Through an alias each build declares in its
 own file (`ssl.SSLConn`), the call reaches each build's type, under that build, as a method call
 through it does.
 
@@ -855,6 +856,23 @@ What stays open or as it was:
 - Through an alias each build declares, a static that a further alias's type declares (`SSLConn =
   opn.Conn`, `Conn = Inner`, `Inner.new()`) is linked with no build: the build is found by the type
   the per-build alias names. V3 refuses that call; `-old-compiler` makes it in that build only.
+- On a chain of three aliases where a middle type and the last both declare the static, the middle
+  one is taken. V3 refuses the call and `-old-compiler` takes the last. No static call through a
+  chain of two or more aliases is in vlang at 95a0d5191f (each alias whose target is an alias,
+  grepped for `Name.method(`).
+- In a directory of standalone `module main` programs, a static that the aliased type doesn't
+  declare in its own program can be taken from another program's type of the same name, as a
+  static is matched by the module, not the program. In vlang at 95a0d5191f no alias static call
+  changed edges in such a directory other than vlib/v/tests/fns/aliased_static_method_test.v.
+- `str()` on an anonymous struct that embeds a type with its own `str` is taken as V's: V3 writes
+  it, and `-old-compiler` calls the embedded one, as it does for a named struct, which keeps the
+  embedded `str` here. An untyped `struct { text: text }` literal, unlike `union { text: text }`,
+  isn't typed, so its `str()` stays as name matching makes it. Neither shape is in vlang at
+  95a0d5191f.
+- `MyEnum.from_string()` on a private enum named by a selective import is taken as V's generated
+  method, as it already was through `mod.MyEnum`, though V refuses both. The one case in vlang is
+  the checker test that expects the refusal
+  (vlib/v/checker/tests/modules/enum_from_string_in_different_mods).
 - A field read off an anonymous literal (`v.nested.str()` on `struct { nested: union {} }`) has no type
   here, so the call stays what name matching makes it.
 - `str()` on a `&u8`, a C string's included, links to u8's `str`, as a receiver's `&` is looked through
