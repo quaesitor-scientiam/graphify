@@ -18800,3 +18800,155 @@ fn test_a_copy_in_a_top_level_if_of_a_test_is_built_alone_too() {
 	})
 	assert plain_calls(g, 'go_on', 'pick') == ['p::const::pick:inferred']
 }
+
+// `c'x'` is a C string, which the parser keeps as a char literal. It is a `&u8`: `typeof` says so on both compilers, and their C calls u8's `vstring`. Compiled, `a.vstring()`,
+// `msg.vstring()` on a const holding one and the same on `&c'hello'[1]` print `x`, `test`, `ello`.
+fn test_a_c_string_literal_is_a_u8_pointer() {
+	builtin := 'module builtin\n\npub struct string {}\n\npub fn (cp &char) vstring() string {\n\treturn ""\n}\n\npub fn (bp &u8) vstring() string {\n\treturn ""\n}\n\npub fn (r rune) vstring() string {\n\treturn ""\n}\n'
+	g := extract_graph_of({
+		'vlib/builtin/b.v': builtin
+		'p/a.v':            'module main\n\nconst msg = c\'test\'\n\nfn local() {\n\ta := c\'x\'\n\ta.vstring()\n}\n\nfn from_const() {\n\tmsg.vstring()\n}\n\nfn indexed() {\n\tt := unsafe { &c\'hello\'[1] }\n\tt.vstring()\n}\n\nfn plain_rune() {\n\tr := `x`\n\tr.vstring()\n}\n\nfn in_an_array() {\n\txs := [c\'a\', c\'b\']\n\txs[1].vstring()\n}\n\nfn runes_in_an_array() {\n\trs := [`a`]\n\trs[0].vstring()\n}\n\nfn in_a_map() {\n\tm := {\n\t\t\'k\': c\'v\'\n\t}\n\tfor _, v in m {\n\t\tv.vstring()\n\t}\n}\n\nfn runes_in_a_map() {\n\tm := {\n\t\t\'k\': `v`\n\t}\n\tfor _, v in m {\n\t\tv.vstring()\n\t}\n}\n\nfn main() {}\n'
+	})
+	assert plain_calls(g, 'in_a_map', 'vstring') == ['vlib.builtin.u8.vstring:inferred']
+	assert plain_calls(g, 'runes_in_a_map', 'vstring') == ['vlib.builtin.rune.vstring:inferred']
+	assert plain_calls(g, 'in_an_array', 'vstring') == ['vlib.builtin.u8.vstring:inferred']
+	assert plain_calls(g, 'runes_in_an_array', 'vstring') == ['vlib.builtin.rune.vstring:inferred']
+	assert plain_calls(g, 'local', 'vstring') == ['vlib.builtin.u8.vstring:inferred']
+	assert plain_calls(g, 'from_const', 'vstring') == ['vlib.builtin.u8.vstring:inferred']
+	assert plain_calls(g, 'indexed', 'vstring') == ['vlib.builtin.u8.vstring:inferred']
+	// a rune literal stays a rune
+	assert plain_calls(g, 'plain_rune', 'vstring') == ['vlib.builtin.rune.vstring:inferred']
+}
+
+// compiled: after `import mod { Box }`, `Box.make()` prints `mod.Box.make`, and another
+// module's `Box` with a `make` of its own doesn't take the call
+fn test_a_static_call_through_a_selective_import_is_the_imported_modules() {
+	g := extract_graph_of({
+		'mod/mod.v':   'module mod\n\npub struct Box {}\n\npub fn Box.make() {}\n\npub enum Kind {\n\ta\n}\n'
+		'other/o.v':   'module other\n\npub struct Box {}\n\npub fn Box.make() {}\n'
+		'app/main.v':  'module main\n\nimport mod { Box, Kind }\nimport other\n\nfn go_on() {\n\tBox.make()\n}\n\nfn from_text() {\n\tKind.from_string("a") or { return }\n}\n\nfn through_other() {\n\tother.Box.make()\n}\n\nfn main() {}\n'
+	})
+	assert plain_calls(g, 'go_on', 'Box__static__make') == ['mod.Box__static__make:extracted']
+	assert plain_calls(g, 'through_other', 'Box__static__make') == ['other.Box__static__make:extracted']
+	// V writes an enum's from_string, in the module the import names
+	assert plain_calls(g, 'from_text', 'Kind__static__from_string') == ['mod.Kind__static__from_string:undeclared']
+}
+
+// compiled: `MyAlias.new()` after `type MyAlias = MyStruct` prints `MyStruct.new`, and
+// `MyAlias.new` when the alias declares its own
+fn test_a_static_call_through_an_alias_reaches_the_type_unless_the_alias_has_its_own() {
+	g := extract_graph_of({
+		'p/a.v': 'module main\n\nstruct MyStruct {}\n\nfn MyStruct.new() MyStruct {\n\treturn MyStruct{}\n}\n\nfn (m MyStruct) hi() {}\n\ntype MyAlias = MyStruct\n\nstruct Owner {}\n\nfn Owner.new() {}\n\ntype Own = Owner\n\nfn Own.new() {}\n\nfn through() {\n\tMyAlias.new()\n}\n\nfn own() {\n\tOwn.new()\n}\n\nfn value() {\n\tv := MyAlias.new()\n\tv.hi()\n}\n\nfn main() {}\n'
+		'q/o.v': 'module q\n\npub struct MyStruct {}\n\npub fn MyStruct.new() {}\n\npub fn (m MyStruct) hi() {}\n'
+	})
+	assert plain_calls(g, 'through', 'MyStruct__static__new') == ['p.MyStruct__static__new:inferred']
+	assert plain_calls(g, 'own', 'Own__static__new') == ['p.Own__static__new:extracted']
+	// the value of the call has the type's result, as the edge reads the call
+	assert plain_calls(g, 'value', 'hi') == ['p.MyStruct.hi:inferred']
+}
+
+// compiled with V3: `.str()` on `union {}`, `union { number: 7 }` and `struct { number: 8 }`
+// print the value. No declaration has them, so another type's `str` doesn't take the call.
+fn test_str_on_an_anonymous_struct_or_union_is_one_v_writes() {
+	g := extract_graph_of({
+		'p/a.v': 'module main\n\nstruct Other {}\n\nfn (o Other) str() string {\n\treturn ""\n}\n\nfn empty() {\n\tv := union {}\n\tv.str()\n}\n\nfn typed() {\n\tv := union {\n\t\tnumber: 7\n\t}\n\tv.str()\n}\n\nfn from_local() {\n\ttext := "x"\n\tv := union {\n\t\ttext: text\n\t}\n\tv.str()\n}\n\nfn a_struct() {\n\tv := struct {\n\t\tnumber: 8\n\t}\n\tv.str()\n}\n\nfn a_method_it_lacks() {\n\tv := union {}\n\tv.other()\n}\n\nfn main() {}\n'
+		'q/o.v': 'module q\n\npub struct Q {}\n\npub fn (o Q) str() string {\n\treturn ""\n}\n'
+	})
+	for caller in ['empty', 'typed', 'from_local', 'a_struct'] {
+		assert plain_calls(g, caller, 'str') == ['str:undeclared'], caller
+	}
+	assert plain_calls(g, 'a_method_it_lacks', 'other') == ['other:extracted']
+}
+
+// compiled: through `type Aaa = Bbb` and `type Bbb = Ccc`, V3 prints `Bbb.new` for `Aaa.new()`, and
+// `-old-compiler` prints `Ccc.new`. V3 looks one alias deep, so it refuses `Aaa.end()`, which only
+// Ccc declares and `-old-compiler` prints `Ccc.end` for. The first type that declares it is taken.
+fn test_a_static_call_through_a_chain_of_aliases_is_the_first_that_declares_it() {
+	g := extract_graph_of({
+		'p/a.v': 'module main\n\nstruct Ccc {}\n\nfn Ccc.new() {}\n\nfn Ccc.end() {}\n\ntype Bbb = Ccc\n\nfn Bbb.new() {}\n\ntype Aaa = Bbb\n\nfn middle() {\n\tAaa.new()\n}\n\nfn end_of_chain() {\n\tAaa.end()\n}\n\nfn no_such() {\n\tAaa.none_declares()\n}\n\nfn main() {}\n'
+	})
+	assert plain_calls(g, 'middle', 'Bbb__static__new') == ['p.Bbb__static__new:inferred']
+	assert plain_calls(g, 'middle', 'Ccc__static__new') == []
+	assert plain_calls(g, 'end_of_chain', 'Ccc__static__end') == ['p.Ccc__static__end:inferred']
+	assert plain_calls(g, 'no_such', 'Aaa__static__none_declares') == ['Aaa__static__none_declares:extracted']
+}
+
+// compiled: each prints `mod.Box.hi`, though the caller's module has a Box too, and another
+// module's type of the alias's own name takes neither the call nor its value
+fn test_a_static_call_through_an_alias_of_another_module_reads_each_in_its_own_scope() {
+	g := extract_graph_of({
+		'mod/m.v':    'module mod\n\npub struct Box {}\n\npub fn Box.make() Box {\n\treturn Box{}\n}\n\npub fn (b Box) hi() {}\n\npub type Aaa = Box\n'
+		'q/q.v':      'module q\n\npub struct Local {}\n\npub fn Local.make() Local {\n\treturn Local{}\n}\n\npub fn (l Local) hi() {}\n'
+		'app/main.v': 'module main\n\nimport mod { Aaa }\n\nstruct Box {}\n\nfn Box.make() Box {\n\treturn Box{}\n}\n\nfn (b Box) hi() {}\n\ntype Local = mod.Box\n\nfn selected() {\n\tx := Aaa.make()\n\tx.hi()\n}\n\nfn qualified() {\n\tx := mod.Aaa.make()\n\tx.hi()\n}\n\nfn local() {\n\tx := Local.make()\n\tx.hi()\n}\n\nfn main() {}\n'
+	})
+	for caller in ['selected', 'qualified', 'local'] {
+		assert plain_calls(g, caller, 'Box__static__make') == ['mod.Box__static__make:inferred'], caller
+		assert plain_calls(g, caller, 'hi') == ['mod.Box.hi:inferred'], caller
+	}
+	assert plain_calls(g, 'local', 'Local__static__make') == []
+}
+
+// one call through an alias, on two lines, is one edge with both lines
+fn test_two_static_calls_through_an_alias_are_one_edge() {
+	g := extract_graph_of({
+		'p/a.v': 'module main\n\nstruct Sss {}\n\nfn Sss.new() {}\n\ntype Aaa = Sss\n\ntype Bbb = Sss\n\nfn twice() {\n\tAaa.new()\n\tBbb.new()\n}\n\nfn main() {}\n'
+	})
+	edges := g.edges.filter(it.kind == .calls && it.to == 'p.Sss__static__new')
+	assert edges.len == 1
+	assert edges[0].lines == [12, 13]
+}
+
+// compiled: `SSLConn.new()` prints `mbd`, and `opn` with `-d use_opn`, as does `c.hi()` after it.
+// A static only one build's type has is that build's alone, and an alias every build shares
+// puts no build on the call.
+fn test_a_static_call_through_an_alias_each_build_declares_reaches_each_builds_type() {
+	g := extract_graph_of({
+		'opn/opn.v':             'module opn\n\npub struct Conn {}\n\npub fn Conn.new() &Conn {\n\treturn &Conn{}\n}\n\npub fn Conn.only() {}\n\npub fn (c &Conn) hi() {}\n'
+		'mbd/mbd.v':             'module mbd\n\npub struct Conn {}\n\npub fn Conn.new() &Conn {\n\treturn &Conn{}\n}\n\npub fn (c &Conn) hi() {}\n\npub struct Box {}\n\npub fn Box.new() {}\n'
+		'ssl/ssl_d_use_opn.v':   'module ssl\n\nimport opn\n\npub type SSLConn = opn.Conn\n'
+		'ssl/ssl_notd_use_opn.v': 'module ssl\n\nimport mbd\n\npub type SSLConn = mbd.Conn\n'
+		'ssl/plain.v':            'module ssl\n\nimport mbd\n\npub type Plain = mbd.Box\n'
+		'app/main.v':            'module main\n\nimport ssl\n\nfn both() {\n\tc := ssl.SSLConn.new()\n\tc.hi()\n}\n\nfn one() {\n\tssl.SSLConn.only()\n}\n\nfn shared() {\n\tssl.Plain.new()\n}\n\nfn main() {}\n'
+	})
+	built := fn [g] (from string, to string) []string {
+		return g.edges.filter(it.kind == .calls && it.from == 'app.${from}' && it.to == to).map('${it.provenance}|${it.build}')
+	}
+	assert built('both', 'opn.Conn__static__new') == ['inferred|use_opn ?']
+	assert built('both', 'mbd.Conn__static__new') == ['inferred|!use_opn ?']
+	assert built('both', 'ssl.SSLConn__static__new') == []
+	assert built('both', 'opn.Conn.hi') == ['inferred|use_opn ?']
+	assert built('both', 'mbd.Conn.hi') == ['inferred|!use_opn ?']
+	assert built('one', 'opn.Conn__static__only') == ['inferred|use_opn ?']
+	assert built('shared', 'mbd.Box__static__new') == ['inferred|']
+}
+
+// compiled: `x.str()` on a C string, a `&u8`, and on a `&char` parameter runs on either compiler, and no rune's `str` takes it, nor an unrelated type's. Here no `u8.str` is declared, as is true of no real builtin, to show what the rule does with none. A `&char` has the builtin's own `str` (vlib/builtin/int.v), which V calls. Its value is a string.
+fn test_str_on_a_c_string_is_one_v_writes() {
+	g := extract_graph_of({
+		'vlib/builtin/b.v': 'module builtin\n\npub struct string {}\n\npub fn (s string) len_of() int {\n\treturn 0\n}\n\npub fn (r rune) str() string {\n\treturn ""\n}\n\npub fn (cptr &char) str() string {\n\treturn ""\n}\n'
+		'q/o.v':            'module q\n\npub struct Qqq {}\n\npub fn (o Qqq) len_of() int {\n\treturn 0\n}\n\npub fn (o Qqq) str() string {\n\treturn ""\n}\n'
+		'p/a.v':            'module main\n\nfn local() {\n\tx := c\'abc\'\n\tx.str()\n}\n\nfn param(p &char) {\n\tp.str()\n}\n\nfn value() {\n\tx := c\'abc\'\n\ts := x.str()\n\ts.len_of()\n}\n\nfn a_rune() {\n\tr := `c`\n\tr.str()\n}\n\nfn main() {}\n'
+	})
+	assert plain_calls(g, 'local', 'str') == ['str:undeclared']
+	assert plain_calls(g, 'param', 'str') == ['vlib.builtin.char.str:inferred']
+	assert plain_calls(g, 'value', 'len_of') == ['vlib.builtin.string.len_of:inferred']
+	assert plain_calls(g, 'a_rune', 'str') == ['vlib.builtin.rune.str:inferred']
+	// without the builtin's `&char` str in the graph the call stays open: V doesn't write it
+	bare := extract_graph_of({
+		'p/a.v': 'module main\n\nfn param(p &char) {\n\tp.str()\n}\n\nfn main() {}\n'
+	})
+	assert plain_calls(bare, 'param', 'str') == ['str:extracted']
+}
+
+// an alias in another file of the caller's module is seen; another test's static method isn't,
+// so a call that only it answers stays open
+fn test_a_static_call_through_an_alias_sees_the_module_and_not_another_test() {
+	g := extract_graph_of({
+		'lib/a.v':      'module lib\n\nfn through() {\n\tAaa.new()\n}\n\nfn only_in_a_test() {\n\tAaa.tested()\n}\n'
+		'lib/b.v':      'module lib\n\npub struct Sss {}\n\npub fn Sss.new() {}\n\npub type Aaa = Sss\n'
+		'lib/b_test.v': 'module lib\n\nfn Sss.tested() {}\n\nfn test_b() {}\n'
+	})
+	assert plain_calls(g, 'through', 'Sss__static__new') == ['lib.Sss__static__new:inferred']
+	assert plain_calls(g, 'only_in_a_test', 'Sss__static__tested') == []
+	assert plain_calls(g, 'only_in_a_test', 'Aaa__static__tested') == ['Aaa__static__tested:extracted']
+}

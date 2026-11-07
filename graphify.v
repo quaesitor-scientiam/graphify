@@ -1590,6 +1590,39 @@ fn resolve_edges(mut g Graph) {
 				}
 				continue
 			}
+			// a static call through an alias is the type's, before a type of the alias's name in a
+			// module the caller can't see, as the call's value reads it (call_result). An alias each
+			// build declares in its own file (build_worlds) takes each build's type: the call reaches
+			// every one, each in the build of the alias that names it, as a method call through it does
+			mut answers := [inf.alias_static(e) or { '' }]
+			for mut w in builds.worlds {
+				answers << w.alias_static(e) or { '' }
+			}
+			mut statics := []string{}
+			for id in answers {
+				if id != '' && !unaddressable[id] && id !in statics {
+					statics << id
+				}
+			}
+			if statics.len > 0 {
+				split := answers.any(it != answers[0])
+				for id in statics {
+					key := '${e.from}\x00${id}'
+					se := Edge{
+						...e
+						to:         id
+						provenance: .inferred
+						build:      if split { world_build(target_build, e, id) } else { e.build }
+					}
+					if at := seen_call[key] {
+						add_lines(mut resolved, at, se)
+					} else {
+						seen_call[key] = resolved.len
+						resolved << se
+					}
+				}
+				continue
+			}
 			// a conversion comes before a function of the name V can't see (Infer.conversion),
 			// and the tier below links it
 			mut here := ?CallResolution(none)
@@ -1846,10 +1879,11 @@ fn resolve_edges(mut g Graph) {
 // world_build is the build a call that comes out differently in another world needs:
 // that of the alias declarations that name its callee's type, `use_openssl ?` for
 // `openssl.SSLConn.dial` through `ssl.SSLConn` (the type's id may have a label before
-// the module the alias names it by: `vlib.net.openssl.SSLConn`). No closure, as
-// resolve_edges runs in an arena (see arena_begin).
+// the module the alias names it by: `vlib.net.openssl.SSLConn`), and of a static method's,
+// `openssl.SSLConn.new`. No closure, as resolve_edges runs in an arena (see arena_begin).
 fn world_build(target_build map[string]string, e Edge, id string) string {
-	owner := id.all_before('@').all_before_last('.')
+	base := id.all_before('@')
+	owner := if base.contains('__static__') { base.all_before('__static__') } else { base.all_before_last('.') }
 	for target, b in target_build {
 		if owner == target || owner.ends_with('.' + target) {
 			return join_build(e.build, b)

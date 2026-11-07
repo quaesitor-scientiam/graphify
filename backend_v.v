@@ -3206,7 +3206,9 @@ fn (f &V3File) recipe(id flat.NodeId, ctx V3CallCtx) string {
 			return 't:bool'
 		}
 		.char_literal {
-			return 't:rune'
+			// the parser keeps `c'x'`, a C string, as a char literal whose value starts `c:`. It is a
+			// `&u8`: typeof says so on both of V's compilers, and the C they generate calls u8's vstring
+			return if n.value_text().starts_with('c:') { 't:&u8' } else { 't:rune' }
 		}
 		.ident {
 			if n.value_text() in ctx.vars {
@@ -3829,7 +3831,7 @@ fn (f &V3File) literal_type(id flat.NodeId) string {
 			return 'f64'
 		}
 		.char_literal {
-			return 'rune'
+			return if n.value_text().starts_with('c:') { '&u8' } else { 'rune' }
 		}
 		.selector {
 			// `Animal.cat`, a member of an enum, has the enum's type: the name before a
@@ -3973,6 +3975,11 @@ fn (f &V3File) callee(callee_id flat.NodeId, ctx V3CallCtx) (string, bool, flat.
 	}
 	if target.kind == .ident && target.value_text().len > 0 && target.value_text()[0].is_capital()
 		&& target.value_text() !in ctx.locals {
+		// a type a selective import names, `import mod { Box }` then `Box.make()`, is the
+		// module's, as a function's is above
+		if mod := f.selected[target.value_text()] {
+			return '${mod}.${target.value_text()}__static__${c.value_text()}', false, flat.NodeId(-1)
+		}
 		return '${target.value_text()}__static__${c.value_text()}', false, flat.NodeId(-1)
 	}
 	// a static member of a JS binding, `JS.Promise.race(p)` or `JS.Array.prototype.constructor()`,
