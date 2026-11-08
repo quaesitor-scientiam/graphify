@@ -2673,6 +2673,14 @@ fn (mut f V3File) walk(id flat.NodeId, ctx V3CallCtx, mut edges []Edge, mut seen
 				return ctx
 			}
 		}
+		.assert_stmt {
+			// `assert x is T`: what follows sees `x` as a T, as V3 narrows it
+			// (apply_post_assert_smartcasts); the message runs where the check failed
+			if kids.len >= 1 {
+				f.walk_list(kids, ctx, mut edges, mut seen)
+				return ctx.narrowed_by(f.type_checks(kids[0]))
+			}
+		}
 		.infix {
 			// `x is T && x.f()`: the right side sees `x` as a T
 			if n.op == .logical_and && kids.len == 2 {

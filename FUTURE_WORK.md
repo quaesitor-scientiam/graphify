@@ -950,6 +950,19 @@ or as it was:
   neither of V's compilers builds that program. A pattern of another form, `Expect[&T]`, fits only
   itself.
 
+**What an assert narrows (November 2026).** `assert x is T` narrows `x` to a T in what follows it,
+as V3 does (`apply_post_assert_smartcasts`), through the same check an `if` makes for its block
+(`type_checks`): a value, a field path, and each side of an `&&`. The message, which runs where the
+check failed, and what follows a block holding the assert keep the type they had.
+After an assert, `-old-compiler` reads a variant's field but calls a sum type's own method, and
+refuses a method only an interface's variant declares, so where the two differ the graph follows V3: on
+`IError`, `err.msg()` after `assert err is MalformedMessage` is `MalformedMessage.msg`, as it was
+already after an `if`, and on a sum type `typ.name()` after `assert typ is Alias` is `Alias.name`.
+
+On vlang `95a0d5191f`: unresolved calls 45 to 41, the four `name()` calls of `v.types`' tests, and
+about 70 calls move from an interface's or sum type's method to the variant's. On native-backend two
+`draw` calls move to `WidgetB.resize`; nothing else changes.
+
 The raw edge is retained and `explain` reports ambiguous callers rather than
 inventing links. A future opt-in deep mode could run the checker over a whole
 project, but given the small remainder, it would need to address these
