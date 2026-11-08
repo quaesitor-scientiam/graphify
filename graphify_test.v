@@ -18952,3 +18952,287 @@ fn test_a_static_call_through_an_alias_sees_the_module_and_not_another_test() {
 	assert plain_calls(g, 'only_in_a_test', 'Sss__static__tested') == []
 	assert plain_calls(g, 'only_in_a_test', 'Aaa__static__tested') == ['Aaa__static__tested:extracted']
 }
+
+// static_calls are the calls `from` makes, as `to:provenance`, sorted.
+fn static_calls(g Graph, from string) []string {
+	mut out := g.edges.filter(it.kind == .calls && it.from.all_before('@').all_after_last('.') == from).map('${it.to}:${it.provenance}')
+	out.sort()
+	return out
+}
+
+// compiled with V3, which prints `Aaa.make` for via[Ali], then `Aaa.make`, `Bbb.make`, `Aaa.make`
+// for build[Ali], `green`, `dark` from Shade's own from_string, `green`, `enum`, `Bbb.make`.
+// -old-compiler refuses the generic from_string on a private enum. A static call on a type
+// parameter is each instance's static.
+fn test_a_static_call_on_a_type_parameter_is_each_instances_static() {
+	g := extract_graph_of({
+		'p/a.v': 'module main
+
+struct Aaa {}
+
+fn Aaa.make() string {
+	return "Aaa.make"
+}
+
+struct Bbb {}
+
+fn Bbb.make() string {
+	return "Bbb.make"
+}
+
+type Ali = Aaa
+
+enum Color {
+	red
+	green
+}
+
+enum Shade {
+	dark
+	light
+}
+
+fn Shade.from_string(s string) ?Shade {
+	return .dark
+}
+
+fn build[T]() string {
+	return T.make()
+}
+
+fn parse_enum[T](s string) ?T {
+	return T.from_string(s)
+}
+
+fn only_enum[T](s string) !T {
+	return T.from(s)
+}
+
+fn Color.make() string {
+	return "Color.make"
+}
+
+fn guarded[T]() string {
+	\$if T is \$enum {
+		return "enum"
+	} \$else {
+		return T.make()
+	}
+}
+
+fn never[T]() string {
+	return T.make()
+}
+
+fn via[T]() string {
+	return T.make()
+}
+
+fn main() {
+	println(via[Ali]())
+	println(build[Aaa]())
+	println(build[Bbb]())
+	println(build[Ali]())
+	println(parse_enum[Color]("green") or { Color.red })
+	println(parse_enum[Shade]("light") or { Shade.light })
+	println(only_enum[Color]("green") or { Color.red })
+	println(guarded[Color]())
+	println(guarded[Bbb]())
+}
+'
+	})
+	// each instance's own static, and through the alias Ali the static Aaa declares
+	assert static_calls(g, 'build') == ['p.Aaa__static__make:inferred',
+		'p.Bbb__static__make:inferred']
+	// the declared from_string is linked; Color's, which V generates, is left out
+	assert static_calls(g, 'parse_enum') == ['p.Shade__static__from_string:inferred']
+	// every instance is an enum declaring no `from`: V's
+	assert static_calls(g, 'only_enum') == ['T__static__from:undeclared']
+	// the `$else` isn't compiled for the enum Color, so its own make isn't reached
+	assert static_calls(g, 'guarded') == ['p.Bbb__static__make:inferred']
+	// with no instance it stays open
+	assert static_calls(g, 'never') == ['T__static__make:extracted']
+	// through the alias Ali alone, the static Aaa declares
+	assert static_calls(g, 'via') == ['p.Aaa__static__make:inferred']
+}
+
+// an instance the reader can't type, `unread(ext.get())`, may be any type, so `T.from()` isn't
+// taken as V's even though every instance it can type is an enum; nor is it with an instance
+// that isn't an enum, which V refuses. Not compiled: ext is outside the graph
+fn test_a_static_call_on_a_type_parameter_with_an_unread_instance_is_not_vs() {
+	g := extract_graph_of({
+		'p/a.v': 'module main
+
+import ext
+
+enum Color {
+	red
+	green
+}
+
+fn known[T](v T) !T {
+	return T.from(1)
+}
+
+fn unread[T](v T) !T {
+	return T.from(1)
+}
+
+struct Plain {}
+
+fn mixed[T](v T) !T {
+	return T.from(1)
+}
+
+fn vfrom[T](args ...T) !T {
+	return T.from(1)
+}
+
+struct Box[U] {
+	v U
+}
+
+fn Box.make() string {
+	return "Box.make"
+}
+
+fn gbuild[T]() string {
+	return T.make()
+}
+
+fn main() {
+	gbuild[Box[int]]()
+	known(Color.red) or {}
+	unread(Color.red) or {}
+	unread(ext.get()) or {}
+	mixed(Color.red) or {}
+	mixed(Plain{}) or {}
+	vfrom(ext.get(), Color.red) or {}
+}
+'
+	})
+	// every value of a variadic `...T` is a T, so the one it can type, past the first, gives it
+	assert static_calls(g, 'vfrom') == ['T__static__from:undeclared']
+	// V refuses `T.make()` with T a generic struct's instance (`unknown function T.make` on V3)
+	assert static_calls(g, 'gbuild') == ['T__static__make:extracted']
+	assert static_calls(g, 'known') == ['T__static__from:undeclared']
+	assert static_calls(g, 'unread') == ['T__static__from:extracted']
+	// V generates `from` for an enum only; for Plain it is no method V writes
+	assert static_calls(g, 'mixed') == ['T__static__from:extracted']
+}
+
+// compiled with V3, which prints `a`, `b`, `x`, `y` and `name`: each part of a `$for` over a
+// string's split or fields is a string. -old-compiler doesn't know the form.
+fn test_the_variable_of_a_comptime_for_over_a_string_is_a_string() {
+	g := extract_graph_of({
+		'vlib/builtin/s.v': 'module builtin
+
+pub struct string {}
+
+pub fn (s string) to_lower() string {
+	return s
+}
+
+pub struct FieldData {
+pub:
+	name string
+}
+'
+		'p/a.v':            'module main
+
+struct Foo {
+	name string
+}
+
+fn (f Foo) to_lower() string {
+	return "Foo.to_lower"
+}
+
+fn parts() {
+	\$for part in "A/B".split("/") {
+		println(part.to_lower())
+	}
+}
+
+fn words() {
+	\$for word in " X Y ".fields() {
+		println(word.to_lower())
+	}
+}
+
+fn names() {
+	\$for f in Foo.fields {
+		println(f.name.to_lower())
+	}
+}
+
+fn main() {
+	parts()
+	words()
+	names()
+}
+'
+	})
+	assert plain_calls(g, 'parts', 'to_lower') == ['vlib.builtin.string.to_lower:inferred']
+	assert plain_calls(g, 'words', 'to_lower') == ['vlib.builtin.string.to_lower:inferred']
+	assert plain_calls(g, 'names', 'to_lower') == ['vlib.builtin.string.to_lower:inferred']
+}
+
+// compiled: -old-compiler prints `['Foo.str', 'Foo.str']`, `['Bar.str']`, `['Baz.str']`, `Foo.str`
+// and `Bar.str`. Each argument of a variadic `...T` gives T, and a spread array `...xs` its
+// elements. V3 prints the same, and builds `first(...xs)` as a first of Bar (its C names
+// first_T_Bar), except that it builds `each(...xs)` as an each of `[]Bar`, which prints `['[]']`.
+fn test_a_variadic_parameter_takes_each_argument_and_a_spread_arrays_elements() {
+	g := extract_graph_of({
+		'p/a.v': 'module main
+
+struct Foo {}
+
+fn (f Foo) str() string {
+	return "Foo.str"
+}
+
+struct Bar {}
+
+fn (b Bar) str() string {
+	return "Bar.str"
+}
+
+struct Baz {}
+
+fn (b Baz) str() string {
+	return "Baz.str"
+}
+
+fn each[T](args ...T) {
+	println(args.map(it.str()))
+}
+
+fn pass[T](args ...T) {
+	each(...args)
+}
+
+fn first[T](args ...T) T {
+	return args[0]
+}
+
+fn take() {
+	xs := [Bar{}]
+	y := first(...xs)
+	println(y.str())
+}
+
+fn main() {
+	each(Foo{}, Foo{})
+	xs := [Bar{}]
+	each(...xs)
+	pass(Baz{})
+	println(first(Foo{}))
+	take()
+}
+'
+	})
+	assert static_calls(g, 'each').filter(it.contains('str')) == ['p.Bar.str:inferred',
+		'p.Baz.str:inferred', 'p.Foo.str:inferred']
+	assert plain_calls(g, 'take', 'str') == ['p.Bar.str:inferred']
+}

@@ -886,13 +886,22 @@ fn (inf &Infer) alias_static(e Edge) ?string {
 	if !e.to.contains('__static__') {
 		return none
 	}
-	method := e.to.all_after('__static__')
 	file := if e.file != '' { e.file } else { (inf.site_of[e.from] or { return none }).file }
-	mut cur := InferredType{
+	start := InferredType{
 		text: e.to.all_before('__static__')
 		mod:  (inf.scope_of[file] or { FileScope{} }).mod
 		file: file
 	}
+	id, depth := inf.static_along(start, e.to.all_after('__static__'), file)?
+	return if depth == 0 { none } else { id }
+}
+
+// static_along is the static method `method` of the type `start` names, read from `file`, and
+// how many aliases were followed to reach it: the type's own (0), or the first type along its
+// aliases that declares one, each read in the scope of the alias before it. none when the type
+// isn't found, or no type along the aliases declares the method.
+fn (inf &Infer) static_along(start InferredType, method string, file string) ?(string, int) {
+	mut cur := start
 	for i in 0 .. embed_depth {
 		text := bare_type(cur.text)
 		short := text.all_after_last('.')
@@ -901,7 +910,7 @@ fn (inf &Infer) alias_static(e Edge) ?string {
 		own := (inf.by_name['${short}__static__${method}'] or { []CallCand{} }).filter(it.mod == decl.mod
 			&& !test_private(it.file, file))
 		if own.len > 0 {
-			return if i == 0 { none } else { only_id(own) }
+			return only_id(own)?, i
 		}
 		target := inf.alias_of[decl.id] or { return none }
 		cur = InferredType{
@@ -911,6 +920,13 @@ fn (inf &Infer) alias_static(e Edge) ?string {
 		}
 	}
 	return none
+}
+
+// type_static is the static method `method` a call on the type `t` reaches, its own or
+// through its aliases (see static_along). none when no type along them declares it.
+fn (inf &Infer) type_static(t InferredType, method string, file string) ?string {
+	id, _ := inf.static_along(t, method, file)?
+	return id
 }
 
 // call_result is the return type of the call `to` made from e's file, its
@@ -1034,14 +1050,17 @@ fn (inf &Infer) arg_result(e Edge, to string, id string, steps []string, ret str
 	}
 	caller_params := inf.caller_tparams(e.from)
 	mut number := InferredType{}
-	for j, recipe in args.split('\x0b') {
-		// the arguments past the last parameter are all for its `...T`; a spread `...xs` has no
-		// recipe here
+	for j, raw in args.split('\x0b') {
+		// the arguments past the last parameter are all for its `...T`, each one a T, unless it
+		// spreads an array of them, `...xs` (spread_step)
 		param := if j < ptypes.len { ptypes[j] } else { ptypes.last() }
-		one := param == ret || param == '...' + ret
-		if recipe == '' || (!one && param != '[]' + ret) {
+		spread := raw.ends_with(recipe_sep + spread_step)
+		recipe := if spread { raw[..raw.len - recipe_sep.len - spread_step.len] } else { raw }
+		one := !spread && (param == ret || param == '...' + ret)
+		if recipe == '' || (!one && param != '[]' + ret && !(spread && param == '...' + ret)) {
 			continue
 		}
+		// a variadic parameter's own values, `...args` passed on, are an array of them (bare_type)
 		arg := inf.follow_steps(Edge{ from: e.from, file: e.file, recv_recipe: recipe }, depth + 1) or {
 			continue
 		}
