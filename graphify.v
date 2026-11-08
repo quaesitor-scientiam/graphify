@@ -1573,7 +1573,21 @@ fn resolve_edges(mut g Graph) {
 	// record_call keeps one edge per callee and receiver, so two raw edges
 	// can resolve to the same declaration; keep one, `extracted` if either is
 	mut seen_call := map[string]int{}
-	for e in g.edges {
+	for raw in g.edges {
+		mut e := raw
+		// `_zbr_ty_Point.new(4)`, a static of a type named without a capital (lowercase_type), which
+		// the walk took for a method of a value: the static call `callee` makes of a capitalized one
+		if e.kind == .calls && e.is_method && e.recv_recipe.starts_with('g:')
+			&& !e.recv_recipe.contains(recipe_sep) && !e.recv_recipe.contains(recipe_alt) {
+			if _ := inf.lowercase_type(e.recv_recipe[2..], e.file) {
+				e = Edge{
+					...e
+					to:          '${e.recv_recipe[2..]}__static__${e.to}'
+					is_method:   false
+					recv_recipe: ''
+				}
+			}
+		}
 		if e.kind == .calls {
 			// Refuse an id that cannot address one function (see above): an
 			// edge to it would send every consumer to whichever declaration
@@ -1806,6 +1820,24 @@ fn resolve_edges(mut g Graph) {
 						to:         id
 						kind:       .calls
 						provenance: .inferred
+						lines:      e.lines
+						build:      e.build
+					}
+					continue
+				}
+			}
+		}
+		// and so is one through a module, `zbrgen._zbr_ty_Value(v)`, of a type named without a
+		// capital, where no function of the name resolves (qualified_conversion)
+		if e.kind == .calls && !e.is_method && e.to.contains('.') {
+			if conv := inf.qualified_conversion(e) {
+				if !unaddressable[conv.id] {
+					resolved << Edge{
+						from:       e.from
+						to:         conv.id
+						kind:       .calls
+						provenance: .inferred
+						file:       e.file
 						lines:      e.lines
 						build:      e.build
 					}
