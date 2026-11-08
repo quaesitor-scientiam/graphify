@@ -2429,6 +2429,101 @@ fn (mut f V3File) walk_list(ids []flat.NodeId, ctx V3CallCtx, mut edges []Edge, 
 	}
 }
 
+// walk_args walks the arguments `args` of a call on `callee` as walk_list does, in `ctx`, and each
+// lambda among them in `outer`, the call's own context, with its parameters typed as the call types
+// them (lambda_recipes): `ctx` has `it`, `a` and `b` for `xs.filter(it.ok())`, which neither a
+// lambda's body nor the call's receiver, read in `outer`, sees.
+fn (mut f V3File) walk_args(callee flat.NodeId, args []flat.NodeId, ctx V3CallCtx, outer V3CallCtx, mut edges []Edge, mut seen map[string]bool) {
+	mut cur := ctx
+	for j, id in args {
+		if f.node(id).kind == .lambda_expr {
+			f.walk_lambda(id, outer, f.lambda_recipes(callee, j, id, outer), mut edges, mut seen)
+			continue
+		}
+		cur = f.walk(id, cur, mut edges, mut seen)
+	}
+}
+
+// walk_lambda walks the body of the lambda `id`, `|a, b| expr`, whose children are its parameters
+// and then its body. Each parameter is a new variable, with the recipe of the same place in
+// `recipes` ('' past its end), which shadows any outer one of its name.
+fn (mut f V3File) walk_lambda(id flat.NodeId, ctx V3CallCtx, recipes []string, mut edges []Edge, mut seen map[string]bool) {
+	kids := f.kids(id)
+	if kids.len == 0 {
+		return
+	}
+	mut names := []string{}
+	mut rs := []string{}
+	for i, k in kids[..kids.len - 1] {
+		names << f.node(k).value_text()
+		rs << if i < recipes.len { recipes[i] } else { '' }
+	}
+	f.walk(kids.last(), ctx.with_vars(names, rs), mut edges, mut seen)
+}
+
+// lambda_elem_methods are builtin's array methods whose lambda takes the array's elements, as
+// V's checker types them: `xs.map(|x| x.name)`, `xs.sort(|a, b| a.n < b.n)`.
+const lambda_elem_methods = ['filter', 'map', 'any', 'all', 'count', 'sort', 'sorted',
+	'sort_with_compare', 'sorted_with_compare']
+
+// lambda_recipes are the recipes of the parameters of the lambda `lam`, argument `j` of a call on
+// `callee`, which V types from the function type the call expects there: parameter k of the
+// function-typed parameter j of the method (`lm:name:j:k` step after the receiver's recipe, which
+// an array's lambda_elem_methods read as its element, see Infer.method_lambda_param) or the function
+// (`lc:` start, see Infer.lambda_param), or the type its declared type gives a function value
+// the caller holds. Empty when the receiver has no recipe; '' for a parameter of a function value
+// that has no declared function type, or whose type names a type parameter.
+fn (f &V3File) lambda_recipes(callee flat.NodeId, j int, lam flat.NodeId, ctx V3CallCtx) []string {
+	count := f.kids(lam).len - 1
+	if count <= 0 {
+		return []string{}
+	}
+	name, is_method, target := f.callee(callee, ctx)
+	if name == '' {
+		return []string{}
+	}
+	mut out := []string{}
+	if is_method {
+		r := f.recipe(target, ctx)
+		if r == '' {
+			return []string{}
+		}
+		// which method it is, and whether an array's, is known only once the receiver is followed
+		for k in 0 .. count {
+			out << r + recipe_sep + 'lm:${name}:${j}:${k}'
+		}
+		return out
+	}
+	if name in ctx.vars || name in ctx.locals {
+		// a function value, `h(|x| x.f())` with `h fn (fn (Foo) string) string`: its declared type,
+		// when it is one; a type parameter in it is not followed
+		held := ctx.locals[name] or { '' }
+		for k in 0 .. count {
+			pt := lambda_param_text(held, j, k) or { '' }
+			out << if pt == '' || is_type_param_text(pt) || split_type_args(pt).any(is_type_param_text(it)) {
+				''
+			} else {
+				't:' + f.type_text(pt)
+			}
+		}
+		return out
+	}
+	// the call site, as record_call keys its arguments, and the type arguments written, `f[int]`
+	mut base := 'lc:' + name + recipe_sep + 'at:' + f.node(callee).pos.offset.str()
+	if f.node(callee).kind == .index {
+		ik := f.kids(callee)
+		if ik.len > 1 {
+			for ta in ik[1..] {
+				base += recipe_sep + 'p:' + (f.type_arg(ta) or { '' })
+			}
+		}
+	}
+	for k in 0 .. count {
+		out << base + recipe_sep + 'lp:${j}:${k}'
+	}
+	return out
+}
+
 fn (mut f V3File) walk(id flat.NodeId, ctx V3CallCtx, mut edges []Edge, mut seen map[string]bool) V3CallCtx {
 	if int(id) < 0 {
 		return ctx
@@ -2453,10 +2548,20 @@ fn (mut f V3File) walk(id flat.NodeId, ctx V3CallCtx, mut edges []Edge, mut seen
 					} else {
 						ctx.with_vars(['a', 'b'], [elem, elem])
 					}
-					f.walk_list(kids[1..], it_ctx, mut edges, mut seen)
+					f.walk_args(kids[0], kids[1..], it_ctx, ctx, mut edges, mut seen)
+					return ctx
+				}
+				if kids[1..].any(f.node(it).kind == .lambda_expr) {
+					f.walk(kids[0], ctx, mut edges, mut seen)
+					f.walk_args(kids[0], kids[1..], ctx, ctx, mut edges, mut seen)
 					return ctx
 				}
 			}
+		}
+		.lambda_expr {
+			// a lambda no call types, `|x| x.f()` as a value: its parameters are still its own
+			f.walk_lambda(id, ctx, []string{}, mut edges, mut seen)
+			return ctx
 		}
 		.comptime_if {
 			// `$if T is Empty { ... }` in a generic function: V compiles the block

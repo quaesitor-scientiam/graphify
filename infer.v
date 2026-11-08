@@ -651,13 +651,19 @@ fn (inf &Infer) follow_steps(e Edge, depth int) ?InferredType {
 			}
 			InferredType{}
 		}
+	} else if start.starts_with('lc:') {
+		t = inf.lambda_param(e, start[3..], steps, depth)?
 	} else {
 		return none
 	}
 	rest := steps[1..]
 	for si, step in rest {
 		if step.starts_with('p:') || step.starts_with('mapto:') || step.starts_with('mapit:')
-			|| step.starts_with('mapf:') || step.starts_with('at:') {
+			|| step.starts_with('mapf:') || step.starts_with('at:') || step.starts_with('lp:') {
+			continue
+		}
+		if step.starts_with('lm:') {
+			t = inf.method_lambda_param(t, step[3..], e.file)?
 			continue
 		}
 		if step == 'th' {
@@ -1121,6 +1127,126 @@ fn (inf &Infer) arg_result(e Edge, to string, id string, steps []string, ret str
 		return none
 	}
 	return number
+}
+
+// lambda_param is the type of a parameter of a lambda passed to the function `to`, the recipe
+// `lc:to`, `at:` the call site, any `p:` type arguments written, then `lp:j:k` (and the path the
+// lambda takes from the parameter, which follow_steps walks on): parameter k of the
+// function type of the function's parameter j, as V's checker types a lambda from the type the
+// call expects. A type parameter of the function is the type argument written for it, or else
+// the one the call's other arguments give it (arg_result); a type written with one inside it
+// (`[]T`) is not followed. none when the callee isn't known or parameter j is no function type.
+fn (inf &Infer) lambda_param(e Edge, to string, steps []string, depth int) ?InferredType {
+	// the steps after `lp:` are the path the lambda takes from its parameter, `x.name`
+	at := steps.index(steps.filter(it.starts_with('lp:'))[0] or { return none })
+	if at < 2 || !steps[1].starts_with('at:') {
+		return none
+	}
+	jk := steps[at][3..].split(':')
+	if jk.len != 2 {
+		return none
+	}
+	j := jk[0].int()
+	k := jk[1].int()
+	call := Edge{
+		from: e.from
+		to:   to
+		kind: .calls
+		file: e.file
+	}
+	id := if to.contains('.') {
+		(resolve_qualified_callee(call, inf.by_name, inf.site_of, inf.scope_of)?).id
+	} else {
+		(resolve_callee(call, inf.by_name, inf.site_of, inf.imports_of)?).id
+	}
+	pt := lambda_param_text(inf.sig_of[id] or { return none }, j, k)?
+	tps := inf.generics_of[id] or { []string{} }
+	if pt in tps {
+		targs := steps[2..at].filter(it.starts_with('p:')).map(it[2..])
+		i := tps.index(pt)
+		if i < targs.len && targs[i] != '' {
+			caller_mod := (inf.scope_of[e.file] or { FileScope{} }).mod
+			return InferredType{
+				text: qualify_type_names(targs[i], caller_mod)
+				mod:  caller_mod
+				file: e.file
+			}
+		}
+		return inf.arg_result(e, to, id, steps, pt, depth)
+	}
+	if tps.any(subst_word(pt, it, '') != pt) {
+		return none
+	}
+	site := inf.decl_site(id, inf.name_of[id] or { return none })?
+	return InferredType{
+		text: pt
+		mod:  site.mod
+		file: site.file
+	}
+}
+
+// method_lambda_param is lambda_param for a lambda passed to a method of `t`, the step `lm:name:j:k`:
+// parameter k of the function type of the method's parameter j. With no method of the name on the
+// type or the type its alias names, an array's lambda_elem_methods take its element, as V's
+// builtin does: `xs.map(|x| ...)`, while a type's own `map` takes what its declaration says. A type
+// the method's or its receiver's type parameters name is not followed: none.
+fn (inf &Infer) method_lambda_param(t InferredType, step string, file string) ?InferredType {
+	parts := step.split(':')
+	if parts.len != 3 {
+		return none
+	}
+	mut recv := InferredType{
+		...t
+		text: bare_type(t.text)
+	}
+	// an array's lambda_elem_methods are builtin's, whose lambda takes an element (builtin declares
+	// `map` and the rest on `array`, of voidptr). An alias of an array has them too, unless it
+	// declares its own: method_on finds the array's through the alias, so the alias's own is the
+	// one that differs from what the array it names has
+	if !recv.text.starts_with('[') && parts[0] in lambda_elem_methods {
+		named := inf.unalias(recv, file)
+		if named.text.starts_with('[') {
+			own := inf.method_on(recv, parts[0], file, 0) or { '' }
+			if own == '' || own == (inf.method_on(named, parts[0], file, 0) or { '' }) {
+				recv = named
+			}
+		}
+	}
+	if recv.text.starts_with('[') && parts[0] in lambda_elem_methods {
+		return InferredType{
+			...recv
+			text: elem_type(recv.text)?
+		}
+	}
+	id := inf.method_on(recv, parts[0], file, 0)?
+	sig := inf.sig_of[id] or { return none }
+	// the parameters past the receiver, `fn (b Box) each(f fn (Item))`
+	pt := lambda_param_text(sig.all_after(') '), parts[1].int(), parts[2].int())?
+	if is_type_param_text(strip_generic_args(bare_type(pt)).all_after_last('.'))
+		|| split_type_args(pt).any(is_type_param_text(it)) {
+		return none
+	}
+	site := inf.decl_site(id, inf.name_of[id] or { return none })?
+	return InferredType{
+		text: pt
+		mod:  site.mod
+		file: site.file
+	}
+}
+
+// lambda_param_text is the type text of parameter k of the function type of parameter j of the
+// signature `sig`, `T` of `f fn (T) string` for j 0 and k 0. none when there is no such parameter
+// or it isn't of function type.
+fn lambda_param_text(sig string, j int, k int) ?string {
+	ptypes := param_types(sig)
+	if j < 0 || j >= ptypes.len || !ptypes[j].starts_with('fn') {
+		return none
+	}
+	inner := param_types(ptypes[j])
+	if k < 0 || k >= inner.len || inner[k] == '' {
+		return none
+	}
+	return inner[k]
 }
 
 // call_site_args maps each call site of an edge's arg_sites to its argument recipes, by the

@@ -963,6 +963,43 @@ On vlang `95a0d5191f`: unresolved calls 45 to 41, the four `name()` calls of `v.
 about 70 calls move from an interface's or sum type's method to the variant's. On native-backend two
 `draw` calls move to `WidgetB.resize`; nothing else changes.
 
+**What a lambda's parameters are (November 2026).** V types the parameters of `|x| expr` from
+the function type its call expects in that place (`call_arg_expected_type`, and
+`contextual_generic_lambda_type` for a generic callee), and so does the graph:
+- parameter k of the function-typed parameter the lambda is passed as, of a function (`lc:` recipe,
+  `Infer.lambda_param`), a method (`lm:` step) or a function value the caller holds;
+- on an array, builtin's `map`, `filter`, `any`, `all`, `count`, `sort`, `sorted`,
+  `sort_with_compare` and `sorted_with_compare` take an element; which method a call is, and whether
+  the receiver is an array, is known only once the receiver is followed, so a type's own `map`, or
+  one an alias of an array declares, types its lambda from its declaration, while an alias that
+  declares none takes builtin's;
+- a type parameter of a generic function is the type argument written for it, or else the type the
+  call's other arguments give it (`arg_result`), and a lambda inside a generic function whose
+  parameter is the caller's T is linked for each of its instances, a field path off it included.
+
+Each parameter is a new variable that shadows an outer one of its name: before, the body saw the
+caller's `x`, so `x.show()` in `apply(|x| x.show())` was linked to the outer `x`'s method, and in a
+file that imports a module `x` it was a call of that module. A lambda passed to `filter` and the
+other methods that bind `it` sees the `it` of the code around the call, not the one the call binds.
+
+A field path on an element of a `[]T`, `x.name.up()` for `x` in `xs []T`, is now walked from each
+instance of T, in a `for` loop and on `it` as in a lambda (`path_method_ids`). `param_types` reads
+an unnamed parameter of function type, `fn (fn (Foo) string) string`, as one type.
+
+Not followed, and left unresolved, though V3 types each of them: a lambda parameter whose type names
+a type parameter of a method or its receiver, or of a function value's declared type; one whose type
+has a type parameter inside it (`fn ([]T)`); one whose parameter type is an alias of a function type
+(`f Cb`); a lambda that is no call's argument (a struct field's value, a return value); and one passed
+to a function declared once per platform, which the call links to every copy of.
+
+On vlang `95a0d5191f`: unresolved calls 41 to 37, the lambda calls of `lambda_generic_test.v` (`abc2`
+now reaches the `str` of string, int and f64, its three instances, and `x.str()` is int's) and the two
+`x.name.to_upper()` of `generic_fn_literal_then_lambda_same_param_test.v`. On native-backend
+`|typ| typ.name()` in `Tuple.name` is `Type.name`, and its copy of `lambda_generic_test.v`'s two calls
+is marked undeclared, as 658 other `str` calls of that tree are: it holds two builtin modules, its own and
+`spydr06`'s, and which one's `int` a call means isn't picked (a tree with only the first links
+`int.str`). The other trees don't change.
+
 The raw edge is retained and `explain` reports ambiguous callers rather than
 inventing links. A future opt-in deep mode could run the checker over a whole
 project, but given the small remainder, it would need to address these

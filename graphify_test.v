@@ -19524,3 +19524,304 @@ fn main() {
 	}
 	assert static_calls(g, 'on_iface') == ['p.Sq.area:inferred', 'p.Sq.side:extracted']
 }
+
+// compiled with V3, which prints foo, foo, ['name'], foo, foo, foo, foofoo, ['name'], name and
+// otherfoo three times. V types a lambda's parameters from the function type its call expects
+// there: an element of the array for `map`, else the parameter of the function, method or
+// function value it is passed to, with a type parameter the call's other arguments or its type
+// arguments give, and each parameter shadows an outer name. A field path on an element of a
+// `[]T` is walked from each instance of T, in a lambda as in a `for` loop. A function value's
+// type parameter is not followed: that lambda's call stays unresolved, not the outer `x`'s.
+fn test_a_lambdas_parameters_have_the_types_its_call_expects() {
+	g := extract_graph_of({
+		'p/main.v': 'module main
+
+struct Foo {}
+
+struct Other {}
+
+struct Name {}
+
+struct User {
+	name Name
+}
+
+struct Box {}
+
+fn (f Foo) show() string {
+	return "foo"
+}
+
+fn (o Other) show() string {
+	return "other"
+}
+
+fn (n Name) up() string {
+	return "name"
+}
+
+fn (o Other) up() string {
+	return "other"
+}
+
+fn (b Box) each(f fn (Foo) string) string {
+	return f(Foo{})
+}
+
+fn apply(f fn (Foo) string) string {
+	return f(Foo{})
+}
+
+fn jts[T](a []T, f fn (T) string) string {
+	return f(a[0])
+}
+
+fn abc[T](arg T, call fn (a T) string) string {
+	return call(arg)
+}
+
+fn ddd[T](call fn (a T, b T) string, a T, b T) string {
+	return call(a, b)
+}
+
+fn on_plain_fn() string {
+	return apply(|y| y.show())
+}
+
+fn on_method(b Box) string {
+	return b.each(|y| y.show())
+}
+
+fn on_array(xs []User) []string {
+	return xs.map(|x| x.name.up())
+}
+
+fn on_generic_array(a []Foo) string {
+	return jts(a, |x| x.show())
+}
+
+fn on_generic_value(x Foo) string {
+	return abc(x, |y| y.show())
+}
+
+fn on_type_argument() string {
+	return abc[Foo](Foo{}, |y| y.show())
+}
+
+fn in_generic[T](a T, b T) string {
+	return ddd(|x, y| x.show() + y.show(), a, b)
+}
+
+fn elems_of_generic[T](xs []T) []string {
+	return xs.map(|x| x.name.up())
+}
+
+fn loop_of_generic[T](xs []T) string {
+	mut out := ""
+	for x in xs {
+		out += x.name.up()
+	}
+	return out
+}
+
+fn shadowed(x Other) string {
+	return x.show() + apply(|x| x.show())
+}
+
+fn via_value(x Other, h fn (fn (Foo) string) string) string {
+	return x.show() + h(|x| x.show())
+}
+
+fn via_generic_value[T](x Other, h fn (fn (T) string) string) string {
+	return x.show() + h(|x| x.show())
+}
+
+fn main() {
+	println(on_plain_fn())
+	println(on_method(Box{}))
+	println(on_array([User{}]))
+	println(on_generic_array([Foo{}]))
+	println(on_generic_value(Foo{}))
+	println(on_type_argument())
+	println(in_generic(Foo{}, Foo{}))
+	println(elems_of_generic([User{}]))
+	println(loop_of_generic([User{}]))
+	println(shadowed(Other{}))
+	println(via_value(Other{}, apply))
+	println(via_generic_value[Foo](Other{}, apply))
+}'
+	})
+	on := fn [g] (f string) []string {
+		return static_calls(g, f).filter(it.all_before(':').all_after_last('.') in ['show', 'up'])
+	}
+	for f in ['on_plain_fn', 'on_method', 'on_generic_array', 'on_generic_value', 'on_type_argument',
+		'in_generic'] {
+		assert on(f) == ['p.Foo.show:inferred'], f
+	}
+	for f in ['on_array', 'elems_of_generic', 'loop_of_generic'] {
+		assert on(f) == ['p.Name.up:inferred'], f
+	}
+	// the outer `x` is an Other, the lambda's a Foo
+	for f in ['shadowed', 'via_value'] {
+		assert on(f) == ['p.Foo.show:inferred', 'p.Other.show:extracted'], f
+	}
+	assert on('via_generic_value') == ['p.Other.show:extracted', 'show:extracted']
+}
+// compiled with V3, which prints ['foo'], ['name'], ['foo'], name, 1, only, name and foo. A type's
+// own `map` types its lambda from its declaration, and so does an alias of an array that declares
+// one, while one that doesn't takes builtin's (declared below as builtin does, on `array`, of
+// voidptr); a lambda's parameter has the path its body takes from it (`x.name.up()`), a lambda in
+// `it`'s call sees the outer `it`, and a lambda typed by the caller's T is walked from each instance.
+fn test_a_lambdas_parameter_is_read_where_the_call_and_its_type_say() {
+	g := extract_graph_of({
+		'vlib/builtin/array.v': 'module builtin
+
+pub struct array {}
+
+pub fn (a array) filter(predicate fn (voidptr) bool) array
+
+pub fn (a array) any(predicate fn (voidptr) bool) bool
+
+pub fn (a array) map(callback fn (voidptr) voidptr) array
+
+pub fn (mut a array) sort(callback fn (voidptr, voidptr) int)
+'
+		'p/main.v':             'module main
+
+struct Foo {}
+
+struct Other {}
+
+struct Name {}
+
+struct User {
+	name Name
+}
+
+struct Group {
+	users []User
+}
+
+struct Stream {
+	items []Foo
+}
+
+type Users = []User
+
+// an alias of an array that declares its own map
+type Names = []User
+
+fn (ns Names) map(f fn (Foo) string) []string {
+	return [f(Foo{})]
+}
+
+fn (f Foo) show() string {
+	return "foo"
+}
+
+fn (o Other) show() string {
+	return "other"
+}
+
+fn (n Name) up() string {
+	return "name"
+}
+
+fn (o Other) up() string {
+	return "other"
+}
+
+fn (u User) ok() bool {
+	return true
+}
+
+fn (o Other) ok() bool {
+	return false
+}
+
+// a type"s own map, whose lambda takes a Foo, not an element
+fn (s Stream) map(f fn (Foo) string) []string {
+	return s.items.map(f)
+}
+
+fn apply(f fn (Foo) string) string {
+	return f(Foo{})
+}
+
+fn jts[T](a []T, f fn (T) string) string {
+	return f(a[0])
+}
+
+fn only[T](call fn (a T) string) string {
+	return "only"
+}
+
+fn g[T](v T) string {
+	return v.show()
+}
+
+fn own_map(s Stream) []string {
+	return s.map(|x| x.show())
+}
+
+fn alias_map(us Users) []string {
+	return us.map(|x| x.name.up())
+}
+
+fn alias_own_map(ns Names) []string {
+	return ns.map(|x| x.show())
+}
+
+fn field_path(a []User) string {
+	return jts(a, |x| x.name.up())
+}
+
+fn nested_it(gs []Group) []Group {
+	return gs.filter(it.users.any(|u| u.ok()))
+}
+
+fn type_arg_only() string {
+	return only[Foo](|y| y.show())
+}
+
+fn generic_field[T](a T, b T) string {
+	return jts([a, b], |x| x.name.up())
+}
+
+fn sort_cmp(mut xs []User) {
+	xs.sort_with_compare(fn (a &User, b &User) int {
+		return 0
+	})
+	xs.sort(|a, b| a.ok() && !b.ok())
+}
+
+fn into_generic(a []Foo) string {
+	return jts(a, |x| g(x))
+}
+
+fn main() {
+	println(own_map(Stream{[Foo{}]}))
+	println(alias_map([User{}]))
+	println(alias_own_map(Names([User{}])))
+	println(field_path([User{}]))
+	println(nested_it([Group{[User{}]}]).len)
+	println(type_arg_only())
+	println(generic_field(User{}, User{}))
+	mut us := [User{}, User{}]
+	sort_cmp(mut us)
+	println(into_generic([Foo{}]))
+}'
+	})
+	on := fn [g] (f string) []string {
+		return static_calls(g, f).filter(it.all_before(':').all_after_last('.') in ['show', 'up', 'ok'])
+	}
+	for f in ['own_map', 'alias_own_map', 'type_arg_only', 'g'] {
+		assert on(f) == ['p.Foo.show:inferred'], f
+	}
+	for f in ['alias_map', 'field_path', 'generic_field'] {
+		assert on(f) == ['p.Name.up:inferred'], f
+	}
+	for f in ['nested_it', 'sort_cmp'] {
+		assert on(f) == ['p.User.ok:inferred'], f
+	}
+}
