@@ -19410,3 +19410,117 @@ fn main() {
 	assert static_calls(g, 'pattern') == ['p.Expect[Box[T]].m:inferred', 'p.Expect[[]T].m:inferred',
 		'p.Expect[map[K]V].m:inferred', 'p.Pair[T, []U].n:inferred', 'println:extracted']
 }
+
+// compiled with V3, which prints `prim` for on_value, on_field, on_chain and on_both, `kind` for in_block
+// and negated, and `6`. After an assert, -old-compiler calls a sum type's own method and refuses
+// `s.side()`, a method only the interface's variant declares. An
+// `assert x is T` narrows what follows it as an `if` does its block, and its message runs where the
+// check failed.
+fn test_an_assert_narrows_what_follows_it() {
+	g := extract_graph_of({
+		'p/main.v': 'module main
+
+struct Alias {
+	base &Kind
+}
+
+struct Prim {
+	bits int
+}
+
+type Kind = Alias | Prim
+
+fn (k Kind) label() string {
+	return "kind"
+}
+
+fn (p Prim) label() string {
+	return "prim"
+}
+
+struct Other {}
+
+fn (o Other) label() string {
+	return "other"
+}
+
+interface Shape {
+	area() int
+}
+
+struct Sq {}
+
+fn (s Sq) area() int {
+	return 4
+}
+
+fn (s Sq) side() int {
+	return 2
+}
+
+fn on_value(k Kind) string {
+	assert k is Prim
+	return k.label()
+}
+
+fn on_field(a Alias) string {
+	assert a.base is Prim
+	return a.base.label()
+}
+
+fn on_chain(k Kind) string {
+	assert k is Alias
+	b := k.base
+	assert b is Prim
+	return b.label()
+}
+
+fn on_both(k Kind) string {
+	assert k is Alias && k.base is Prim
+	return k.base.label()
+}
+
+fn in_message(k Kind) string {
+	assert k is Prim, k.label()
+	return ""
+}
+
+fn in_block(k Kind) string {
+	if k is Prim {
+		assert k is Prim
+	}
+	return k.label()
+}
+
+fn negated(k Kind) string {
+	assert k !is Alias
+	return k.label()
+}
+
+fn on_iface(s Shape) int {
+	assert s is Sq
+	return s.area() + s.side()
+}
+
+fn main() {
+	p := Kind(Prim{8})
+	a := Alias{&p}
+	println(on_value(p))
+	println(on_field(a))
+	println(on_chain(Kind(a)))
+	println(on_both(Kind(a)))
+	println(in_block(p))
+	println(negated(p))
+	println(on_iface(Sq{}))
+	println(Other{}.label())
+}
+'
+	})
+	for f in ['on_value', 'on_field', 'on_chain', 'on_both'] {
+		assert static_calls(g, f) == ['p.Prim.label:inferred'], f
+	}
+	for f in ['in_message', 'in_block', 'negated'] {
+		assert static_calls(g, f) == ['p.Kind.label:extracted'], f
+	}
+	assert static_calls(g, 'on_iface') == ['p.Sq.area:inferred', 'p.Sq.side:extracted']
+}
