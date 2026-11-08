@@ -920,6 +920,36 @@ it was:
   instances opaque), from `x.$method()`'s result, or from a generic call's result used directly, around
   a parameter (`pop(mut t Queue[T])`) or of a method's own type parameter, stay as they were.
 
+**Types named without a capital, and receivers of one instantiation (November 2026).** A
+`@[generated]` module may name a type without a capital, `_zbr_ty_Point`, which the walk can't tell
+from a const and records as a value (`g:_zbr_ty_Point`). Where the caller sees a type of that name
+(`lowercase_type`), a method call on it is the type's static, `_zbr_ty_Point.new(4)`, that static's
+result types what is called on it, and a call through a module, `zbrgen._zbr_ty_Value(v)`, where no
+function of the name resolves, is a conversion to the type, as a bare one of the caller's own module
+already was. The type comes before a const of its name: V refuses the two in one module, and reads
+`array.first()` beside a `const array` as builtin's array. A generic type may declare a method for one
+instantiation and one of the same name for a pattern, `fn (e Expect[[]int]) m()` and
+`fn (e Expect[[]T]) m()`: a receiver calls the one declared for its own type arguments, else the one
+pattern they fit (`instance_method`, `fits_pattern`), and an alias names the type it stands for.
+
+On vlang `95a0d5191f`: unresolved calls 59 to 45, the fourteen sites of these shapes. What stays open
+or as it was:
+
+- A `match` branch on a type named without a capital doesn't type the subject (`match_pattern_type`
+  reads a capital), nor does a generic argument named so (`make[_ty_a]()`): a call on either value
+  stays open, as before. A smartcast by `is` does type it.
+- A pattern method's result, `T` of `fn (e Expect[[]T]) first() T`, isn't put in place of `T`, so a
+  call on it stays open, as before.
+- Types are compared by name, as a caller qualifies one (`lib.Item`) and its declaration doesn't:
+  `Expect[[]lib.Item]` then fits both an own `Expect[[]Item]` method and the pattern, and stays open
+  where V calls the pattern's.
+- A call through a type parameter, `e.m()` in `fn run[T](e Expect[T])`, stays open, as before. The
+  compilers differ there: for `run(Expect[[]int]{})` V3 calls the pattern's `m` and `-old-compiler`
+  the one declared for `[]int`.
+- Two patterns that both fit, `Expect[T]` and `Expect[[]T]` for `Expect[[]int]`, leave the call open:
+  neither of V's compilers builds that program. A pattern of another form, `Expect[&T]`, fits only
+  itself.
+
 The raw edge is retained and `explain` reports ambiguous callers rather than
 inventing links. A future opt-in deep mode could run the checker over a whole
 project, but given the small remainder, it would need to address these

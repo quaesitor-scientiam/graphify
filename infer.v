@@ -296,6 +296,20 @@ fn (inf &Infer) conversion(e Edge) ?string {
 	return id
 }
 
+// qualified_conversion is the type a call through a module converts to: `zbrgen._zbr_ty_Value(v)`
+// of a type named without a capital (lowercase_type), which V's parser reads as a call where no
+// `@[generated]` declaration of the file names it. A capitalized one is a cast already. none where
+// a function of the name resolves.
+fn (inf &Infer) qualified_conversion(e Edge) ?TypeCand {
+	if e.is_method || !e.to.contains('.') {
+		return none
+	}
+	if _ := resolve_qualified_callee(e, inf.by_name, inf.site_of, inf.scope_of) {
+		return none
+	}
+	return inf.lowercase_type(e.to, e.file)
+}
+
 // resolve_const_callee resolves a call of a name no function has to the one constant or
 // global of that name the caller can see (see infer_call). Unlike resolve_callee, which takes a name
 // that is unique in the whole graph, it needs visibility, so a constant of an unrelated,
@@ -598,6 +612,18 @@ fn (inf &Infer) follow_steps(e Edge, depth int) ?InferredType {
 	} else if start.starts_with('agf:') {
 		t = inf.aggregate_field(start[4..], e.file)?
 	} else if start.starts_with('g:') {
+		// `_zbr_ty_Point.new(4)` of a type named without a capital, which the walk took for a
+		// method of a value: the static's result, as `c:` of a capitalized one reads it
+		if steps.len > 1 && steps[1].starts_with('m:') && inf.lowercase_type(start[2..], e.file) != none {
+			mut call := 'c:${start[2..]}__static__${steps[1][2..]}'
+			for step in steps[2..] {
+				call += recipe_sep + step
+			}
+			return inf.follow_steps(Edge{
+				...e
+				recv_recipe: call
+			}, depth)
+		}
 		if c := inf.find_const(start[2..], e.file) {
 			if depth >= const_depth {
 				return none
@@ -975,6 +1001,9 @@ fn (inf &Infer) call_result(e Edge, to string, steps []string, depth int) ?Infer
 	mut t := InferredType{}
 	mut id := ''
 	if call.to.contains('.') {
+		if conv := inf.qualified_conversion(call) {
+			return conv.as_type()
+		}
 		id = (resolve_qualified_callee(call, inf.by_name, inf.site_of, inf.scope_of)?).id
 		t = inf.returns(id)?
 	} else if res := resolve_callee(call, inf.by_name, inf.site_of, inf.imports_of) {
@@ -1629,7 +1658,9 @@ fn (inf &Infer) only_array_method(cands []CallCand, name string) ?string {
 
 // pick_method keeps the methods declared on `owner` and narrows them the way
 // resolve_by_receiver_type does: the type's own file, its module, then a module
-// its qualifier names, or builtin.
+// its qualifier names, or builtin. Where a tier holds several methods of one generic
+// type, each for other type arguments, the receiver's own arguments pick one
+// (instance_method).
 fn (inf &Infer) pick_method(cands []CallCand, name string, owner string, qual string, t InferredType, file string) ?string {
 	mut same_file := []CallCand{}
 	mut own_mod := []CallCand{}
@@ -1658,13 +1689,83 @@ fn (inf &Infer) pick_method(cands []CallCand, name string, owner string, qual st
 			reachable << c
 		}
 	}
-	if id := only_id(same_file) {
+	for tier in [same_file, own_mod, if qual != '' { exact_calls(reachable, qual) } else { reachable }] {
+		if id := only_id(tier) {
+			return id
+		}
+		if id := instance_method(tier, name, bare_type(t.text)) {
+			return id
+		}
+	}
+	return none
+}
+
+// instance_method is the one of several methods `name` declared on one generic type for different
+// instantiations, `fn (e Expect[[]int]) m()` and `fn (e Expect[[]T]) m()`, that a receiver of type
+// `text` (`Expect[[]string]`) calls, as V picks it: the one declared for text's own type arguments,
+// else the one whose pattern they fit (fits_pattern). The methods are all of one type, as pick_method keeps
+// them. none when text has no type arguments or no one method is left: `Expect[T]` and `Expect[[]T]`
+// both fit `Expect[[]int]`, a program neither of V's compilers builds.
+fn instance_method(cands []CallCand, name string, text string) ?string {
+	args := split_type_args(text).map(it.replace(' ', ''))
+	if args.len == 0 || cands.len < 2 {
+		return none
+	}
+	mut exact := []CallCand{}
+	mut fitting := []CallCand{}
+	for c in cands {
+		id := c.id.all_before('@')
+		dargs := split_type_args(id[c.mod.len + 1..id.len - name.len - 1]).map(it.replace(' ', ''))
+		if dargs == args {
+			exact << c
+		}
+		if all_fit(dargs, args) {
+			fitting << c
+		}
+	}
+	if id := only_id(exact) {
 		return id
 	}
-	if id := only_id(own_mod) {
-		return id
+	return if exact.len == 0 { only_id(fitting) } else { none }
+}
+
+// fits_pattern reports whether the type `typ` is an instance of the receiver pattern `pat`, each type
+// parameter of which (`T`, `K`) stands for any type: `[]string` fits `[]T`, `map[string]int` fits
+// `map[K]V`, `Box[int]` fits `Box[T]`, `[]int` fits `T` but not `map[K]V`. A parameter is free each
+// time, as V builds no receiver that names one twice (`Two[T, T]`: unknown method). A named type is
+// compared by its name, as a caller qualifies it (`toml.Any`) and the declaration does not. Any other
+// form, `&T` among them, fits only itself.
+fn fits_pattern(pat string, typ string) bool {
+	if is_generic_param(pat) {
+		return true
 	}
-	return only_id(if qual != '' { exact_calls(reachable, qual) } else { reachable })
+	if pat.starts_with('map[') {
+		pk, pv := map_parts(pat) or { return false }
+		tk, tv := map_parts(typ) or { return false }
+		return typ.starts_with('map[') && fits_pattern(pk, tk) && fits_pattern(pv, tv)
+	}
+	if pat.starts_with('[') {
+		// `[]T` and `[3]T`: the same brackets, then an element that fits
+		end := pat.index(']') or { return false }
+		return typ.starts_with(pat[..end + 1]) && fits_pattern(pat[end + 1..], typ[end + 1..])
+	}
+	if strip_generic_args(pat).all_after_last('.') != strip_generic_args(typ).all_after_last('.') {
+		return false
+	}
+	return all_fit(split_type_args(pat), split_type_args(typ))
+}
+
+// all_fit reports whether each type of `types` fits the pattern at its place in `pats` (fits_pattern).
+fn all_fit(pats []string, types []string) bool {
+	if pats.len != types.len {
+		return false
+	}
+	for i, p in pats {
+		if !fits_pattern(p, types[i]) {
+			return false
+		}
+	}
+	return true
 }
 
 // owner_method is the method `name` declared on the array or map type `text` names,
@@ -1795,6 +1896,24 @@ fn (inf &Infer) enum_type(name string, file string) ?InferredType {
 		return none
 	}
 	return decl.as_type()
+}
+
+// lowercase_type is the type that `name`, which the walk recorded as a value (`g:name`) or a
+// function, names as `file` sees it: `_zbr_ty_Point` of `_zbr_ty_Point.new(4)`, or
+// `zbrgen._zbr_ty_Value` of `zbrgen._zbr_ty_Value(v)`. A `@[generated]` or `@[translated]` module
+// may name a type without a capital, which the walk can't tell from a const by its name, as V's
+// parser can't without the module's declarations (is_generated_type_name); a capitalized name it
+// already reads as a type (V3File.callee) or a cast. The type comes first, as V reads
+// `array.first()` beside a `const array` as a static of builtin's array, and refuses a const of a
+// type's name in one module. none for a C or JS name.
+fn (inf &Infer) lowercase_type(name string, file string) ?TypeCand {
+	short := name.all_after_last('.')
+	qual := if name.contains('.') { name.all_before_last('.') } else { '' }
+	if short == '' || qual in ['C', 'JS'] || qual.starts_with('JS.') {
+		return none
+	}
+	scope := inf.scope_of[file] or { FileScope{} }
+	return inf.find_type(short, qual, InferredType{ mod: scope.mod, file: file }, file)
 }
 
 // is_enum reports whether `t` names an enum.

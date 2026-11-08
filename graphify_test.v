@@ -19236,3 +19236,177 @@ fn main() {
 		'p.Baz.str:inferred', 'p.Foo.str:inferred']
 	assert plain_calls(g, 'take', 'str') == ['p.Bar.str:inferred']
 }
+
+// compiled with V3, which prints `5`, `3`, `20`, `_ty_val(gen._ty_vec{ x: 1 })` and `val`; -old-compiler
+// refuses `fn _ty_point.new`, as V 0.5.2 has no `@[generated]` modules. A type named without a
+// capital, which such a module may declare, is still a type: its static, the static's result, a
+// conversion to it through its module and that conversion's result. A const named so is still a value.
+fn test_a_type_named_without_a_capital_is_a_type() {
+	g := extract_graph_of({
+		'p/main.v':    '@[generated]
+module main
+
+import gen
+
+const _c_list = [3, 4]
+
+struct _ty_point {
+	x int
+}
+
+fn _ty_point.new(x int) _ty_point {
+	return _ty_point{
+		x: x
+	}
+}
+
+fn (p _ty_point) sum() int {
+	return p.x + 1
+}
+
+struct Other {}
+
+fn (o Other) sum() int {
+	return 0
+}
+
+fn (o Other) first() int {
+	return 0
+}
+
+fn (o Other) kind() string {
+	return "other"
+}
+
+fn local() {
+	println(_ty_point.new(4).sum())
+	println(_c_list.first())
+}
+
+fn remote() {
+	println(gen._ty_vec.make(2).total())
+	v := gen._ty_val(gen._ty_vec.make(1))
+	println(v)
+	println(gen._ty_val(1).kind())
+}
+
+fn main() {
+	local()
+	remote()
+}
+'
+		'p/gen/gen.v': '@[generated]
+module gen
+
+pub struct _ty_vec {
+pub:
+	x int
+}
+
+pub fn _ty_vec.make(x int) _ty_vec {
+	return _ty_vec{
+		x: x
+	}
+}
+
+pub fn (v _ty_vec) total() int {
+	return v.x * 10
+}
+
+pub type _ty_val = _ty_vec | int
+
+pub fn (v _ty_val) kind() string {
+	return "val"
+}
+'
+	})
+	assert static_calls(g, 'local') == ['first:undeclared', 'p._ty_point.sum:inferred',
+		'p._ty_point__static__new:extracted', 'println:extracted']
+	assert static_calls(g, 'remote') == ['p.gen._ty_val.kind:inferred', 'p.gen._ty_val:inferred', 'p.gen._ty_vec.total:extracted',
+		'p.gen._ty_vec__static__make:extracted', 'println:extracted']
+}
+
+// compiled with V3, which prints `exact list`, `exact list`, `exact map`, `exact pair`, `exact box`,
+// then `list pattern`, `map pattern`, `pair pattern`, `box pattern`; -old-compiler refuses the
+// `Expect[Box[T]]` pattern, and prints the rest so without the boxes. Of the methods of one name a generic type declares
+// for an instantiation and for a pattern, a receiver calls the one of its own type arguments, else
+// the pattern they fit; an alias names the type it stands for.
+fn test_a_method_declared_for_an_instantiation_comes_before_a_pattern() {
+	g := extract_graph_of({
+		'p/a.v': 'module main
+
+struct Expect[T] {
+	value T
+}
+
+type IntList = Expect[[]int]
+
+type StrMap = Expect[map[string]int]
+
+struct Pair[T, U] {
+	a T
+	b U
+}
+
+fn (e Expect[[]int]) m() string {
+	return "exact list"
+}
+
+fn (e Expect[[]T]) m() string {
+	return "list pattern"
+}
+
+fn (e Expect[map[string]int]) m() string {
+	return "exact map"
+}
+
+fn (e Expect[map[K]V]) m() string {
+	return "map pattern"
+}
+
+fn (p Pair[int, []string]) n() string {
+	return "exact pair"
+}
+
+fn (p Pair[T, []U]) n() string {
+	return "pair pattern"
+}
+
+struct Box[T] {
+	v T
+}
+
+fn (e Expect[Box[int]]) m() string {
+	return "exact box"
+}
+
+fn (e Expect[Box[T]]) m() string {
+	return "box pattern"
+}
+
+fn exact() {
+	println(Expect[[]int]{}.m())
+	println(IntList{}.m())
+	println(StrMap{}.m())
+	println(Pair[int, []string]{}.n())
+	println(Expect[Box[int]]{}.m())
+}
+
+fn pattern() {
+	println(Expect[[]string]{}.m())
+	println(Expect[map[string]bool]{}.m())
+	println(Pair[int, []bool]{}.n())
+	println(Expect[Box[string]]{}.m())
+}
+
+fn main() {
+	exact()
+	pattern()
+}
+'
+	})
+	assert static_calls(g, 'exact') == ['p.Expect[Box[int]].m:extracted', 'p.Expect[[]int].m:extracted',
+		'p.Expect[map[string]int].m:inferred', 'p.Pair[int, []string].n:extracted', 'println:extracted']
+	assert static_calls(g, 'pattern') == ['p.Expect[Box[T]].m:inferred', 'p.Expect[[]T].m:inferred',
+		'p.Expect[map[K]V].m:inferred', 'p.Pair[T, []U].n:inferred', 'println:extracted']
+}
