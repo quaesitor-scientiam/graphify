@@ -1000,6 +1000,24 @@ is marked undeclared, as 658 other `str` calls of that tree are: it holds two bu
 `spydr06`'s, and which one's `int` a call means isn't picked (a tree with only the first links
 `int.str`). The other trees don't change.
 
+**What a type parameter's name is (November 2026).** V's parser takes a generic parameter's name to be
+exactly one capital letter ("generic parameter name needs to be exactly one char"). The graph read a
+type of one or two characters starting with a capital as a type parameter where it collects a generic
+function's instances from its arguments (`collect_call_sites`) and where it types a lambda's parameter
+from a method's or a function value's declared type, so an argument of a type named `Aa` or `ID` was
+never an instance, and a lambda's parameter of that type had none. Those now use `is_generic_param`,
+V's rule, which the rest of the graph already used, and so does the check on a written type argument,
+`f[ID]()`, though nothing changes there: that name is read with its module, `main.ID`, and was an
+instance before. A type named with one capital letter (`struct S`) still reads as a type parameter
+when it is an argument's type or a lambda parameter's: V allows the name, and the graph can't tell the
+two apart from the text.
+
+On vlang `95a0d5191f`: unresolved calls 37 to 36. `obj.dump()` in
+`generic_fn_multi_mutable_struct_test.v`, `Foo.set[T]` called with `Aa` and `Bb`, links both `dump`
+methods. `val.str()` in `comptime_var_param_test.v`, called with `Aa`, now has that instance but stays
+open: its field loop passes `val.$(field.name)` on, which gives no instance yet. The other trees don't
+change.
+
 The raw edge is retained and `explain` reports ambiguous callers rather than
 inventing links. A future opt-in deep mode could run the checker over a whole
 project, but given the small remainder, it would need to address these

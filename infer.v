@@ -1222,8 +1222,8 @@ fn (inf &Infer) method_lambda_param(t InferredType, step string, file string) ?I
 	sig := inf.sig_of[id] or { return none }
 	// the parameters past the receiver, `fn (b Box) each(f fn (Item))`
 	pt := lambda_param_text(sig.all_after(') '), parts[1].int(), parts[2].int())?
-	if is_type_param_text(strip_generic_args(bare_type(pt)).all_after_last('.'))
-		|| split_type_args(pt).any(is_type_param_text(it)) {
+	if is_generic_param(strip_generic_args(bare_type(pt)).all_after_last('.'))
+		|| split_type_args(pt).any(is_generic_param(it)) {
 		return none
 	}
 	site := inf.decl_site(id, inf.name_of[id] or { return none })?

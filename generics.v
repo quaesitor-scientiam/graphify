@@ -145,7 +145,7 @@ fn collect_call_sites(edges []Edge, funcs map[string]Symbol, mut inf Infer, mut 
 						given << tps[j]
 						continue
 					}
-					if is_type_param_text(name) {
+					if is_generic_param(name) {
 						continue
 					}
 					put_instance(mut instances, dst, InferredType{
@@ -213,7 +213,7 @@ fn collect_call_sites(edges []Edge, funcs map[string]Symbol, mut inf Infer, mut 
 						given << tp
 						continue
 					}
-					if is_type_param_text(text) {
+					if is_generic_param(text) {
 						continue
 					}
 					put_instance(mut instances, dst, InferredType{
@@ -1294,12 +1294,6 @@ fn (inf &Infer) is_struct_type(t InferredType) ?bool {
 fn method_owner(s Symbol) string {
 	id := s.id.all_before('@')
 	return strip_generic_args(id[..id.len - s.name.len - 1])
-}
-
-// is_type_param_text reports whether a type text is a single capital letter, as a
-// type parameter is written (`T`, `R`, `K`).
-fn is_type_param_text(t string) bool {
-	return t.len > 0 && t.len <= 2 && t[0] >= u8(`A`) && t[0] <= u8(`Z`)
 }
 
 // param_types are the type texts of a function's parameters, read from its signature
