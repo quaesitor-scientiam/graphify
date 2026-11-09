@@ -25,9 +25,8 @@
 // as fast at about 1.6 times the peak memory, with the same graph. bin/graphify keeps
 // the GC, as a command that holds a graph and works on it would otherwise only grow:
 // `export html` takes 17 GB on the V repo, and hands its own `extract` over to the
-// extractor. On Windows, where -prealloc has not been run, when this build fails, and
-// when bin/graphify is not the build the extractor was made with, as after a rebuild by
-// hand or a restore, bin/graphify extracts.
+// extractor. When this build fails, and when bin/graphify is not the build the extractor
+// was made with, as after a rebuild by hand or a restore, bin/graphify extracts.
 //
 // -Commit makes two machines extract exactly the same source: it fast-forwards
 // the repo to that commit and never moves it back or off its branch.
@@ -98,7 +97,7 @@ const stamp_name = '.build-stamp'
 
 // the -prealloc CLI that extracts, beside bin/graphify, and the file beside it naming
 // the CLI it was built with (graphify.extractor_of)
-const extractor_name = 'graphify-extract'
+const extractor_name = $if windows { 'graphify-extract.exe' } $else { 'graphify-extract' }
 const extractor_pair_suffix = '.cli-hash'
 
 // the lock a run holds while it pulls, builds and extracts: a directory in the
@@ -442,14 +441,9 @@ fn remove_build_leftovers(bin_dir string) {
 	}
 }
 
-// extractor_path is where the extractor is built for the CLI `exe`: beside it, or on
-// Windows, where none is, `exe` itself.
+// extractor_path is where the extractor is built for the CLI `exe`: beside it.
 fn extractor_path(exe string) string {
-	$if windows {
-		return exe
-	} $else {
-		return os.join_path(os.dir(exe), extractor_name)
-	}
+	return os.join_path(os.dir(exe), extractor_name)
 }
 
 // extract_binary is the binary that extracts, as graphify.extract_handover picks it:
@@ -473,7 +467,7 @@ fn rebuild_if_stale(log_path string, root string, exe string) !bool {
 	stamp_path := os.join_path(root, 'bin', stamp_name)
 	old := os.read_file(stamp_path) or { '' }
 	extractor := extractor_path(exe)
-	if old == stamp && os.exists(exe) && (extractor == exe || os.exists(extractor)) {
+	if old == stamp && os.exists(exe) && os.exists(extractor) {
 		return false
 	}
 	log_line(log_path, 'graphify is out of date; rebuilding...')
@@ -484,22 +478,20 @@ fn rebuild_if_stale(log_path string, root string, exe string) !bool {
 	// the others only serve the graph: a failure is logged, the extract goes
 	// ahead, and the stamp stays old so the next run tries them again
 	mut all_built := true
-	if extractor != exe {
-		pair := extractor + extractor_pair_suffix
-		// the CLI just built, whatever replaces it during the slow build below
-		cli_hash := sha256.hexhash(os.read_file(exe)!)
-		// an extractor of older code must not extract: until this build, bin/graphify does
-		os.rm(pair) or {}
-		mut extractor_built := true
-		build_one(log_path, v_exe, extractor, true, ['-prealloc', 'cmd/cli']) or {
-			log_line(log_path, 'WARNING: ${err}')
-			all_built = false
-			extractor_built = false
-			os.rm(extractor) or {}
-		}
-		if extractor_built {
-			os.write_file(pair, cli_hash)!
-		}
+	pair := extractor + extractor_pair_suffix
+	// the CLI just built, whatever replaces it during the slow build below
+	cli_hash := sha256.hexhash(os.read_file(exe)!)
+	// an extractor of older code must not extract: until this build, bin/graphify does
+	os.rm(pair) or {}
+	mut extractor_built := true
+	build_one(log_path, v_exe, extractor, true, ['-prealloc', 'cmd/cli']) or {
+		log_line(log_path, 'WARNING: ${err}')
+		all_built = false
+		extractor_built = false
+		os.rm(extractor) or {}
+	}
+	if extractor_built {
+		os.write_file(pair, cli_hash)!
 	}
 	mcp := os.join_path(root, 'bin', 'graphify-mcp' + ext)
 	if os.exists(mcp) {

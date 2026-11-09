@@ -127,7 +127,18 @@ fn cmd_extract(args []string) {
 		exe := os.executable()
 		extractor := graphify.extract_handover(exe)
 		if extractor != exe {
-			os.execvp(extractor, os.args[1..]) or {}
+			$if windows {
+				// Windows has no exec: _execvp starts the extractor and ends this process at
+				// once, so whatever waits on it (a shell, the updater, the MCP server) would go
+				// on before the extract is done. Run it on this process's standard streams, wait,
+				// and exit as it did; one that can't be started leaves this build to extract,
+				// as a failed exec does
+				if code := graphify.run_waiting(extractor, os.args[1..]) {
+					exit(code)
+				}
+			} $else {
+				os.execvp(extractor, os.args[1..]) or {}
+			}
 		}
 	}
 	path := positional(args, 0) or { '.' }

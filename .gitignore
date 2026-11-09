@@ -3,6 +3,7 @@ bin/graphify
 bin/graphify-mcp
 bin/graphify-extract
 bin/graphify-extract.cli-hash
+bin/graphify-extract.exe.cli-hash
 bin/graphify-hook
 bench/*.exe
 bench/*.def

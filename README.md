@@ -719,14 +719,18 @@ losing live strings to the garbage collector). If `v` isn't a git checkout, the
 stamp names its `vlib` and `thirdparty` directories instead. `-PrintStamp`
 prints the stamp and stops.
 
-Except on Windows, the script also builds `bin/graphify-extract`, the CLI with
-`-prealloc`, and extracts with it: on the V repo, about 4 s against 8 s and 4.2 GB against
-2.6 GB, with the same graph. `bin/graphify` keeps the garbage collector, as a command that
-works on a whole graph needs it: `export html` takes 17.5 GB under `-prealloc`, against
-2.5 GB. Its `extract` hands over to the extractor, so a worktree's or a hook's graph has
-the same hash and shares its cache. `bin/graphify-extract.cli-hash` says which CLI each
-extractor was built with. `bin/graphify` extracts itself if that build fails, on Windows,
-where `-prealloc` has not been run, when it is another build than the extractor's, as after
+The script also builds `bin/graphify-extract` (`graphify-extract.exe` on Windows), the CLI
+with `-prealloc`, and extracts with it: on the V repo, about 4 s against 8 s and 4.2 GB against
+2.6 GB, with the same graph. On one Windows machine, with the repo on a mirror of hard disks
+and an antivirus watching it, it took 15 to 27 s against 31 to 40 s, and 4.5 GB against
+3.1 GB; with the antivirus paused, as little as 9 s.
+`bin/graphify` keeps the garbage collector, as a command that works on a whole graph needs
+it: `export html` takes 17.5 GB under `-prealloc`, against 2.5 GB. Its `extract` hands over
+to the extractor, so a worktree's or a hook's graph has the same hash and shares its cache;
+on Windows, which has no `exec`, it runs the extractor, waits for it and exits with its code.
+`bin/graphify-extract.cli-hash` (`graphify-extract.exe.cli-hash` on Windows) says which CLI
+each extractor was built with. `bin/graphify` extracts itself if that build fails, when the
+extractor can't be started, when it is another build than the extractor's, as after
 a rebuild by hand or a restore from a backup, and with `GRAPHIFY_NO_EXTRACTOR=1`, which
 the script honours too, say if an extract runs out of memory under `-prealloc`, and which
 `bench/extract_bench.vsh` sets so that it times the binary it names.
