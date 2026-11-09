@@ -2500,7 +2500,7 @@ fn (f &V3File) lambda_recipes(callee flat.NodeId, j int, lam flat.NodeId, ctx V3
 		held := ctx.locals[name] or { '' }
 		for k in 0 .. count {
 			pt := lambda_param_text(held, j, k) or { '' }
-			out << if pt == '' || is_type_param_text(pt) || split_type_args(pt).any(is_type_param_text(it)) {
+			out << if pt == '' || is_generic_param(pt) || split_type_args(pt).any(is_generic_param(it)) {
 				''
 			} else {
 				't:' + f.type_text(pt)

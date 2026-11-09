@@ -19825,3 +19825,87 @@ fn main() {
 		assert on(f) == ['p.User.ok:inferred'], f
 	}
 }
+
+// compiled with V3, which prints Aa, ID, Aa, Aa, ID and Other. V's parser takes a type parameter's
+// name to be exactly one capital letter, so Aa and ID are types: an argument of one is an instance
+// of the generic it is passed to, and a lambda's parameter typed by one has it, whether the lambda
+// is passed to a generic function, a method or a function value. A written type argument,
+// `by_type_arg[ID]`, is read with its module and was an instance before too.
+fn test_a_two_letter_type_name_is_a_type_not_a_type_parameter() {
+	g := extract_graph_of({
+		'p/main.v': 'module main
+
+struct Aa {}
+
+struct ID {}
+
+struct Other {}
+
+fn (a Aa) show() string {
+	return "Aa"
+}
+
+fn (i ID) show() string {
+	return "ID"
+}
+
+fn (o Other) show() string {
+	return "Other"
+}
+
+fn by_arg[T](v T) string {
+	return v.show()
+}
+
+fn by_type_arg[T]() string {
+	v := T{}
+	return v.show()
+}
+
+fn by_lambda[T](v T, f fn (T) string) string {
+	return f(v)
+}
+
+fn on_arg() string {
+	return by_arg(Aa{})
+}
+
+fn on_type_arg() string {
+	return by_type_arg[ID]()
+}
+
+fn on_lambda() string {
+	return by_lambda(Aa{}, |x| x.show())
+}
+
+struct Box {}
+
+fn (b Box) each(f fn (Aa) string) string {
+	return f(Aa{})
+}
+
+fn on_method_lambda() string {
+	return Box{}.each(|x| x.show())
+}
+
+fn on_fn_param(run fn (fn (ID) string) string) string {
+	return run(|x| x.show())
+}
+
+fn main() {
+	println(on_arg())
+	println(on_type_arg())
+	println(on_lambda())
+	println(on_method_lambda())
+	println(on_fn_param(fn (f fn (ID) string) string {
+		return f(ID{})
+	}))
+	println(Other{}.show())
+}'
+	})
+	assert static_calls(g, 'by_arg').filter(it.contains('show')) == ['p.Aa.show:inferred']
+	assert static_calls(g, 'by_type_arg').filter(it.contains('show')) == ['p.ID.show:inferred']
+	assert static_calls(g, 'on_lambda').filter(it.contains('show')) == ['p.Aa.show:inferred']
+	assert static_calls(g, 'on_method_lambda').filter(it.contains('show')) == ['p.Aa.show:inferred']
+	assert static_calls(g, 'on_fn_param').filter(it.contains('show')) == ['p.ID.show:inferred']
+}
