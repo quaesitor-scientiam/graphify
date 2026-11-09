@@ -887,14 +887,45 @@ fn instance_scope(t InferredType, file string, inf &Infer) string {
 // parameter's instances: `ctx.req.header.get()` on a `ctx T` walks the recipe `t:T | f:req |
 // f:header` from each instance of T in place of T, in the file the instance is written in,
 // and finds `get` on the header the instance's field has. Empty unless the recipe starts at a
-// type parameter and has steps after it.
+// type parameter, an element of a `[]T` or a lambda's parameter typed T, and has steps after it.
 fn path_method_ids(e Edge, caller Symbol, tps []string, instances map[string][]InferredType, mut inf Infer) []string {
 	steps := e.recv_recipe.split(recipe_sep)
-	if steps.len < 2 || !steps[0].starts_with('t:') {
+	if steps.len < 2 {
 		return []string{}
 	}
-	tp := plain_param(steps[0][2..], '', tps) or { return []string{} }
-	rest := steps[1..].join(recipe_sep)
+	mut start := 1
+	mut tp := ''
+	if steps[0].starts_with('t:') {
+		// an element of a `[]T`, `x.name.up()` for `x` in `xs []T` (a `for` loop, `it`, or a lambda
+		// of builtin's array methods, whose `lm:` step is an element, see
+		// Infer.method_lambda_param), is a T: the path is walked from each instance as it is from a T
+		mut text := steps[0][2..]
+		elem_step := steps[1] == '[]'
+			|| (steps[1].starts_with('lm:') && steps[1][3..].all_before(':') in lambda_elem_methods)
+		if text.starts_with('[]') && elem_step && steps.len > 2 {
+			text = text[2..].trim_left('&')
+			start = 2
+		}
+		tp = plain_param(text, '', tps) or { return []string{} }
+	} else if steps[0].starts_with('lc:') {
+		// a lambda's parameter a call types as the caller's T, `ddd(|x, y| x.name.up(), a, b)` with
+		// `a T` (Infer.lambda_param): the path after its `lp:` step, as field_any_receiver follows
+		// a prefix to a type parameter
+		at := steps.index(steps.filter(it.starts_with('lp:'))[0] or { return []string{} })
+		if at + 1 >= steps.len {
+			return []string{}
+		}
+		t := inf.follow(Edge{
+			from:        e.from
+			file:        e.file
+			recv_recipe: steps[..at + 1].join(recipe_sep)
+		}) or { return []string{} }
+		tp = plain_param(t.text, t.mod, tps) or { return []string{} }
+		start = at + 1
+	} else {
+		return []string{}
+	}
+	rest := steps[start..].join(recipe_sep)
 	mut ids := []string{}
 	for t in guarded_instances(instances[instance_key(caller, tp)] or { []InferredType{} }, e.guards, tp, e.file, mut inf) {
 		// the instance as its own module writes it: the qualified `vlib.veb.tests.Context` does not
@@ -1307,7 +1338,10 @@ fn param_types(sig string) []string {
 				t = t[pre.len..]
 			}
 		}
-		if sp := t.index(' ') {
+		// a parameter of a function type written without names, `fn (fn (Foo) string)`, is all type
+		if t.starts_with('fn ') || t.starts_with('fn(') {
+			types << t
+		} else if sp := t.index(' ') {
 			types << t[sp + 1..].trim_space().trim_left('&')
 		} else {
 			types << t.trim_left('&')
