@@ -192,7 +192,17 @@ jobs:
 
       # -prealloc frees only whole arenas (graphify.v), and prealloc_no_recycle unmaps
       # their memory as it goes, so a use of what was freed crashes instead of reading
-      # as it did. Not on Windows, where the updater extracts with the GC build.
+      # as it did (on Windows, freed memory doesn't fault: see
+      # test_a_prealloc_extract_uses_nothing_it_has_freed).
+      - name: Run tests with -prealloc (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          v -prealloc test .
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          v -prealloc -d prealloc_no_recycle test .
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Run tests with -prealloc
         if: runner.os != 'Windows'
         shell: bash
@@ -243,6 +253,17 @@ jobs:
 
       # What the updater extracts with (bin/graphify-extract): the same graph as the
       # GC build's, which the other OSes are compared with below.
+      - name: Extract the pinned vlang tree with -prealloc (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          v -prod -prealloc -o bin/graphify-extract.exe cmd/cli
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          .\bin\graphify-extract.exe extract "$env:RUNNER_TEMP\vlang" --out "$env:RUNNER_TEMP\graph-out-prealloc"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          fc.exe /b "$env:RUNNER_TEMP\graph-out\graph.json" "$env:RUNNER_TEMP\graph-out-prealloc\graph.json" > $null
+          if ($LASTEXITCODE -ne 0) { Write-Error 'the -prealloc graph differs from the GC build''s'; exit 1 }
+
       - name: Extract the pinned vlang tree with -prealloc
         if: runner.os != 'Windows'
         shell: bash

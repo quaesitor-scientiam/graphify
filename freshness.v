@@ -3,9 +3,10 @@ module graphify
 import os
 
 // extractor_name is the CLI built with -prealloc that bin/update-vlang-graph.vsh
-// builds beside the one built with the GC. extractor_pair_suffix names the file beside
-// it that says which CLI it was built with: the hash of that CLI.
-const extractor_name = 'graphify-extract'
+// builds beside the one built with the GC, `graphify-extract.exe` on Windows.
+// extractor_pair_suffix names the file beside it that says which CLI it was built with:
+// the hash of that CLI.
+const extractor_name = $if windows { 'graphify-extract.exe' } $else { 'graphify-extract' }
 const extractor_pair_suffix = '.cli-hash'
 
 // no_extractor_env makes a CLI extract itself, for timing or comparing that build, or
@@ -15,9 +16,9 @@ const no_extractor_env = 'GRAPHIFY_NO_EXTRACTOR'
 
 // extractor_of is the binary that extracts for the CLI at `cli_exe`: the extractor
 // beside it, when it was built with this very CLI, or the CLI itself. A CLI rebuilt by
-// hand or restored from a backup is another build, so it goes on without the extractor,
-// as does Windows, where no extractor is built. `extract` hands over to this binary
-// (extract_handover), so each graph and cache of one build has the one hash.
+// hand or restored from a backup is another build, so it goes on without the extractor.
+// `extract` hands over to this binary (extract_handover), so each graph and cache of one
+// build has the one hash.
 pub fn extractor_of(cli_exe string) string {
 	extractor := os.join_path(os.dir(cli_exe), extractor_name)
 	paired := os.read_file(extractor + extractor_pair_suffix) or { return cli_exe }

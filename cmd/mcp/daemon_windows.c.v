@@ -5,6 +5,8 @@ module main
 // binary, beside the daemon's socket, as a process of its own with no console and
 // none of its handles, and the daemon writes its output to its log itself.
 
+import graphify
+
 // DaemonStartupInfo is Windows' STARTUPINFOW.
 struct DaemonStartupInfo {
 mut:
@@ -50,9 +52,9 @@ const error_access_denied = u32(5)
 // server from seeing its client go), and, when the job it is in allows it, out of
 // that job.
 fn start_detached(exe string, args []string) ! {
-	mut words := [win_quote(exe)]
+	mut words := [graphify.win_quote(exe)]
 	for a in args {
-		words << win_quote(a)
+		words << graphify.win_quote(a)
 	}
 	line := words.join(' ')
 	mut flags := detached_process | create_new_process_group | create_breakaway_from_job

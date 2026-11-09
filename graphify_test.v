@@ -13128,20 +13128,64 @@ fn test_a_prealloc_extract_uses_nothing_it_has_freed() {
 		assert want.len > 0
 		assert have == want, name
 	}
-	// a CLI's `extract` hands over to the extractor built with it, so the manifest names
-	// the binary that extracted, and not to one built with another CLI
+}
+
+// test_a_cli_hands_its_extract_to_the_extractor_built_with_it runs a GC-built CLI beside a
+// -prealloc extractor, as the updater installs them, on every OS. On Windows, which has no
+// exec, the CLI runs the extractor and waits for it: what calls it gets the extractor's
+// output and exit code, and the graph is there when it returns. One that can't be
+// started leaves the CLI to extract, on every OS.
+fn test_a_cli_hands_its_extract_to_the_extractor_built_with_it() {
+	dir := os.join_path(os.temp_dir(), 'graphify_handover_${os.getpid()}')
+	os.mkdir_all(dir) or { panic(err) }
+	defer {
+		os.rmdir_all(dir) or {}
+	}
+	vexe := @VEXE
+	cli := os.join_path(@DIR, 'cmd', 'cli')
+	ext := $if windows { '.exe' } $else { '' }
+	gc := os.join_path(dir, 'graphify' + ext)
 	extractor := os.join_path(dir, extractor_name)
 	pair := extractor + extractor_pair_suffix
-	os.cp(unmapping, extractor) or { panic(err) }
+	built := os.exec([vexe, '-o', gc, cli])
+	assert built.exit_code == 0, built.output
+	// trace_prealloc logs each of its arenas, which says the extractor ran
+	built2 := os.exec([vexe, '-prealloc', '-d', 'trace_prealloc', '-o', extractor, cli])
+	assert built2.exit_code == 0, built2.output
+	old_vroot := os.getenv('VROOT')
+	old_vmodules := os.getenv('VMODULES')
+	os.unsetenv(no_extractor_env)
+	os.setenv('VROOT', @VEXEROOT, true)
+	os.setenv('VMODULES', os.join_path(dir, 'no_vmodules'), true)
+	defer {
+		os.setenv('VROOT', old_vroot, true)
+		os.setenv('VMODULES', old_vmodules, true)
+	}
+	gc_out := os.join_path(dir, 'gc_out')
+	os.setenv(no_extractor_env, '1', true)
+	expected := os.exec([gc, 'extract', @DIR, '--out', gc_out])
+	os.unsetenv(no_extractor_env)
+	assert expected.exit_code == 0, expected.output
+	assert !expected.output.contains('[trace_prealloc]'), expected.output
+	gc_graph := os.read_file(os.join_path(gc_out, 'graph.json')) or { panic(err) }
+	// a CLI's `extract` hands over to the extractor built with it, so the manifest names
+	// the binary that extracted, and not to one built with another CLI
 	os.write_file(pair, file_hash(gc)) or { panic(err) }
-	handed := os.join_path(dir, 'handed_out')
+	// a space and a `%VAR%` reach the extractor as they are, quoted on Windows
+	handed := os.join_path(dir, 'handed out %PATH%')
 	over := os.exec([gc, 'extract', @DIR, '--out', handed])
 	assert over.exit_code == 0, over.output
 	assert over.output.contains('[trace_prealloc]'), over.output
+	assert over.output.contains('wrote ${handed}'), over.output
 	m := load_manifest(os.join_path(handed, 'manifest.json')) or { panic(err) }
 	assert m.binary_hash == file_hash(extractor)
-	gc_graph := os.read_file(os.join_path(dir, 'gc_out', 'graph.json')) or { panic(err) }
 	assert os.read_file(os.join_path(handed, 'graph.json')) or { panic(err) } == gc_graph
+	// the extractor's failure is the CLI's: an output that is a file can't be written
+	blocked := os.join_path(dir, 'a_file')
+	os.write_file(blocked, '') or { panic(err) }
+	failed := os.exec([gc, 'extract', @DIR, '--out', blocked])
+	assert failed.exit_code != 0, failed.output
+	assert failed.output.contains('[trace_prealloc]'), failed.output
 	os.write_file(pair, 'the hash of another CLI') or { panic(err) }
 	kept := os.join_path(dir, 'kept_out')
 	own := os.exec([gc, 'extract', @DIR, '--out', kept])
@@ -13156,6 +13200,33 @@ fn test_a_prealloc_extract_uses_nothing_it_has_freed() {
 	assert !opted.output.contains('[trace_prealloc]'), opted.output
 	km := load_manifest(os.join_path(kept, 'manifest.json')) or { panic(err) }
 	assert km.binary_hash == file_hash(gc)
+	// an extractor that can't be started leaves the CLI to extract, as a failed exec does:
+	// on Windows a file that is no program, elsewhere one that may not be run
+	os.rm(extractor) or { panic(err) }
+	os.write_file(extractor, 'not a program') or { panic(err) }
+	$if !windows {
+		os.chmod(extractor, 0o644) or { panic(err) }
+	}
+	unstartable := os.join_path(dir, 'unstartable_out')
+	itself := os.exec([gc, 'extract', @DIR, '--out', unstartable])
+	assert itself.exit_code == 0, itself.output
+	assert itself.output.contains('wrote ${unstartable}'), itself.output
+	um := load_manifest(os.join_path(unstartable, 'manifest.json')) or { panic(err) }
+	assert um.binary_hash == file_hash(gc)
+	assert os.read_file(os.join_path(unstartable, 'graph.json')) or { panic(err) } == gc_graph
+}
+
+// a Windows argument is quoted so that the program's argv reads it back as it was
+// (win_quote), as the CLI's extractor and the MCP server's daemon get theirs
+fn test_a_windows_argument_is_quoted_so_argv_reads_it_back() {
+	assert win_quote('--daemon') == '--daemon'
+	assert win_quote('C:\\graph data\\graph.json') == '"C:\\graph data\\graph.json"'
+	assert win_quote('') == '""'
+	// a quote, and the backslashes before it, are escaped
+	assert win_quote('a"b') == '"a\\"b"'
+	assert win_quote('a\\"b') == '"a\\\\\\"b"'
+	// backslashes before the closing quote are doubled; others are as they are
+	assert win_quote('C:\\a b\\') == '"C:\\a b\\\\"'
 }
 
 fn test_freeing_an_arena_hands_its_memory_back() {

@@ -81,17 +81,6 @@ fn test_a_daemon_running_from_a_copy_answers_for_the_binary_it_was_copied_from()
 	assert daemon_name(a) == here
 }
 
-fn test_a_windows_argument_is_quoted_so_argv_reads_it_back() {
-	assert win_quote('--daemon') == '--daemon'
-	assert win_quote('C:\\graph data\\graph.json') == '"C:\\graph data\\graph.json"'
-	assert win_quote('') == '""'
-	// a quote, and the backslashes before it, are escaped
-	assert win_quote('a"b') == '"a\\"b"'
-	assert win_quote('a\\"b') == '"a\\\\\\"b"'
-	// backslashes before the closing quote are doubled; others are as they are
-	assert win_quote('C:\\a b\\') == '"C:\\a b\\\\"'
-}
-
 fn test_the_daemon_is_named_after_what_it_serves() {
 	a := Config{
 		graph_path: '/g/vlang/graph.json'
