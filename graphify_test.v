@@ -13216,6 +13216,132 @@ fn test_a_cli_hands_its_extract_to_the_extractor_built_with_it() {
 	assert os.read_file(os.join_path(unstartable, 'graph.json')) or { panic(err) } == gc_graph
 }
 
+// test_a_build_keeps_the_parse_cache_of_another_build_with_its_key builds the CLI as the
+// updater does, with `-d graphify_cache_key`: another build with the same key, such as
+// the -prealloc extractor or a rebuild with a new compiler, reuses the parse cache, and
+// one with another key, or with none, parses again. The cache is edited by hand between
+// runs, so the graph says which happened.
+fn test_a_build_keeps_the_parse_cache_of_another_build_with_its_key() {
+	dir := os.join_path(os.temp_dir(), 'graphify_cache_key_${os.getpid()}')
+	os.mkdir_all(os.join_path(dir, 'proj')) or { panic(err) }
+	defer {
+		os.rmdir_all(dir) or {}
+	}
+	os.write_file(os.join_path(dir, 'proj', 'main.v'), 'module main\n\nfn marker_fn_q7() {}\n\nfn main() {\n\tmarker_fn_q7()\n}\n') or {
+		panic(err)
+	}
+	vexe := @VEXE
+	cli := os.join_path(@DIR, 'cmd', 'cli')
+	ext := $if windows { '.exe' } $else { '' }
+	build := fn [vexe, cli, dir, ext] (name string, flags []string) string {
+		exe := os.join_path(dir, name + ext)
+		mut cmd := [vexe]
+		cmd << flags
+		cmd << ['-o', exe, cli]
+		res := os.exec(cmd)
+		assert res.exit_code == 0, res.output
+		return exe
+	}
+	first := build('first', ['-d', 'graphify_cache_key=k1'])
+	// another binary built from the same files: the extractor's build
+	same := build('same', ['-prealloc', '-d', 'graphify_cache_key=k1'])
+	other := build('other', ['-d', 'graphify_cache_key=k2'])
+	plain := build('plain', [])
+	assert file_hash(first) != file_hash(same)
+	out := os.join_path(dir, 'out')
+	cache := os.join_path(out, cache_file_name)
+	os.setenv(no_extractor_env, '1', true)
+	defer {
+		os.unsetenv(no_extractor_env)
+	}
+	extract := fn [dir, out] (exe string) string {
+		res := os.exec([exe, 'extract', os.join_path(dir, 'proj'), '--no-library', '--out', out])
+		assert res.exit_code == 0, res.output
+		return os.read_file(os.join_path(out, 'graph.json')) or { panic(err) }
+	}
+	// the cache's result for main.v, edited, is what a build that reuses it shows
+	edit := fn [cache] () {
+		text := os.read_file(cache) or { panic(err) }
+		assert text.contains('marker_fn_q7'), text
+		os.write_file(cache, text.replace('marker_fn_q7', 'marker_fn_c7')) or { panic(err) }
+	}
+	assert extract(first).contains('marker_fn_q7')
+	assert (os.read_file(cache) or { panic(err) }).split_into_lines()[1] == 'binary:build k1'
+	edit()
+	assert extract(same).contains('marker_fn_c7')
+	// a key of other files, or no key, is another build's cache
+	assert extract(other).contains('marker_fn_q7')
+	edit()
+	got := extract(plain)
+	assert got.contains('marker_fn_q7') && !got.contains('marker_fn_c7')
+	assert (os.read_file(cache) or { panic(err) }).split_into_lines()[1] == 'binary:${file_hash(plain)}'
+}
+
+// test_the_updater_keys_the_parse_cache_on_what_is_compiled_in runs the updater's
+// -PrintKey on a copy of graphify's checkout: the key is the same run after run, a change
+// to a file compiled into the CLI, or to a header beside one, changes it, and a change to
+// a file it doesn't compile in, a test or the README, leaves it.
+fn test_the_updater_keys_the_parse_cache_on_what_is_compiled_in() {
+	top := os.join_path(os.temp_dir(), 'graphify_update_key_${os.getpid()}')
+	// named as a checkout is: V finds `import graphify` by the folder's name
+	dir := os.join_path(top, 'graphify')
+	os.mkdir_all(os.join_path(dir, 'cmd', 'cli')) or { panic(err) }
+	os.mkdir_all(os.join_path(dir, 'bin')) or { panic(err) }
+	defer {
+		os.rmdir_all(top) or {}
+	}
+	for name in os.ls(@DIR) or { panic(err) } {
+		if name == 'v.mod' || (name.ends_with('.v') && !name.ends_with('_test.v')) {
+			os.cp(os.join_path(@DIR, name), os.join_path(dir, name)) or { panic(err) }
+		}
+	}
+	for name in os.ls(os.join_path(@DIR, 'cmd', 'cli')) or { panic(err) } {
+		if name.ends_with('.v') {
+			os.cp(os.join_path(@DIR, 'cmd', 'cli', name), os.join_path(dir, 'cmd', 'cli', name)) or {
+				panic(err)
+			}
+		}
+	}
+	os.cp(os.join_path(@DIR, 'bin', 'update-vlang-graph.vsh'), os.join_path(dir, 'bin',
+		'update-vlang-graph.vsh')) or { panic(err) }
+	ext := $if windows { '.exe' } $else { '' }
+	updater := os.join_path(dir, 'bin', 'updater' + ext)
+	built := os.exec([@VEXE, '-o', updater, 'build', os.join_path(dir, 'bin', 'update-vlang-graph.vsh')])
+	assert built.exit_code == 0, built.output
+	key := fn [updater] () string {
+		res := os.exec([updater, '-PrintKey'])
+		assert res.exit_code == 0, res.output
+		k := res.output.trim_space()
+		assert k.len == 64, res.output
+		return k
+	}
+	first := key()
+	assert key() == first
+	// a compiled-in file of graphify's, and a header beside it
+	cache_v := os.join_path(dir, 'cache.v')
+	text := os.read_file(cache_v) or { panic(err) }
+	os.write_file(cache_v, text + '\n// another build\n') or { panic(err) }
+	assert key() != first
+	os.write_file(cache_v, text) or { panic(err) }
+	assert key() == first
+	header := os.join_path(dir, 'extra.h')
+	os.write_file(header, '#define EXTRA 1\n') or { panic(err) }
+	assert key() != first
+	os.rm(header) or { panic(err) }
+	// files the CLI doesn't compile in
+	os.write_file(os.join_path(dir, 'README.md'), 'changed') or { panic(err) }
+	os.write_file(os.join_path(dir, 'extra_test.v'), 'module graphify\n') or { panic(err) }
+	assert key() == first
+}
+
+// parse_key is the build's key when it has one; this test binary has none, so it is the
+// binary's hash, and '' when there is none
+fn test_a_build_without_a_key_keys_the_parse_cache_on_its_hash() {
+	assert build_cache_key == ''
+	assert parse_key('abc') == 'abc'
+	assert parse_key('') == ''
+}
+
 // a Windows argument is quoted so that the program's argv reads it back as it was
 // (win_quote), as the CLI's extractor and the MCP server's daemon get theirs
 fn test_a_windows_argument_is_quoted_so_argv_reads_it_back() {

@@ -890,8 +890,16 @@ hours).
   `0 3 * * * v run /path/to/graphify/bin/update-vlang-graph.vsh >> /path/to/graph_data/cron.log 2>&1`.
 
 On every platform the job rebuilds `bin/graphify` itself when graphify or V's
-`vlib` has changed (see above). The first extract after a rebuild is a full
-re-parse, because the incremental cache is tied to the binary that wrote it.
+`vlib` has changed (see above). It builds the CLI and the extractor with a key naming
+every V file compiled into them, graphify's own and vlib's, the C files and headers
+beside those, and thirdparty (`-PrintKey` prints it), and their incremental cache is
+tied to that key: after a rebuild for a change none of those files saw, such as a new
+compiler or a vlib module graphify doesn't import, the extract re-parses only the files
+that changed. After any other rebuild, and with a build made by hand, which has no key
+and is tied to its own binary, it re-parses every file. The compiler is not in the key,
+so a change to how V compiles those files that changes what a file extracts to is not
+seen until one of them changes; deleting a graph's `.gf_cache.ndjson` makes its next
+extract re-parse every file.
 The Windows task's own `update-vlang-graph.exe` is rebuilt with them.
 
 ## Claude Code wiring
