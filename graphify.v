@@ -114,11 +114,12 @@ pub fn build_graph_with_library(root string, worker_exe string, out_dir string, 
 	}
 
 	// Hashed once and reused for both load and save below -- see cache.v for
-	// why the cache is tied to the running binary's own content, not just
-	// each source file's hash. With the library on, an import's name also
+	// why the cache is tied to what built the binary, not just each source
+	// file's hash (parse_key). With the library on, an import's name also
 	// depends on its roots, so they are part of the key.
 	bin_hash := file_hash(worker_exe)
-	cache_key := if bin_hash != '' && lib.enabled() { '${bin_hash} ${lib.cache_tag()}' } else { bin_hash }
+	parse := parse_key(bin_hash)
+	cache_key := if parse != '' && lib.enabled() { '${parse} ${lib.cache_tag()}' } else { parse }
 	// see compact_graph
 	parse_arena := arena_begin()
 	mut run := ParseRun{

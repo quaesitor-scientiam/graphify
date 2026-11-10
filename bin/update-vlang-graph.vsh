@@ -11,6 +11,7 @@
 //   v run bin/update-vlang-graph.vsh -Commit <sha>      # move up to that commit, not the newest
 //   v run bin/update-vlang-graph.vsh -NoBuild           # never rebuild graphify
 //   v run bin/update-vlang-graph.vsh -PrintStamp        # print the build stamp and stop
+//   v run bin/update-vlang-graph.vsh -PrintKey          # print the parse cache's key and stop
 //
 // The graph depends on graphify's own code and on the V parser it was compiled
 // with (the vlib of the `v` on PATH), so a binary built before either changed
@@ -371,6 +372,85 @@ fn build_stamp(graphify_root string, v_exe string) !string {
 	return lines.join('\n')
 }
 
+// key_source_exts are the files beside a compiled-in V file that a build can compile in
+// too, through `#include` or `#flag`, and parse_key takes in: vlib/builtin holds C files
+// and headers such as core_windows.c and prealloc_atomics.h.
+const key_source_exts = ['.c', '.h', '.m', '.S']
+
+// parse_key names what decides what a file extracts to: the content of every V file
+// compiled into the CLI (`v -print-v-files cmd/cli`, run in graphify's checkout), and of
+// every C file and header in the directories they are in (key_source_exts), each by its
+// path in graphify's checkout or in the V tree, and thirdparty (libgc), as build_stamp
+// names it. The CLI and its extractor are built with it (`-d graphify_cache_key`), and
+// key their parse cache on it instead of their own hash (graphify.parse_key), so a
+// rebuild for a new compiler alone, which build_stamp takes in, keeps the cache. The
+// compiler itself is not in it: a change to how V compiles these files that changes what
+// the binary extracts goes unseen until one of them changes. The extractor's -prealloc
+// compiles in the same files. '' when a file can't be listed or read, or is in neither
+// tree: the builds then key the cache on their hash, as one built by hand does.
+fn parse_key(graphify_root string, v_exe string) string {
+	v_root := os.real_path(os.dir(os.real_path(v_exe)))
+	own_root := os.real_path(graphify_root)
+	// as build_one builds it, from graphify's checkout: V finds `import graphify` in the
+	// working directory, so from another one it would list another checkout's files
+	cwd := os.getwd()
+	os.chdir(own_root) or { return '' }
+	listed := os.exec([v_exe, '-print-v-files', 'cmd/cli'])
+	os.chdir(cwd) or {}
+	if listed.exit_code != 0 {
+		return ''
+	}
+	mut paths := []string{}
+	mut dirs := map[string]bool{}
+	for line in listed.output.split_into_lines() {
+		if line.trim_space() == '' {
+			continue
+		}
+		path := os.real_path(line.trim_space())
+		paths << path
+		dirs[os.dir(path)] = true
+	}
+	if paths.len == 0 {
+		return ''
+	}
+	for dir, _ in dirs {
+		for name in os.ls(dir) or { return '' } {
+			path := os.join_path(dir, name)
+			if os.file_ext(name) in key_source_exts && os.is_file(path) {
+				paths << path
+			}
+		}
+	}
+	mut lines := []string{}
+	for path in paths {
+		content := os.read_file(path) or { return '' }
+		mut rel := ''
+		for prefix in [own_root, v_root] {
+			if path.starts_with(prefix + os.path_separator) {
+				tree := if prefix == own_root { 'graphify' } else { 'v' }
+				rel = '${tree}:' + path[prefix.len + 1..].replace('\\', '/')
+				break
+			}
+		}
+		if rel == '' {
+			return ''
+		}
+		lines << '${rel} ${sha256.hexhash(content)}'
+	}
+	lines.sort()
+	third := git(v_root, 'rev-parse', 'HEAD:thirdparty')
+	lines << if third.exit_code == 0 {
+		'thirdparty ${third.output.trim_space()}'
+	} else {
+		'thirdparty ${os.join_path(v_root, 'thirdparty')}'
+	}
+	third_diff := git(v_root, 'diff', 'HEAD', '--', 'thirdparty')
+	if third_diff.exit_code == 0 && third_diff.output.trim_space() != '' {
+		lines << 'thirdparty-diff ${sha256.hexhash(third_diff.output)}'
+	}
+	return sha256.hexhash(lines.join('\n'))
+}
+
 // build_one builds one binary next to its final name and then swaps it in,
 // so a running copy (the MCP server, on Windows) never blocks the build.
 // `prod` (-prod: optimised, link-time) is for the CLI and the MCP server. The CLI
@@ -473,8 +553,16 @@ fn rebuild_if_stale(log_path string, root string, exe string) !bool {
 	log_line(log_path, 'graphify is out of date; rebuilding...')
 	os.chdir(root)!
 	ext := $if windows { '.exe' } $else { '' }
+	// what the CLI and the extractor key their parse cache on (parse_key)
+	key := parse_key(root, v_exe)
+	key_args := if key != '' { ['-d', 'graphify_cache_key=${key}'] } else { []string{} }
+	if key == '' {
+		log_line(log_path, 'WARNING: cannot name what graphify is built from; its parse cache is keyed on the binary')
+	}
 	// the CLI is what extracts; without it there is nothing to run
-	build_one(log_path, v_exe, exe, true, ['cmd/cli'])!
+	mut cli_args := key_args.clone()
+	cli_args << 'cmd/cli'
+	build_one(log_path, v_exe, exe, true, cli_args)!
 	// the others only serve the graph: a failure is logged, the extract goes
 	// ahead, and the stamp stays old so the next run tries them again
 	mut all_built := true
@@ -484,7 +572,10 @@ fn rebuild_if_stale(log_path string, root string, exe string) !bool {
 	// an extractor of older code must not extract: until this build, bin/graphify does
 	os.rm(pair) or {}
 	mut extractor_built := true
-	build_one(log_path, v_exe, extractor, true, ['-prealloc', 'cmd/cli']) or {
+	mut extractor_args := ['-prealloc']
+	extractor_args << key_args
+	extractor_args << 'cmd/cli'
+	build_one(log_path, v_exe, extractor, true, extractor_args) or {
 		log_line(log_path, 'WARNING: ${err}')
 		all_built = false
 		extractor_built = false
@@ -527,6 +618,12 @@ fn rebuild_if_stale(log_path string, root string, exe string) !bool {
 
 fn main() {
 	root := @VMODROOT
+	// before the config, which the key doesn't read: a test runs it on a copy of the
+	// checkout that has none
+	if '-PrintKey' in os.args[1..] {
+		println(parse_key(root, find_v()))
+		return
+	}
 	config_path := os.join_path(root, 'graphify.config.json')
 	if !os.exists(config_path) {
 		eprintln('Missing config: ${config_path}\nCopy graphify.config.json.example to graphify.config.json and edit it for your setup.')

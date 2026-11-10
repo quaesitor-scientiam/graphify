@@ -40,6 +40,25 @@ const cache_file_name = '.gf_cache.ndjson'
 // envelope itself from being misparsed by an older/newer build.
 const cache_format = 'graphify-cache-v7'
 
+// build_cache_key is what bin/update-vlang-graph.vsh builds the CLI and its extractor
+// with (`-d graphify_cache_key=...`, its parse_key): a hash of every V file compiled into
+// the CLI, graphify's own and vlib's, of the C files and headers beside them, and of
+// thirdparty. Not of the compiler: a change to how V compiles them that changes what a
+// file extracts to keeps the key. '' in a build without it.
+const build_cache_key = $d('graphify_cache_key', '')
+
+// parse_key is what the parse cache is keyed on, given the hash of the binary that
+// parses (`bin_hash`): build_cache_key, when the binary was built with one, so that a
+// rebuild for a change that compiles in none of what extracts a file, such as a new
+// compiler, keeps the cache; else the binary's own hash. The key's source is in it, so
+// a key never matches a hash. '' when the binary can't be hashed, which trusts no cache.
+fn parse_key(bin_hash string) string {
+	if bin_hash == '' {
+		return ''
+	}
+	return if build_cache_key != '' { 'build ${build_cache_key}' } else { bin_hash }
+}
+
 // file_hash returns the hex SHA256 of a file's content, or '' if it can't be
 // read (the caller then treats the file as uncached and reparses it). Also
 // used to hash the graphify binary itself -- see load_cache/save_cache.
@@ -65,13 +84,13 @@ fn text_hash(text string) string {
 // load_cache reads a previous run's cache file into rel_path -> CacheEntry.
 // A missing or unparseable cache is treated as empty (full reparse), not an
 // error — the cache is purely an optimization, never a correctness
-// dependency. `bin_hash` is the SHA256 of the graphify binary about to run
-// this extract (build_graph_resilient hashes os.executable() once and passes
-// it to both load_cache and save_cache) -- a cache written by a DIFFERENT
-// binary is discarded wholesale, even when every source file's own content
-// hash still matches, because the binary is what actually decides what a
-// given file's content extracts to. A blank bin_hash means we couldn't even
-// hash our own executable, so nothing is trustworthy either way.
+// dependency. `bin_hash` is the key of the graphify build about to run this extract
+// (parse_key: what it was built from, or the binary's own SHA256; build_graph_with_library
+// works it out once and passes it to both load_cache and save_cache) -- a cache written
+// by a DIFFERENT build is discarded wholesale, even when every source file's own content
+// hash still matches, because the build is what actually decides what a given file's
+// content extracts to. A blank key means we couldn't even hash our own executable, so
+// nothing is trustworthy either way.
 fn load_cache(out_dir string, bin_hash string) map[string]CacheEntry {
 	mut out := map[string]CacheEntry{}
 	if bin_hash == '' {
@@ -90,10 +109,11 @@ fn load_cache(out_dir string, bin_hash string) map[string]CacheEntry {
 		// rel, hash, stale flag ('1'/'0'), then the FileResult's own encoding
 		// (which may itself contain further \x01-\x04-escaped structure, so it
 		// is always the last, unsplit field — see batch_proto.v). Adding the
-		// stale field here does not need a cache_format bump: a binary-hash
-		// mismatch above already discards the whole cache before any per-line
-		// parsing happens, so a binary old enough to predate this field can
-		// never misparse a line written by a newer one, or vice versa.
+		// stale field here does not need a cache_format bump: a key mismatch
+		// above already discards the whole cache before any per-line parsing
+		// happens, and the key names graphify's own source, so a binary old
+		// enough to predate this field can never misparse a line written by a
+		// newer one, or vice versa.
 		parts := line.split_nth('\t', 4)
 		if parts.len < 4 {
 			continue
@@ -109,8 +129,8 @@ fn load_cache(out_dir string, bin_hash string) map[string]CacheEntry {
 }
 
 // save_cache persists this run's per-file hashes + extracted results, so the
-// next extract can skip re-parsing whatever hasn't changed — provided the
-// same binary is still the one running next time (see load_cache).
+// next extract can skip re-parsing whatever hasn't changed — provided a build
+// with the same key is the one running next time (see load_cache).
 fn save_cache(out_dir string, bin_hash string, entries []CacheEntry) {
 	if bin_hash == '' {
 		return // don't write a cache load_cache could never trust anyway
