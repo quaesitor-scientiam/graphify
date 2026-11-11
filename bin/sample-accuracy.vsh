@@ -11,10 +11,11 @@
 //   v run bin/sample-accuracy.vsh <graph> -no-worlds                   # the default build only
 //   v run bin/sample-accuracy.vsh <graph> -self-test                   # check the harness itself
 //
-// The graph's `root` must be a V checkout (it has vlib/v/v.v): its V3 is the oracle,
-// built once per commit into the V temp folder (with `-gc none -prealloc`, as
-// vlib/v/compiler_tests/vls_line_info_test.v builds it). The `v` launcher is not
-// used, as it falls back to the old compiler when V3 fails.
+// Without -v3 the graph's `root` must be a V checkout (it has vlib/v/v.v): its V3 is
+// the oracle, built once per commit and change under vlib into the V temp folder
+// (with `-gc none -prealloc`, as vlib/v/compiler_tests/vls_line_info_test.v builds
+// it). The `v` launcher is not used, as it falls back to the old compiler when V3
+// fails. With -v3 no V3 is built, not even one a `-d` needs.
 //
 // A unit is one call site of an inferred `calls` edge: its caller, its callee and
 // one line of the edge's `lines`. V3 is asked `-vls-mode -line-info file:line:gd^col`
@@ -24,8 +25,8 @@
 // directory, a main that imports its module, then the module's tests. A site still
 // unanswered is asked again in the builds its file is compiled for: the `-os` and
 // `-d` its name gives (`_linux.c.v`, `_d_ownership.v`), then each of `-os linux`,
-// `-os macos` and `-os windows` other than the host's. A define V3 must be built
-// with (`-d ownership`) builds that V3 too.
+// `-os macos` and `-os windows` other than the host's. Without -v3, a define V3 must
+// be built with (`-d ownership`) builds that V3 too.
 //
 // Each sampled edge is then:
 //   correct  V3's declaration is the edge's target
@@ -44,12 +45,14 @@
 // in the V temp folder).
 //
 // -self-test points each sampled edge at another function or method of the same
-// name before asking, and fails if any of them is scored correct or none is scored.
+// name before asking (an edge whose name has no other declaration is left out), and
+// fails if any of them is scored correct or none is scored.
 import os
 import math
 import time
 import strings
 import hash.fnv1a
+import strconv
 import x.json2
 
 const kind_function = 2
@@ -172,6 +175,7 @@ mut:
 	out_dir   string
 	timeout   time.Duration
 	v3        string
+	can_build bool              // false with -v3: no V3 is built, not even for a define
 	variants  map[string]string // the V3 built with a define, by the define
 	files     map[string][]string
 	log       strings.Builder
@@ -208,8 +212,9 @@ fn main() {
 		eprintln('the graph root ${root} is not a V checkout (no vlib/v/v.v); pass -v3 <binary>')
 		exit(1)
 	}
+	// absolute before the chdir into the root below, which a relative path would follow
 	out_dir := if opts.out != '' {
-		os.real_path(opts.out)
+		os.abs_path(opts.out)
 	} else {
 		os.join_path(os.vtmp_dir(), 'accuracy-${opts.seed}${if opts.self_test {
 			'-self-test'
@@ -229,8 +234,15 @@ fn main() {
 		timeout:   time.second * opts.timeout
 		log:       strings.new_builder(1 << 16)
 	}
+	ctx.can_build = opts.v3 == ''
 	ctx.v3 = if opts.v3 != '' {
-		os.real_path(opts.v3)
+		// absolute for the same reason as out_dir
+		v3 := os.real_path(os.abs_path(opts.v3))
+		if !os.is_file(v3) {
+			eprintln('-v3 ${opts.v3}: no such file')
+			exit(1)
+		}
+		v3
 	} else {
 		ctx.build_v3([]) or {
 			eprintln(err.msg())
@@ -436,7 +448,11 @@ fn main() {
 		correct := rows.filter(it.status == 'correct').len
 		scored := rows.filter(it.status in ['correct', 'extra', 'wrong']).len
 		if correct > 0 || scored == 0 {
-			eprintln('SELF-TEST FAILED: ${correct} of ${scored} corrupted edges scored correct')
+			eprintln(if scored == 0 {
+				'SELF-TEST FAILED: no corrupted edge could be scored'
+			} else {
+				'SELF-TEST FAILED: ${correct} of ${scored} corrupted edges scored correct'
+			})
 			exit(1)
 		}
 		println('self-test passed: none of ${scored} corrupted edges scored correct')
@@ -457,12 +473,19 @@ fn parse_args(args []string) !Options {
 				if a in ['-n', '-seed', '-timeout'] && (v.len == 0 || !v.bytes().all(it.is_digit())) {
 					return error('${a} needs a whole number, not `${v}`')
 				}
+				// strconv refuses a number too big for its type; `.int()` would clamp it
 				match a {
-					'-n' { o.n = v.int() }
-					'-seed' { o.seed = v.u64() }
+					'-n' { o.n = strconv.atoi(v) or { return error('-n ${v} is too big') } }
+					'-seed' {
+						o.seed = strconv.parse_uint(v, 10, 64) or {
+							return error('-seed ${v} is too big')
+						}
+					}
 					'-out' { o.out = v }
 					'-v3' { o.v3 = v }
-					else { o.timeout = v.int() }
+					else {
+						o.timeout = strconv.atoi(v) or { return error('-timeout ${v} is too big') }
+					}
 				}
 				i += 2
 				continue
@@ -549,9 +572,15 @@ fn (mut ctx Ctx) build_v3(defines []string) !string {
 	args << ['-o', tmp, os.join_path(ctx.root, 'vlib', 'v', 'v.v')]
 	println('building V3 (${key}) with ${ctx.vexe}...')
 	code, out := run_bounded(ctx.vexe, args, ctx.root, 30 * time.minute)
+	// on Windows V writes `<exe>.manifest` beside it (long paths), which goes with it
+	tmp_manifest := tmp + '.manifest'
 	if code != 0 || !os.exists(tmp) {
 		os.rm(tmp) or {}
+		os.rm(tmp_manifest) or {}
 		return error('building V3 failed (exit ${code}):\n${out}')
+	}
+	if os.exists(tmp_manifest) {
+		os.mv(tmp_manifest, path + '.manifest', overwrite: true) or {}
 	}
 	os.mv(tmp, path) or {
 		// another run built the same V3 first
@@ -579,11 +608,14 @@ fn (mut ctx Ctx) programs_for(rel string) []string {
 	}
 	src := ctx.lines_of(rel)
 	mut mod := 'main'
+	mut seen_module := false
 	mut has_main := false
 	for l in src {
 		t := l.trim_space()
-		if mod == 'main' && t.starts_with('module ') {
+		if !seen_module && t.starts_with('module ') {
+			// the first one: a later `module x` is text, in a string say
 			mod = t.all_after('module ').trim_space()
+			seen_module = true
 		}
 		if t.starts_with('fn main()') {
 			has_main = true
@@ -786,8 +818,13 @@ fn (mut ctx Ctx) ask(world []string, prog string, specs []string) []string {
 		defines := define_flags(world)
 		key := defines.join(',')
 		if key != '' && key !in ctx.variants {
-			ctx.variants[key] = ctx.build_v3(defines) or {
-				eprintln(err.msg())
+			ctx.variants[key] = if ctx.can_build {
+				ctx.build_v3(defines) or {
+					eprintln(err.msg())
+					''
+				}
+			} else {
+				eprintln('the -v3 binary was not built with -d ${defines.join(' -d ')}: its sites stay unanswered')
 				''
 			}
 		}
