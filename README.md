@@ -812,6 +812,49 @@ with `-Force`.
 
 Restart Claude Code after switching so the MCP server picks up the new graph.
 
+### `bin/sample-accuracy.vsh` — how often inferred calls are right
+
+Checks a seeded random sample of the call sites of `inferred` call edges against
+V's own compiler: each is asked of V3's go-to-definition
+(`-vls-mode -line-info file:line:gd^col`), and the declaration V3 answers is
+compared with the edge's target.
+
+```
+v run bin/sample-accuracy.vsh S:\graph_data\vlang                  # 1000 sites, seed 20261110
+v run bin/sample-accuracy.vsh <graph> -n 2000 -seed 7              # another sample
+v run bin/sample-accuracy.vsh <graph> -v3 <binary> -out <dir>      # a V3 already built; where results go
+v run bin/sample-accuracy.vsh <graph> -no-worlds                   # the default build only
+v run bin/sample-accuracy.vsh <graph> -self-test                   # check the harness itself
+```
+
+The graph's root must be a V checkout: its V3 is built once per commit, as
+`vls_line_info_test.v` builds it, and not reached through the `v` launcher, which
+falls back to the old compiler when V3 fails. V3 checks only the bodies a program
+reaches, so a site is asked in one program after another (the file itself, its
+directory, a main importing its module, the module's tests), and a site still
+unanswered is asked again under the `-os` and `-d` its file name gives, then
+under each of `-os linux`, `-os macos` and `-os windows` other than the host's. Each sampled edge is `correct`, `extra` (the site
+also has an edge to V3's answer; this one is another), `wrong`, or unscored: no
+answer, V3's declaration is not in the graph, or the site can't be asked (the
+callee's name is not on the line, or the line is not in the file). It prints the accuracy with a
+95% Wilson interval and writes `sample.csv`, `summary.txt` and `v3_raw.log`.
+
+Only `calls` edges are covered: a `references` edge records no line to ask about.
+V3 answers for one build at a time, so an `extra` or `wrong` row can be an edge
+that is right for another build; read those by hand. A seed draws the same sample
+of the same graph with any V version, so a run after a resolver change compares
+with the one before it.
+
+On the V tree at `32a246c8` (November 2026), 1000 of 193,546 inferred call sites,
+seed 20261110: 933 of 934 answered are correct, 99.89% (95% 99.40–99.98%). The wrong
+one is `vbytes` on a `&u8`, which builtin declares twice (`(data &u8) vbytes` and
+`(data byteptr) vbytes`): the graph links the first, V3 the second. 917 sites were
+answered in the default build and 18 more under `-os` or `-d`; 53 never were
+(24 in tests, 5 in `-d` files, 2 in other backends, 22 others). 12 could not be
+asked, as the callee's name is not on the edge's line or the line is not in the
+caller's file, and one answer, a call through a function-typed field, is a local
+variable, not a graph symbol.
+
 ### `bench/session_stats.vsh` — token-free MCP usage stats
 
 Scans Claude Code's session transcripts and reports graphify tool-call counts
