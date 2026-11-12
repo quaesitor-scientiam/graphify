@@ -7,8 +7,8 @@ on:
 # The vlang commit every job builds V from, when V's newest one is broken: empty
 # takes the newest. Set to one while V's newest crashes its own build, and emptied
 # again once a later commit builds. VC_PIN is the vc snapshot generated from that
-# commit: the Windows bootstrap (makev.bat) otherwise clones vc's HEAD. Set and
-# emptied together with VLANG_PIN.
+# commit, which every OS builds V from: makev.bat and `make` otherwise take vc's
+# HEAD. Set and emptied together with VLANG_PIN.
 env:
   VLANG_PIN: 67011350d000d86c3fc2a925b505c590dbfdea88
   VC_PIN: 63a7de2aaa48271b71ca8b306fe06d7cc6c3a372
@@ -31,13 +31,17 @@ jobs:
       # own tests — cloning into the workspace once made `v test .` also
       # sweep up V's own ~3600-file vlib test suite (GL headers, globals,
       # multi-hour runtime) as if it were part of this project.
+      # The vc snapshot is pinned as in extract-on-every-os's Build V.
       - name: Install V
         run: |
           git init -q "$RUNNER_TEMP/v"
           cd "$RUNNER_TEMP/v"
           git fetch -q --depth 1 https://github.com/vlang/v ${{ needs.pin-vlang.outputs.sha }}
           git checkout -q FETCH_HEAD
-          make
+          git clone -q --filter=blob:none https://github.com/vlang/vc vc
+          git -C vc checkout -q ${{ env.VC_PIN }}
+          make latest_tcc latest_legacy
+          make local=1
           sudo ./v symlink
 
       - name: Build CLI
@@ -164,10 +168,20 @@ jobs:
           git fetch -q --depth 1 https://github.com/vlang/v ${{ needs.pin-vlang.outputs.sha }}
           git checkout -q FETCH_HEAD
 
+      # `make` pulls vc's HEAD, generated from V's newest source, not from VLANG_PIN:
+      # vc 494a12fb did not compile (redefinition of pollfd), and c29e30fc includes
+      # vlib/os/fd_poll.h, which VLANG_PIN lacks. Give it the snapshot generated from
+      # VLANG_PIN: TCC and legacy are fetched as before, then `local=1` builds from
+      # that vc instead of pulling it.
       - name: Build V
         if: runner.os != 'Windows'
         working-directory: ${{ runner.temp }}/v
-        run: make && sudo ./v symlink
+        run: |
+          git clone -q --filter=blob:none https://github.com/vlang/vc vc
+          git -C vc checkout -q ${{ env.VC_PIN }}
+          make latest_tcc latest_legacy
+          make local=1
+          sudo ./v symlink
 
       # makev.bat clones vc, V's C bootstrap snapshot, from its HEAD. The newest
       # snapshot is generated from V's newest source, which TCC rejects on Windows
