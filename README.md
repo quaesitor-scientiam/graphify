@@ -812,15 +812,16 @@ with `-Force`.
 
 Restart Claude Code after switching so the MCP server picks up the new graph.
 
-### `bin/sample-accuracy.vsh` — how often inferred calls are right
+### `bin/sample-accuracy.vsh` — how often inferred calls and references are right
 
-Checks a seeded random sample of the call sites of `inferred` call edges against
-V's own compiler: each is asked of V3's go-to-definition
-(`-vls-mode -line-info file:line:gd^col`), and the declaration V3 answers is
-compared with the edge's target.
+Checks a seeded random sample of the call sites of `inferred` call edges (or, with
+`-kind references`, of `inferred` reference edges) against V's own compiler: each
+is asked of V3's go-to-definition (`-vls-mode -line-info file:line:gd^col`), and
+the declaration V3 answers is compared with the edge's target.
 
 ```
 v run bin/sample-accuracy.vsh S:\graph_data\vlang                  # 1000 sites, seed 20261110
+v run bin/sample-accuracy.vsh <graph> -kind references             # 1000 inferred reference edges
 v run bin/sample-accuracy.vsh <graph> -n 2000 -seed 7              # another sample
 v run bin/sample-accuracy.vsh <graph> -v3 <binary> -out <dir>      # this V3, none built; where results go
 v run bin/sample-accuracy.vsh <graph> -no-worlds                   # the default build only
@@ -841,21 +842,46 @@ not in the graph, or the site can't be asked (the callee's name is not on the li
 or the line is not in the file). It prints the accuracy over the scored edges with
 a 95% Wilson interval and writes `sample.csv`, `summary.txt` and `v3_raw.log`.
 
-Only `calls` edges are covered: a `references` edge records no line to ask about.
+A `references` edge records no line, so with `-kind references` the unit is the
+edge: it is asked at up to 8 lines of its `from` declaration that name its target,
+in every file that declares it under that id, at every place on those lines the
+name is written (a call of a method of that name included, which V3 tells apart
+from the type), and scored by its best line, so it is correct when any of them
+resolves to the target. A declaration runs from its first line until the brackets
+opened there close, or to the line before the next declaration beside it, whichever
+comes first (a function's `end_line` in the graph is the line of the `{` that opens
+its body, not its last line).
+
+`-self-test` points each edge at another declaration of its name (a function or
+method for a call, one of the target's kind for a reference) and fails if one
+scores correct while V3 also names the edge's own target; one that scores correct
+where V3 never names it shows the edge itself is wrong, and is reported instead.
 V3 answers for one build at a time, so an `extra` or `wrong` row can be an edge
 that is right for another build; read those by hand. A seed draws the same sample
 of the same graph with any V version, so a run after a resolver change compares
 with the one before it.
 
-On the V tree at `32a246c8` (November 2026), 1000 of 193,546 inferred call sites,
-seed 20261110: 933 of the 934 scored are correct, 99.89% (95% 99.40–99.98%). The wrong
-one is `vbytes` on a `&u8`, which builtin declares twice (`(data &u8) vbytes` and
-`(data byteptr) vbytes`): the graph links the first, V3 the second. 917 sites were
-answered in the default build and 18 more under `-os` or `-d`; 53 never were
-(24 in tests, 5 in `-d` files, 2 in other backends, 22 others). 12 could not be
-asked, as the callee's name is not on the edge's line or the line is not in the
-caller's file, and one answer, a call through a function-typed field, is a local
-variable, not a graph symbol.
+On the V tree at `f2edf668` (November 2026), seed 20261110:
+
+- calls, 1000 of 194,170 inferred call sites: 947 of the 950 scored are correct,
+  99.68% (95% 99.08–99.89%). The two wrong ones are methods builtin declares twice,
+  `u8.vstring` and `byteptr.vstring`, `char.vstring` and `charptr.vstring`: the graph
+  links the first, V3 the second. The extra one links `openssl.SSLConn.dial` where
+  V3's default build has mbedtls's. 38 sites were never answered (17 in tests, 5 in
+  `-d` files, 2 in other-OS files, 1 in another backend, 13 others), and 12 could
+  not be asked.
+- references, 1000 of 48,414 inferred reference edges: 971 of the 972 scored are
+  correct, 99.90% (95% 99.42–99.98%). The wrong one is `C.PWSTR` in a Windows alias
+  test that declares its own `C.WCHAR`: the graph links that one, V3 builtin's, as
+  `C.` types share one namespace. 28 edges were never answered (8 in `-d` files,
+  8 in other-OS files, 6 in other backends, 2 in tests, 4 others).
+
+Each self-test scored 1 stand-in correct where V3 never names the edge's own
+target: a wrong edge above (`u8.vstring` for calls, `C.PWSTR` for references),
+whose stand-in is V's declaration.
+
+At `32a246c8`, two days earlier, the same seed gave 933 of 934 calls correct
+(99.89%), the wrong one `vbytes` on a `&u8`, declared for `&u8` and `byteptr`.
 
 ### `bench/session_stats.vsh` — token-free MCP usage stats
 

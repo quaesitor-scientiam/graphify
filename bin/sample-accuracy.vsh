@@ -1,10 +1,12 @@
 #!/usr/bin/env -S v -raw-vsh-tmp-prefix tmp
 
-// Measures how often graphify's `inferred` call edges link the declaration that V's
-// own compiler resolves the call to: a seeded random sample of their call sites,
-// each asked of V3's go-to-definition.
+// Measures how often graphify's `inferred` call edges (or, with -kind references,
+// its inferred reference edges) link the declaration that V's own compiler resolves
+// the name to: a seeded random sample of their sites, each asked of V3's
+// go-to-definition.
 //
 //   v run bin/sample-accuracy.vsh S:\graph_data\vlang                  # 1000 sites, seed 20261110
+//   v run bin/sample-accuracy.vsh <graph> -kind references             # inferred reference edges
 //   v run bin/sample-accuracy.vsh <graph dir or graph.json> -n 2000 -seed 7
 //   v run bin/sample-accuracy.vsh <graph> -out <dir>                   # where the results go
 //   v run bin/sample-accuracy.vsh <graph> -v3 <binary>                 # use this V3, don't build one
@@ -17,8 +19,11 @@
 // it). The `v` launcher is not used, as it falls back to the old compiler when V3
 // fails. With -v3 no V3 is built, not even one a `-d` needs.
 //
-// A unit is one call site of an inferred `calls` edge: its caller, its callee and
-// one line of the edge's `lines`. V3 is asked `-vls-mode -line-info file:line:gd^col`
+// A unit is one site of an inferred edge of the chosen kind: its caller (the symbol
+// the edge is from), its callee (the declaration it is to) and one line of the
+// edge's `lines`. A reference edge has no `lines`: its unit is the edge, asked at up
+// to 8 lines of its `from` (in each file declaring that id) that name its target, and
+// scored by its best one. V3 is asked `-vls-mode -line-info file:line:gd^col`
 // at the callee's name on that line, inside a program that compiles the file. V3
 // checks only the bodies a program reaches, so a site is asked in one program after
 // another until one answers: the file itself (a test, or a main program), its
@@ -41,12 +46,15 @@
 // and an edge can be right for another one.
 //
 // It writes sample.csv (one row per sampled site), v3_raw.log (every V3 answer) and
-// summary.txt into -out (default: accuracy-<seed>, or accuracy-<seed>-self-test,
-// in the V temp folder).
+// summary.txt into -out (default: accuracy-<seed>, with -references after it for
+// -kind references and -self-test after that for -self-test, in the V temp folder).
 //
-// -self-test points each sampled edge at another function or method of the same
-// name before asking (an edge whose name has no other declaration is left out), and
-// fails if any of them is scored correct or none is scored.
+// -self-test points each sampled edge at another declaration of the same name before
+// asking (a function or method for a call, one of the target's own kind for a
+// reference; an edge whose name has no such declaration is left out), and fails if
+// none is scored, or if one is scored correct where V3 also names the edge's own
+// target. One scored correct where V3 never names the edge's own target means that
+// edge is wrong and the stand-in is V's declaration: it is reported, not failed.
 import os
 import math
 import time
@@ -58,8 +66,10 @@ import x.json2
 const kind_function = 2
 const kind_method = 3
 const edge_calls = 1
+const edge_references = 5
 const prov_inferred = 1
 const batch_size = 100
+const max_mention_lines = 8 // the lines of a reference edge's `from` asked about it, at most
 
 // a `_<marker>.` in a file's name, and an OS that compiles it, from the markers of
 // `file_has_incompatible_os_only_suffix` in vlib/v/pref/pref.v; checked in this
@@ -87,9 +97,16 @@ const os_markers = [
 ]
 
 struct GSymbol {
-	id   string
-	name string
-	kind int
+	id     string
+	name   string
+	kind   int
+	file   string
+	line   int
+	parent string
+}
+
+// Spot is a line of a file to ask V3 about.
+struct Spot {
 	file string
 	line int
 }
@@ -115,8 +132,9 @@ struct Manifest {
 struct Options {
 mut:
 	graph     string
-	n         int = 1000
-	seed      u64 = 20261110
+	kind      string = 'calls' // or 'references'
+	n         int    = 1000
+	seed      u64    = 20261110
 	out       string
 	v3        string
 	worlds    bool = true
@@ -128,10 +146,13 @@ struct Unit {
 	from string
 	to   string
 	line int
+	orig string // -self-test: the edge's own target, which `to` stands in for
 }
 
 struct Row {
 mut:
+	group   int    // the sampled unit this row asks for: a reference edge has a row per line
+	orig    string // -self-test: the edge's own target
 	from    string
 	to      string
 	file    string
@@ -184,7 +205,7 @@ mut:
 fn main() {
 	opts := parse_args(os.args[1..]) or {
 		eprintln(err.msg())
-		eprintln('usage: v run bin/sample-accuracy.vsh <graph dir or graph.json> [-n 1000] [-seed 20261110] [-out dir] [-v3 binary] [-no-worlds] [-self-test] [-timeout 300]')
+		eprintln('usage: v run bin/sample-accuracy.vsh <graph dir or graph.json> [-kind calls|references] [-n 1000] [-seed 20261110] [-out dir] [-v3 binary] [-no-worlds] [-self-test] [-timeout 300]')
 		exit(2)
 	}
 	graph_path := if os.is_dir(opts.graph) {
@@ -216,11 +237,9 @@ fn main() {
 	out_dir := if opts.out != '' {
 		os.abs_path(opts.out)
 	} else {
-		os.join_path(os.vtmp_dir(), 'accuracy-${opts.seed}${if opts.self_test {
-			'-self-test'
-		} else {
-			''
-		}}')
+		kind_suffix := if opts.kind == 'references' { '-references' } else { '' }
+		test_suffix := if opts.self_test { '-self-test' } else { '' }
+		os.join_path(os.vtmp_dir(), 'accuracy-${opts.seed}${kind_suffix}${test_suffix}')
 	}
 	os.mkdir_all(out_dir) or {
 		eprintln('cannot create ${out_dir}: ${err}')
@@ -260,9 +279,20 @@ fn main() {
 		syms[s.id] = s
 		by_pos['${s.file}:${s.line}'] << s.id
 	}
+	edge_kind := if opts.kind == 'references' { edge_references } else { edge_calls }
+	// a reference edge has no `lines`: its unit is the edge (line 0), asked at the
+	// lines of its `from` declaration that name its target
+	by_edge := edge_kind == edge_references
 	mut units := []Unit{}
 	for e in g.edges {
-		if e.kind == edge_calls && e.provenance == prov_inferred {
+		if e.kind == edge_kind && e.provenance == prov_inferred {
+			if by_edge {
+				units << Unit{
+					from: e.from
+					to:   e.to
+				}
+				continue
+			}
 			for ln in e.lines {
 				units << Unit{
 					from: e.from
@@ -272,7 +302,7 @@ fn main() {
 			}
 		}
 	}
-	println('population: ${units.len} inferred call sites')
+	println('population: ${units.len} inferred ${unit_name(opts.kind)}')
 	if units.len == 0 {
 		exit(1)
 	}
@@ -293,16 +323,18 @@ fn main() {
 	}
 
 	// every target the graph gives a sampled site, to tell an extra edge from a wrong one
+	// (for a reference, every target its `from` references)
 	mut site_targets := map[string]map[string]bool{}
 	for u in sample {
-		site_targets['${u.from}\t${u.line}'] = map[string]bool{}
+		site_targets[site_key(u.from, u.line, by_edge)] = map[string]bool{}
 	}
 	for e in g.edges {
-		if e.kind != edge_calls {
+		if e.kind != edge_kind {
 			continue
 		}
-		for ln in e.lines {
-			key := '${e.from}\t${ln}'
+		lines := if by_edge { [0] } else { e.lines }
+		for ln in lines {
+			key := site_key(e.from, ln, by_edge)
 			if key in site_targets {
 				site_targets[key][e.to] = true
 			}
@@ -312,19 +344,20 @@ fn main() {
 	if opts.self_test {
 		mut by_name := map[string][]string{}
 		for s in g.symbols {
-			if s.kind == kind_function || s.kind == kind_method {
-				by_name[s.name] << s.id
-			}
+			by_name[s.name] << s.id
 		}
 		mut corrupted := []Unit{}
 		for u in sample {
-			name := if u.to in syms { syms[u.to].name } else { '' }
-			others := by_name[name].filter(it != u.to && it !in site_targets['${u.from}\t${u.line}'])
+			target := syms[u.to] or { GSymbol{} }
+			others := by_name[target.name].filter(it != u.to
+				&& it !in site_targets[site_key(u.from, u.line, by_edge)]
+				&& same_role(syms[it].kind, target.kind, edge_kind))
 			if others.len > 0 {
 				corrupted << Unit{
 					from: u.from
 					to:   others[rng.below(others.len)]
 					line: u.line
+					orig: u.to
 				}
 			}
 		}
@@ -332,41 +365,67 @@ fn main() {
 		println('self-test: ${sample.len} sampled edges pointed at another declaration of their name')
 	}
 
+	// a reference's `from` can be declared in several files under one id (a `C.`
+	// declaration, a declaration per OS): each copy, and the declarations beside it
+	mut copies := map[string][]GSymbol{}
+	mut in_file := map[string][]GSymbol{}
+	if by_edge {
+		for s in g.symbols {
+			copies[s.id] << s
+			in_file[s.file] << s
+		}
+	}
+
 	mut rows := []Row{}
-	for u in sample {
+	for gi, u in sample {
 		caller := syms[u.from] or { GSymbol{} }
 		callee := syms[u.to] or { GSymbol{} }
-		mut row := Row{
-			from:    u.from
-			to:      u.to
-			file:    caller.file
-			line:    u.line
-			to_file: callee.file
-			to_line: callee.line
-		}
-		src := ctx.lines_of(caller.file)
-		if caller.file == '' || u.line < 1 || u.line > src.len {
-			row.status = 'no-source'
-			rows << row
-			continue
-		}
 		name := if callee.name != '' {
 			callee.name
 		} else {
 			u.to.all_before('@').all_after_last('.')
 		}
-		row.cols = name_columns(src[u.line - 1], name)
-		if row.cols.len == 0 {
-			row.status = 'name-not-on-line'
+		// the lines to ask at: the site's, or a reference's mentions in its `from`
+		spots := if by_edge {
+			ctx.mention_spots(copies[u.from], in_file, name, caller)
+		} else {
+			[Spot{caller.file, u.line}]
+		}
+		for spot in spots {
+			src := ctx.lines_of(spot.file)
+			ln := spot.line
+			mut row := Row{
+				group:   gi
+				orig:    u.orig
+				from:    u.from
+				to:      u.to
+				file:    spot.file
+				line:    ln
+				to_file: callee.file
+				to_line: callee.line
+			}
+			if spot.file == '' || ln < 1 || ln > src.len {
+				row.status = 'no-source'
+				rows << row
+				continue
+			}
+			row.cols = if by_edge {
+				mention_columns(src[ln - 1], name)
+			} else {
+				name_columns(src[ln - 1], name)
+			}
+			if row.cols.len == 0 {
+				row.status = 'name-not-on-line'
+				rows << row
+				continue
+			}
+			if row.cols.len > 1 {
+				row.note = '${row.cols.len} occurrences'
+			}
+			row.progs = ctx.programs_for(spot.file)
+			row.worlds = worlds_for(spot.file, os.user_os())
 			rows << row
-			continue
 		}
-		if row.cols.len > 1 {
-			row.note = '${row.cols.len} occurrences'
-		}
-		row.progs = ctx.programs_for(caller.file)
-		row.worlds = worlds_for(caller.file, os.user_os())
-		rows << row
 	}
 
 	println('asking V3 in the default build...')
@@ -425,7 +484,7 @@ fn main() {
 			}
 		}
 		row.ids = dedupe(ids)
-		targets := site_targets['${row.from}\t${row.line}']
+		targets := site_targets[site_key(row.from, row.line, by_edge)]
 		row.status = if row.to in row.ids {
 			'correct'
 		} else if row.ids.any(it in targets) {
@@ -437,7 +496,9 @@ fn main() {
 		}
 	}
 
-	summary := summarize(rows, units.len, opts, commit, graph_path)
+	// one result per sampled unit: a reference edge's best row
+	results := best_per_group(rows)
+	summary := summarize(results, units.len, opts, commit, graph_path)
 	println(summary)
 	write_csv(os.join_path(out_dir, 'sample.csv'), rows)
 	os.write_file(os.join_path(out_dir, 'summary.txt'), summary) or { eprintln(err) }
@@ -445,17 +506,20 @@ fn main() {
 	println('wrote sample.csv, summary.txt and v3_raw.log in ${out_dir}')
 
 	if opts.self_test {
-		correct := rows.filter(it.status == 'correct').len
-		scored := rows.filter(it.status in ['correct', 'extra', 'wrong']).len
-		if correct > 0 || scored == 0 {
+		faults, own_wrong := self_test_counts(rows, results)
+		scored := results.filter(it.status in ['correct', 'extra', 'wrong']).len
+		if own_wrong > 0 {
+			println("self-test: ${own_wrong} stand-in(s) scored correct where V3 never names the edge's own target: that edge is wrong, not the harness")
+		}
+		if faults > 0 || scored == 0 {
 			eprintln(if scored == 0 {
 				'SELF-TEST FAILED: no corrupted edge could be scored'
 			} else {
-				'SELF-TEST FAILED: ${correct} of ${scored} corrupted edges scored correct'
+				'SELF-TEST FAILED: ${faults} of ${scored} corrupted edges scored correct beside their own target'
 			})
 			exit(1)
 		}
-		println('self-test passed: none of ${scored} corrupted edges scored correct')
+		println('self-test passed: no corrupted edge of ${scored} scored correct beside its own target')
 	}
 }
 
@@ -465,7 +529,7 @@ fn parse_args(args []string) !Options {
 	for i < args.len {
 		a := args[i]
 		match a {
-			'-n', '-seed', '-out', '-v3', '-timeout' {
+			'-kind', '-n', '-seed', '-out', '-v3', '-timeout' {
 				if i + 1 >= args.len {
 					return error('${a} needs a value')
 				}
@@ -475,6 +539,12 @@ fn parse_args(args []string) !Options {
 				}
 				// strconv refuses a number too big for its type; `.int()` would clamp it
 				match a {
+					'-kind' {
+						if v !in ['calls', 'references'] {
+							return error('-kind is calls or references, not `${v}`')
+						}
+						o.kind = v
+					}
 					'-n' { o.n = strconv.atoi(v) or { return error('-n ${v} is too big') } }
 					'-seed' {
 						o.seed = strconv.parse_uint(v, 10, 64) or {
@@ -700,6 +770,161 @@ fn file_flags(rel string, host string) []string {
 		}
 	}
 	return []
+}
+
+// unit_name is what one sampled unit of `kind` is, in the plural.
+fn unit_name(kind string) string {
+	return if kind == 'references' { 'reference edges' } else { 'call sites' }
+}
+
+// site_key names a site: the caller and line of a call; for a reference, whose edge
+// has no lines, the symbol it is from.
+fn site_key(from string, line int, by_edge bool) string {
+	return if by_edge { from } else { '${from}\t${line}' }
+}
+
+// decl_end is the last line (1-based) of the declaration that starts on line `start`
+// of `src`: where the brackets opened from `start` are all closed again. Brackets in
+// strings, runes and after `//` are not counted.
+fn decl_end(src []string, start int) int {
+	mut depth := 0
+	for ln in start .. src.len + 1 {
+		text := src[ln - 1]
+		mut quote := u8(0)
+		mut i := 0
+		for i < text.len {
+			c := text[i]
+			if quote != 0 {
+				if c == `\\` {
+					i++
+				} else if c == quote {
+					quote = 0
+				}
+			} else if c in [`'`, `"`, `\``] {
+				quote = c
+			} else if c == `/` && i + 1 < text.len && text[i + 1] == `/` {
+				break
+			} else if c in [`{`, `(`, `[`] {
+				depth++
+			} else if c in [`}`, `)`, `]`] {
+				depth--
+			}
+			i++
+		}
+		if depth <= 0 {
+			return ln
+		}
+	}
+	return src.len
+}
+
+// mention_spots is where to ask V3 about a reference to `name` from the declaration
+// `decls` are the copies of (one per file declaring its id; `in_file` holds every
+// file's declarations): the lines of each copy that name it, 8 at most in all, or
+// `caller`'s own line when none does, which is then reported as name-not-on-line.
+fn (mut ctx Ctx) mention_spots(decls []GSymbol, in_file map[string][]GSymbol, name string, caller GSymbol) []Spot {
+	mut spots := []Spot{}
+	for c in decls {
+		src := ctx.lines_of(c.file)
+		if c.line < 1 || c.line > src.len {
+			continue
+		}
+		for ln in c.line .. decl_last_line(src, c, in_file[c.file]) + 1 {
+			if spots.len < max_mention_lines && mention_columns(src[ln - 1], name).len > 0 {
+				spots << Spot{c.file, ln}
+			}
+		}
+	}
+	if spots.len == 0 {
+		spots << Spot{caller.file, caller.line}
+	}
+	return spots
+}
+
+// self_test_counts is, of the -self-test `results` (one per edge), how many stand-ins
+// scored correct while V3 also names the edge's own target (a fault of the harness),
+// and how many scored correct where V3 never names it (the edge itself is wrong: V3's
+// answer does not depend on the edge's target, so the stand-in is V's declaration).
+// `rows` are every row asked, whose answers the own target is looked for in.
+fn self_test_counts(rows []Row, results []Row) (int, int) {
+	mut group_ids := map[int][]string{}
+	for row in rows {
+		group_ids[row.group] << row.ids
+	}
+	mut faults := 0
+	mut own_wrong := 0
+	for r in results {
+		if r.status == 'correct' {
+			if r.orig in group_ids[r.group] {
+				faults++
+			} else {
+				own_wrong++
+			}
+		}
+	}
+	return faults, own_wrong
+}
+
+// decl_last_line is the last line of `d`, a declaration in `src`, whose file declares
+// `in_file`: where its brackets close (decl_end), but no later than the line before the
+// next declaration beside it (the same parent), as a string over several lines can
+// hold a bracket decl_end counts.
+fn decl_last_line(src []string, d GSymbol, in_file []GSymbol) int {
+	mut last := decl_end(src, d.line)
+	for o in in_file {
+		if o.parent == d.parent && o.line > d.line && o.line - 1 < last {
+			last = o.line - 1
+		}
+	}
+	return last
+}
+
+// best_per_group is one row per sampled unit: of a unit's rows, the one whose status
+// counts most (correct, then extra, wrong, not-in-graph, no-answer, name-not-on-line,
+// no-source), the first of them on a tie.
+fn best_per_group(rows []Row) []Row {
+	order := ['correct', 'extra', 'wrong', 'not-in-graph', 'no-answer', 'name-not-on-line', 'no-source']
+	mut best := map[int]int{} // group -> index of its best row
+	mut groups := []int{}
+	for i, row in rows {
+		if row.group !in best {
+			best[row.group] = i
+			groups << row.group
+			continue
+		}
+		if order.index(row.status) < order.index(rows[best[row.group]].status) {
+			best[row.group] = i
+		}
+	}
+	return groups.map(rows[best[it]])
+}
+
+// same_role tells whether a declaration of kind `kind` could stand in for an edge's
+// target of kind `target` in the self-test: for a call any function or method, for a
+// reference a declaration of the target's own kind.
+fn same_role(kind int, target int, edge_kind int) bool {
+	if edge_kind == edge_calls {
+		return kind == kind_function || kind == kind_method
+	}
+	return kind == target
+}
+
+// mention_columns is the 0-based byte columns where `name` is written on `text`, every
+// one: a reference's type can sit beside a call of a method with its name
+// (`x.string()` and `string`), and only V3 tells them apart.
+fn mention_columns(text string, name string) []int {
+	mut out := []int{}
+	if name == '' {
+		return out
+	}
+	for i := 0; i + name.len <= text.len; i++ {
+		if text[i..i + name.len] == name && (i == 0 || !(is_name_byte(text[i - 1])
+			|| text[i - 1] == `$`)) && (i + name.len == text.len
+			|| !is_name_byte(text[i + name.len])) {
+			out << i
+		}
+	}
+	return out
 }
 
 // name_columns is the 0-based byte columns where `name` is called on `text`, or,
@@ -973,7 +1198,7 @@ fn summarize(rows []Row, population int, opts Options, commit string, graph_path
 	lo, hi := wilson(correct, scored)
 	mut s := strings.new_builder(1024)
 	s.writeln('graph: ${graph_path}${if commit != '' { ' (' + commit#[..10] + ')' } else { '' }}')
-	s.writeln('population: ${population} inferred call sites; sample ${rows.len}, seed ${opts.seed}${if opts.self_test {
+	s.writeln('population: ${population} inferred ${unit_name(opts.kind)}; sample ${rows.len}, seed ${opts.seed}${if opts.self_test {
 		', SELF-TEST'
 	} else {
 		''
