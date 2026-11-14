@@ -233,6 +233,10 @@ fn main() {
 		eprintln('the graph root ${root} is not a V checkout (no vlib/v/v.v); pass -v3 <binary>')
 		exit(1)
 	}
+	if why := tree_mismatch(root, commit) {
+		eprintln(why)
+		exit(1)
+	}
 	// absolute before the chdir into the root below, which a relative path would follow
 	out_dir := if opts.out != '' {
 		os.abs_path(opts.out)
@@ -498,7 +502,10 @@ fn main() {
 
 	// one result per sampled unit: a reference edge's best row
 	results := best_per_group(rows)
-	summary := summarize(results, units.len, opts, commit, graph_path)
+	mut summary := summarize(results, units.len, opts, commit, graph_path)
+	if by_edge && !opts.self_test {
+		summary += '  of the correct, ${mixed_groups(rows, results)} have a mention V3 resolves to a declaration their `from` has no edge to\n'
+	}
 	println(summary)
 	write_csv(os.join_path(out_dir, 'sample.csv'), rows)
 	os.write_file(os.join_path(out_dir, 'summary.txt'), summary) or { eprintln(err) }
@@ -506,17 +513,14 @@ fn main() {
 	println('wrote sample.csv, summary.txt and v3_raw.log in ${out_dir}')
 
 	if opts.self_test {
-		faults, own_wrong := self_test_counts(rows, results)
+		faults, own_wrong, own_correct := self_test_counts(rows, results)
 		scored := results.filter(it.status in ['correct', 'extra', 'wrong']).len
 		if own_wrong > 0 {
 			println("self-test: ${own_wrong} stand-in(s) scored correct where V3 never names the edge's own target: that edge is wrong, not the harness")
 		}
-		if faults > 0 || scored == 0 {
-			eprintln(if scored == 0 {
-				'SELF-TEST FAILED: no corrupted edge could be scored'
-			} else {
-				'SELF-TEST FAILED: ${faults} of ${scored} corrupted edges scored correct beside their own target'
-			})
+		println('self-test: the original edges, from the same answers: ${own_correct} of ${scored} correct')
+		if verdict := self_test_failure(scored, faults, own_correct) {
+			eprintln('SELF-TEST FAILED: ${verdict}')
 			exit(1)
 		}
 		println('self-test passed: no corrupted edge of ${scored} scored correct beside its own target')
@@ -772,6 +776,21 @@ fn file_flags(rel string, host string) []string {
 	return []
 }
 
+// tree_mismatch is why `root` can't be checked against a graph extracted at `commit`
+// (its manifest's source_commit): the tree is at another commit, so the graph's lines
+// are not its lines. None when they agree, or when either commit is unknown.
+fn tree_mismatch(root string, commit string) ?string {
+	if commit == '' {
+		return none
+	}
+	rev := os.exec(['git', '-C', root, 'rev-parse', 'HEAD'])
+	head := rev.output.trim_space()
+	if rev.exit_code != 0 || head == '' || head == commit {
+		return none
+	}
+	return 'the graph was extracted at ${commit#[..12]}, but ${root} is at ${head#[..12]}: re-extract it, or check out ${commit#[..12]}'
+}
+
 // unit_name is what one sampled unit of `kind` is, in the plural.
 fn unit_name(kind string) string {
 	return if kind == 'references' { 'reference edges' } else { 'call sites' }
@@ -785,12 +804,12 @@ fn site_key(from string, line int, by_edge bool) string {
 
 // decl_end is the last line (1-based) of the declaration that starts on line `start`
 // of `src`: where the brackets opened from `start` are all closed again. Brackets in
-// strings, runes and after `//` are not counted.
+// strings (a string can run over several lines), runes and after `//` are not counted.
 fn decl_end(src []string, start int) int {
 	mut depth := 0
+	mut quote := u8(0)
 	for ln in start .. src.len + 1 {
 		text := src[ln - 1]
-		mut quote := u8(0)
 		mut i := 0
 		for i < text.len {
 			c := text[i]
@@ -845,38 +864,89 @@ fn (mut ctx Ctx) mention_spots(decls []GSymbol, in_file map[string][]GSymbol, na
 // scored correct while V3 also names the edge's own target (a fault of the harness),
 // and how many scored correct where V3 never names it (the edge itself is wrong: V3's
 // answer does not depend on the edge's target, so the stand-in is V's declaration).
-// `rows` are every row asked, whose answers the own target is looked for in.
-fn self_test_counts(rows []Row, results []Row) (int, int) {
+// `rows` are every row asked, whose answers the own target is looked for in. The third
+// count is how many of the scored edges' own targets V3 names: the originals, scored
+// from the same answers, which a harness that misreads V3 would score badly.
+fn self_test_counts(rows []Row, results []Row) (int, int, int) {
 	mut group_ids := map[int][]string{}
 	for row in rows {
 		group_ids[row.group] << row.ids
 	}
 	mut faults := 0
 	mut own_wrong := 0
+	mut own_correct := 0
 	for r in results {
+		// (an unscored edge never names its own target: a row that does is scored)
+		own_named := r.orig in group_ids[r.group]
+		if own_named {
+			own_correct++
+		}
 		if r.status == 'correct' {
-			if r.orig in group_ids[r.group] {
+			if own_named {
 				faults++
 			} else {
 				own_wrong++
 			}
 		}
 	}
-	return faults, own_wrong
+	return faults, own_wrong, own_correct
+}
+
+// self_test_failure is why the self-test fails, if it does: no corrupted edge scored;
+// one scored correct while V3 also names its edge's own target; or fewer than 90% of
+// the original edges correct from the same answers, which V3's own answers give for a
+// sound harness (99.7% and more on vlang) and a harness misreading them would not.
+fn self_test_failure(scored int, faults int, own_correct int) ?string {
+	if scored == 0 {
+		return 'no corrupted edge could be scored'
+	}
+	if faults > 0 {
+		return '${faults} of ${scored} corrupted edges scored correct beside their own target'
+	}
+	if own_correct * 10 < scored * 9 {
+		return 'only ${own_correct} of ${scored} original edges are correct from the same answers (90% at least)'
+	}
+	return none
 }
 
 // decl_last_line is the last line of `d`, a declaration in `src`, whose file declares
 // `in_file`: where its brackets close (decl_end), but no later than the line before the
-// next declaration beside it (the same parent), as a string over several lines can
-// hold a bracket decl_end counts.
+// next declaration after it that is not one of its members (a field of a struct), as
+// a quote decl_end takes for a string's (in a `/* */` comment, say) leaves it open.
+// Left open to the end of the file with nothing after it, it ends at the last `}`
+// written alone at its own indentation, as vfmt closes a body.
 fn decl_last_line(src []string, d GSymbol, in_file []GSymbol) int {
 	mut last := decl_end(src, d.line)
 	for o in in_file {
-		if o.parent == d.parent && o.line > d.line && o.line - 1 < last {
+		if o.parent != d.id && o.line > d.line && o.line - 1 < last {
 			last = o.line - 1
 		}
 	}
+	// a later declaration bounds it before the last line, so this is only when none does
+	if last == src.len {
+		first := src[d.line - 1]
+		close := first[..first.len - first.trim_left(' \t').len] + '}'
+		for e := src.len; e > d.line; e-- {
+			if src[e - 1].trim_right(' \t\r') == close {
+				return e
+			}
+		}
+	}
 	return last
+}
+
+// mixed_groups is how many of the reference edges scored correct (`results`, one per
+// edge) also have a mention V3 resolves to a declaration their `from` has no edge to
+// (a `wrong` row among `rows`): a mention of the name that means something else, such
+// as a method call, or an edge the graph lacks.
+fn mixed_groups(rows []Row, results []Row) int {
+	mut has_wrong := map[int]bool{}
+	for row in rows {
+		if row.status == 'wrong' {
+			has_wrong[row.group] = true
+		}
+	}
+	return results.filter(it.status == 'correct' && has_wrong[it.group]).len
 }
 
 // best_per_group is one row per sampled unit: of a unit's rows, the one whose status
@@ -1006,10 +1076,12 @@ fn (mut ctx Ctx) ask_world(mut rows []Row, world []string, want []int) {
 fn (mut ctx Ctx) ask_program(mut rows []Row, world []string, prog string, idxs []int) {
 	mut specs := []string{}
 	mut owner := []int{}
+	mut owner_col := []int{}
 	for i in idxs {
 		for c in rows[i].cols {
 			specs << '${rows[i].file}:${rows[i].line}:gd^${c}'
 			owner << i
+			owner_col << c
 		}
 	}
 	for start := 0; start < specs.len; start += batch_size {
@@ -1018,7 +1090,7 @@ fn (mut ctx Ctx) ask_program(mut rows []Row, world []string, prog string, idxs [
 		got := ctx.ask(world, prog, chunk)
 		for k, a in got {
 			ri := owner[start + k]
-			if is_answer(a) {
+			if is_answer(a) && !at_question(a, rows[ri].file, rows[ri].line, owner_col[start + k]) {
 				rows[ri].answers << a
 				rows[ri].program = prog
 				rows[ri].world = world.join(' ')
@@ -1117,6 +1189,15 @@ fn run_bounded(exe string, args []string, dir string, limit time.Duration) (int,
 		out.write_string('\nTIMEOUT after ${limit}')
 	}
 	return code, out.str()
+}
+
+// at_question tells whether answer `a` is the very place it was asked about: `file`,
+// `line`, 0-based byte column `col` (as V3 gives its own). The name written there is
+// then declared there (a parameter, a field, the declaration's own name), and names
+// no declaration elsewhere.
+fn at_question(a string, file string, line int, col int) bool {
+	path, ln := split_answer(a) or { return false }
+	return path == file && ln == line && a.all_after_last(':').trim_space() == col.str()
 }
 
 fn is_answer(a string) bool {

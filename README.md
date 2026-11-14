@@ -839,7 +839,9 @@ gives, then under each of `-os linux`, `-os macos` and `-os windows` other than 
 host's. Each sampled edge is `correct`, `extra` (the site also has an edge to V3's
 answer; this one is another), `wrong`, or unscored: no answer, V3's declaration is
 not in the graph, or the site can't be asked (the callee's name is not on the line,
-or the line is not in the file). It prints the accuracy over the scored edges with
+or the line is not in the file). An answer that is the very place asked about (a
+parameter of that name, or the declaration's own name) names nothing, and is
+dropped. It prints the accuracy over the scored edges with
 a 95% Wilson interval and writes `sample.csv`, `summary.txt` and `v3_raw.log`.
 
 A `references` edge records no line, so with `-kind references` the unit is the
@@ -847,41 +849,52 @@ edge: it is asked at up to 8 lines of its `from` declaration that name its targe
 in every file that declares it under that id, at every place on those lines the
 name is written (a call of a method of that name included, which V3 tells apart
 from the type), and scored by its best line, so it is correct when any of them
-resolves to the target. A declaration runs from its first line until the brackets
-opened there close, or to the line before the next declaration beside it, whichever
-comes first (a function's `end_line` in the graph is the line of the `{` that opens
-its body, not its last line).
+resolves to the target. That is what the edge claims: `from` names `to` somewhere,
+not that every mention of the name is `to`. How often another mention resolves to a
+declaration `from` has no edge to (a method of the same name, or an edge the graph
+lacks) is printed as its own count. A declaration runs from its first line until
+the brackets opened there close (a string can run over several lines), or to the
+line before the next declaration after it that is not one of its members, whichever
+comes first; left open to the end of the file with nothing after it (a quote in a
+`/* */` comment), it ends at the last `}` alone at its own indentation. A
+function's `end_line` in the graph is the line of the `{` that opens its body, not
+its last line.
 
 `-self-test` points each edge at another declaration of its name (a function or
-method for a call, one of the target's kind for a reference) and fails if one
-scores correct while V3 also names the edge's own target; one that scores correct
-where V3 never names it shows the edge itself is wrong, and is reported instead.
+method for a call, one of the target's kind for a reference). V3's answers do not
+depend on the target, so the same answers score the original edges too. It fails
+if no stand-in is scored, if one scores correct while V3 also names the edge's own
+target, or if fewer than 90% of the originals score correct (a harness that misread
+V3's answers would score them badly). A stand-in that scores correct where V3 never
+names the edge's own target shows the edge itself is wrong, and is reported instead.
 V3 answers for one build at a time, so an `extra` or `wrong` row can be an edge
 that is right for another build; read those by hand. A seed draws the same sample
 of the same graph with any V version, so a run after a resolver change compares
 with the one before it.
 
-On the V tree at `f2edf668` (November 2026), seed 20261110:
+On the V tree at `ce4f978a` (November 2026), seed 20261110:
 
-- calls, 1000 of 194,170 inferred call sites: 947 of the 950 scored are correct,
-  99.68% (95% 99.08–99.89%). The two wrong ones are methods builtin declares twice,
-  `u8.vstring` and `byteptr.vstring`, `char.vstring` and `charptr.vstring`: the graph
-  links the first, V3 the second. The extra one links `openssl.SSLConn.dial` where
-  V3's default build has mbedtls's. 38 sites were never answered (17 in tests, 5 in
-  `-d` files, 2 in other-OS files, 1 in another backend, 13 others), and 12 could
-  not be asked.
-- references, 1000 of 48,414 inferred reference edges: 971 of the 972 scored are
-  correct, 99.90% (95% 99.42–99.98%). The wrong one is `C.PWSTR` in a Windows alias
-  test that declares its own `C.WCHAR`: the graph links that one, V3 builtin's, as
-  `C.` types share one namespace. 28 edges were never answered (8 in `-d` files,
-  8 in other-OS files, 6 in other backends, 2 in tests, 4 others).
+- calls, 1000 of 195,949 inferred call sites: 931 of the 932 scored are correct,
+  99.89% (95% 99.39–99.98%). The wrong one is `els[2].payload()` in an asn1 test,
+  after `assert els[2] is OctetString`: the graph links the interface's `payload`,
+  V3 `OctetString`'s. 59 sites were never answered (26 in tests, 8 in `-d` files,
+  1 in another backend, 24 others), and 9 could not be asked.
+- references, 1000 of 48,791 inferred reference edges: 970 of the 974 scored are
+  correct, 99.59% (95% 98.95–99.84%). The wrong one is a `C.` type declared in more
+  than one module, which share one namespace: `C.itimerspec`'s fields name
+  `C.timespec`, the graph links sokol's, V3 os's. The three extra ones are `C.`
+  functions whose `C.Display` the graph links to `x.multiwindow`'s, beside the
+  module's own. 23 edges were never answered (6 in other-OS files, 5 in `-d` files,
+  4 in other backends, 4 in tests, 4 others). Of the correct, 2 have a mention V3
+  resolves to a declaration their `from` has no edge to.
 
-Each self-test scored 1 stand-in correct where V3 never names the edge's own
-target: a wrong edge above (`u8.vstring` for calls, `C.PWSTR` for references),
-whose stand-in is V's declaration.
+In the self-tests no stand-in scored correct, and the original edges scored 930 of
+931 (calls) and 946 of 949 (references) from the same answers.
 
-At `32a246c8`, two days earlier, the same seed gave 933 of 934 calls correct
-(99.89%), the wrong one `vbytes` on a `&u8`, declared for `&u8` and `byteptr`.
+At `f2edf668`, a day earlier, the same seed gave calls 947 of 950 (99.68%) and
+references 971 of 972 (99.90%); at `32a246c8`, calls 933 of 934 (99.89%). The
+graphs differ, so the samples do, and both ran before answers at the place asked
+about were dropped.
 
 ### `bench/session_stats.vsh` — token-free MCP usage stats
 
