@@ -332,16 +332,23 @@ unresolved, besides the 47,959 to primitives, and most were not ambiguous names.
 `JS.Number`, `JS.String`, `JS.Boolean`, `JS.Any` and `JS.Array` stayed ambiguous among
 same-named V types, although vlib/builtin/js declares each one (`pub interface JS.Number`). `type_ref`
 (backend_v.v) now keeps the qualifier, and a JS declaration keeps its `JS.` on its signature,
-as a C struct keeps `C.`. `resolve_type_ref` (graphify.v) then names only a C or JS
-declaration: the nearest one, in the referencing file, its module, a module it can see, then
-the program (`nearest_type`, which `c_struct` in infer.v uses too). A bare name is a V type,
+as a C struct keeps `C.`. `host_type_ref` (graphify.v) then names only C or JS
+declarations: the nearest ones, in the referencing file, its module, or a module it can see,
+then the program's one. A bare name is a V type,
 so a C or JS declaration is no longer a candidate for it: the bare `Window` in
 `sokol/sapp/sapp_linux.c.v` had been ambiguous with `type C.Window`. A C or JS type that
-nothing in the program declares is marked undeclared and counted as external
-(`host_type_undeclared`). One that is declared in several modules, where the nearest scope
-can't pick, stays unresolved, as an ambiguous C binding does: `C.timespec` is declared by os,
-sync, time and sokol.sapp. `u128` and `i128`, V3's 128-bit integers, are counted as
-primitives.
+nothing in the program declares is marked undeclared and counted as external. When the
+nearest scope that declares it holds several, the reference is linked to each, as each
+describes the one C type: `C.timespec` is declared by os, sync and time, which fasthttp all
+imports. V3 picks one of them (time's from fasthttp and picoev, but os's `C.timeval` from net),
+and the graph does not try to tell which. One declared by several modules, none of which the
+referencing code sees, is undeclared too: `C.XEvent` in x.x11, which clipboard.x11, sokol.sapp,
+x.multiwindow and a compiler test declare. One declared once in the program is still that one,
+seen or not. A module sees a C type through the imports of any of its files, its tests apart,
+as the type is the program's; a `module main` directory of separate programs is no module
+here. (Type inference wants one type, so `c_struct` in infer.v still takes the nearest one
+with `nearest_type`, and none on a tie.)
+`u128` and `i128`, V3's 128-bit integers, are counted as primitives.
 
 The 46 references to `string` itself that stayed unresolved had four causes. A type declared
 once per platform (`gg.Config` in gg.c.v and gg.js.v) had no site, since only a function or
