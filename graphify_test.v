@@ -3025,7 +3025,8 @@ fn test_report_counts_v3_primitives_and_undeclared_host_types_apart_from_unresol
 			provenance: if to in ['C.Cursor', 'JS.EveryFn'] { .undeclared } else { .extracted }
 		}
 	}
-	// `C.timespec` stands for one declared several times that doesn't resolve
+	// `C.timespec` stands for an edge resolve_edges left as it was: the report counts
+	// what it is given (a C or JS type is now linked or undeclared there)
 	r := g.report()
 	assert r.contains('- references: extracted 0, inferred 0, built-in 2, external 2, unresolved 2'), r
 }
@@ -3204,9 +3205,27 @@ import qx
 
 fn C.quux(q &C.qux) int
 '
+		// a directory with no `fn main` is built together by `v test`: the test's
+		// `C.qa` is common.v's, which comes before the one of qx it imports
+		'examples/nm/common.v':   'module main
+
+pub struct C.qa {
+	x int
+}
+'
+		'examples/nm/x_test.v':   'module main
+
+import qx
+
+fn C.qb(q &C.qa) int
+'
 		'vlib/qx/qx.c.v':         'module qx
 
 pub struct C.qux {
+	x int
+}
+
+pub struct C.qa {
 	x int
 }
 '
@@ -3235,6 +3254,8 @@ pub struct C.qux {
 	assert of('C.baz', 'C.foo') == [EdgeProvenance.undeclared], refs.str()
 	assert of('C.quux', 'examples.oneprog.C.qux') == [EdgeProvenance.inferred], refs.str()
 	assert of('C.quux', 'vlib.qx.C.qux') == []
+	assert of('C.qb', 'examples.nm.C.qa') == [EdgeProvenance.inferred], refs.str()
+	assert of('C.qb', 'vlib.qx.C.qa') == []
 	line := g.report().split_into_lines().filter(it.starts_with('- references: extracted '))
 	assert line.len == 1 && line[0].ends_with(', unresolved 0'), line.str()
 }

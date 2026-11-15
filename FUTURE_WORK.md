@@ -346,8 +346,14 @@ referencing code sees, is undeclared too: `C.XEvent` in x.x11, which clipboard.x
 x.multiwindow and a compiler test declare. One declared once in the program is still that one,
 seen or not. A module sees a C type through the imports of any of its files, its tests apart,
 as the type is the program's; a `module main` directory of separate programs is no module
-here. (Type inference wants one type, so `c_struct` in infer.v still takes the nearest one
+here, and one with no `fn main`, which `v test` builds together, is one. (Type inference wants one type, so `c_struct` in infer.v still takes the nearest one
 with `nearest_type`, and none on a tie.)
+Not covered: a declaration in a test file counts for every file of its module, where a
+V type's does not (`test_private`, in `type_in_scope`). A non-test file whose module
+declares a C type only in a `_test.v` or `_test.c.v` file links that declaration, which
+its build never compiles, rather than one in a module it imports. The rule was the same
+before the nearest-declaration change, and no reference on the vlang tree at
+`ce4f978a` is linked this way.
 `u128` and `i128`, V3's 128-bit integers, are counted as primitives.
 
 The 46 references to `string` itself that stayed unresolved had four causes. A type declared
@@ -412,7 +418,8 @@ The 104 left come down to 18 (October 2026, same tree):
 
 No reference or call loses its target. What remains is 18 references. Ten are C types that
 several modules declare and the referencing file can't choose between (`C.timespec`,
-`C.timeval`, `C.XEvent`). One is a type declared once per platform in one program
+`C.timeval`, `C.XEvent`; since linked to each nearest declaration or counted external,
+see the type references paragraph above). One is a type declared once per platform in one program
 (`ToolCacheEntryDir` in cmd/v). Three name modules that are not in the tree (`js.promise`,
 vdoc's `markdown`). One is a bare `SSL` where only `struct C.SSL` is declared, and three are
 the checker's unknown-type fixture. A JS binding type still shares the id of a V type of its

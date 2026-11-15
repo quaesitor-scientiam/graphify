@@ -2655,7 +2655,7 @@ struct HostTypeRef {
 // and `mod_imports`, those of any file of its module, as the type is the program's,
 // not the file's; a file of a `module main` directory sees through its own alone, and
 // no other file of the directory is its module, unless the directory is one program
-// (one `fn main`). A V type of the same name is none of them,
+// (one `fn main`, or none, as `v test` builds it). A V type of the same name is none of them,
 // `EveryFn` for `JS.EveryFn` included. Past those, the one declaration in the
 // program is it; with none, or several none of which the referencing code can see
 // (`C.XEvent` declared by modules x.x11 does not import), it is undeclared: `ids`
@@ -2672,8 +2672,9 @@ fn host_type_ref(e Edge, by_type_name map[string][]TypeCand, site_of map[string]
 		file: e.file
 	} }
 	mut imports := imports_of[site.file] or { []string{} }
-	// a `module main` directory of separate programs is no module its files share
-	one_module := site.mod != '' && (!site.is_main || site.solo)
+	// a `module main` directory of separate programs is no module its files share;
+	// one with no `fn main` is, as `v test` builds it together (type_in_scope)
+	one_module := site.mod != '' && (!site.is_main || site.solo || site.no_main)
 	if one_module {
 		imports << mod_imports[site.mod] or { []string{} }
 	}
