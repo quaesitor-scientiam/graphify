@@ -3025,9 +3025,239 @@ fn test_report_counts_v3_primitives_and_undeclared_host_types_apart_from_unresol
 			provenance: if to in ['C.Cursor', 'JS.EveryFn'] { .undeclared } else { .extracted }
 		}
 	}
-	// `C.timespec` stands for one declared several times that doesn't resolve
+	// `C.timespec` stands for an edge resolve_edges left as it was: the report counts
+	// what it is given (a C or JS type is now linked or undeclared there)
 	r := g.report()
 	assert r.contains('- references: extracted 0, inferred 0, built-in 2, external 2, unresolved 2'), r
+}
+
+fn test_resolve_type_ref_picks_no_c_type_from_a_tie_or_none() {
+	// resolve_type_ref is one answer, for type inference: of a C type declared by two
+	// modules the reference sees it picks neither, and of an undeclared one nothing;
+	// declared by one, it is that one
+	mut by_name := map[string][]TypeCand{}
+	by_name['timeval'] = [
+		TypeCand{
+			id:   'vlib.os.C.timeval'
+			mod:  'vlib.os'
+			file: 'vlib/os/fd.c.v'
+			c:    true
+		},
+		TypeCand{
+			id:   'vlib.time.C.timeval'
+			mod:  'vlib.time'
+			file: 'vlib/time/time.c.v'
+			c:    true
+		},
+	]
+	by_name['tm'] = [TypeCand{
+		id:   'vlib.time.C.tm'
+		mod:  'vlib.time'
+		file: 'vlib/time/time.c.v'
+		c:    true
+	}]
+	// a V type of the name is no declaration of the C one
+	by_name['XEvent'] = [TypeCand{
+		id:   'vlib.ui.XEvent'
+		mod:  'vlib.ui'
+		file: 'vlib/ui/ui.v'
+	}]
+	mut site_of := map[string]DeclSite{}
+	site_of['vlib.net.wait'] = DeclSite{
+		mod:  'vlib.net'
+		file: 'vlib/net/net.v'
+	}
+	imports := {
+		'vlib/net/net.v': ['os', 'time']
+	}
+	ref := fn (to string) Edge {
+		return Edge{
+			from: 'vlib.net.wait'
+			to:   to
+			kind: .references
+			file: 'vlib/net/net.v'
+		}
+	}
+	assert resolve_type_ref(ref('C.timeval'), by_name, site_of, imports) == none
+	assert resolve_type_ref(ref('C.XEvent'), by_name, site_of, imports) == none
+	tm := resolve_type_ref(ref('C.tm'), by_name, site_of, imports) or { panic('C.tm') }
+	assert tm.id == 'vlib.time.C.tm' && !tm.inferred
+}
+
+fn test_a_c_type_reference_names_each_nearest_declaration() {
+	// A C type is one type for the whole program, however many modules declare it.
+	// A reference names each declaration in the nearest scope that has any: net sees
+	// os's and time's `C.timeval`, and V3 picks one of them, which the graph can't tell. os's
+	// own copy of `C.select` names os's. Declared only where the referencing code can't
+	// see it (builtin, x11), it is undeclared, as a system header's type is; declared
+	// once in the program, it is that one, seen or not. (Through the whole pipeline, as
+	// separate programs' declarations take their own ids in disambiguate_ids.)
+	g := extract_graph_of({
+		'vlib/os/fd.c.v':         'module os
+
+pub struct C.timeval {
+	tv_sec u64
+}
+
+fn C.select(ndfs int, timeout &C.timeval) int
+'
+		'vlib/time/time.c.v':     'module time
+
+pub struct C.timeval {
+	tv_sec u64
+}
+
+pub struct C.tm {
+	tm_sec int
+}
+
+pub struct C.timespec {
+	tv_nsec i64
+}
+'
+		'vlib/poll/types.c.v':    'module poll
+
+pub struct C.timespec {
+	tv_nsec i64
+}
+'
+		'vlib/poll/wait.c.v':     'module poll
+
+import time
+
+fn C.ppoll(fds voidptr, timeout &C.timespec) int
+'
+		'vlib/net/aasocket.c.v':  'module net
+
+import os
+import time
+
+fn C.select(ndfs int, timeout &C.timeval) int
+'
+		'vlib/builtin/cfns.c.v':  'module builtin
+
+fn C.gettimeofday(tv &C.timeval, tz voidptr) int
+
+fn C.localtime_r(t voidptr, tm &C.tm) &C.tm
+'
+		'vlib/sapp/sapp.c.v':     'module sapp
+
+pub union C.XEvent {
+	typ int
+}
+'
+		'vlib/clip/clip.c.v':     'module clip
+
+pub union C.XEvent {
+	typ int
+}
+'
+		'vlib/x11/x11.c.v':       'module x11
+
+fn C.XNextEvent(d voidptr, e &C.XEvent) int
+'
+		// os declares `C.timeval` once per platform too: one type, one edge
+		'vlib/os/fd_windows.c.v': 'module os
+
+pub struct C.timeval {
+	tv_sec u64
+}
+'
+		// separate programs in one directory: each declares its own `C.foo`, and the
+		// one that declares none sees neither of the others'
+		'examples/cprogs/a.v':    'module main
+
+pub struct C.foo {
+	x int
+}
+
+fn C.bar(f &C.foo) int
+
+fn main() {}
+'
+		'examples/cprogs/b.v':    'module main
+
+pub struct C.foo {
+	x int
+}
+
+fn main() {}
+'
+		'examples/cprogs/c.v':    'module main
+
+fn C.baz(f &C.foo) int
+
+fn main() {}
+'
+		// a directory that is one program is one module: b.v's `C.qux` is a.v's, which
+		// comes before the one of qx it imports
+		'examples/oneprog/a.v':   'module main
+
+pub struct C.qux {
+	x int
+}
+
+fn main() {}
+'
+		'examples/oneprog/b.v':   'module main
+
+import qx
+
+fn C.quux(q &C.qux) int
+'
+		// a directory with no `fn main` is built together by `v test`: the test's
+		// `C.qa` is common.v's, which comes before the one of qx it imports
+		'examples/nm/common.v':   'module main
+
+pub struct C.qa {
+	x int
+}
+'
+		'examples/nm/x_test.v':   'module main
+
+import qx
+
+fn C.qb(q &C.qa) int
+'
+		'vlib/qx/qx.c.v':         'module qx
+
+pub struct C.qux {
+	x int
+}
+
+pub struct C.qa {
+	x int
+}
+'
+	})
+	refs := g.edges.filter(it.kind == .references && it.to.contains('C.'))
+	of := fn [refs] (from string, to string) []EdgeProvenance {
+		return refs.filter(it.from == from && it.to == to).map(it.provenance)
+	}
+	// net's copy: both visible declarations, each inferred
+	assert of('C.select', 'vlib.time.C.timeval') == [EdgeProvenance.inferred], refs.str()
+	// os's copy names its own module's one; net's names it too
+	assert of('C.select', 'vlib.os.C.timeval') == [EdgeProvenance.inferred, .inferred], refs.str()
+	assert of('C.select', 'C.timeval') == []
+	// poll's own declaration, in another of its files, comes before time's it imports
+	assert of('C.ppoll', 'vlib.poll.C.timespec') == [EdgeProvenance.inferred], refs.str()
+	assert of('C.ppoll', 'vlib.time.C.timespec') == []
+	// builtin sees neither of the two
+	assert of('C.gettimeofday', 'C.timeval') == [EdgeProvenance.undeclared], refs.str()
+	// one declaration in the program is it, even unseen
+	assert of('C.localtime_r', 'vlib.time.C.tm') == [EdgeProvenance.extracted], refs.str()
+	// x11 sees neither declaration of C.XEvent
+	assert of('C.XNextEvent', 'C.XEvent') == [EdgeProvenance.undeclared], refs.str()
+	// a.v's own `C.foo`, not b.v's; c.v sees none
+	bar := refs.filter(it.from == 'C.bar')
+	assert bar.len == 1 && bar[0].to.ends_with('@examples/cprogs/a.v'), bar.str()
+	assert of('C.baz', 'C.foo') == [EdgeProvenance.undeclared], refs.str()
+	assert of('C.quux', 'examples.oneprog.C.qux') == [EdgeProvenance.inferred], refs.str()
+	assert of('C.quux', 'vlib.qx.C.qux') == []
+	assert of('C.qb', 'examples.nm.C.qa') == [EdgeProvenance.inferred], refs.str()
+	assert of('C.qb', 'vlib.qx.C.qa') == []
+	line := g.report().split_into_lines().filter(it.starts_with('- references: extracted '))
+	assert line.len == 1 && line[0].ends_with(', unresolved 0'), line.str()
 }
 
 fn test_a_c_or_js_type_reference_names_only_a_c_or_js_declaration() {
@@ -3576,11 +3806,12 @@ fn test_closure() {
 	assert refs_of(g, 'vlib.v.tests.fns.take') == ['Twice']
 }
 
-fn test_a_c_struct_declared_in_modules_the_reference_cannot_tell_apart_stays_unresolved() {
-	// `C.timespec` is declared by os and by time. From picoev, which imports neither in
-	// the referencing file, nothing picks one: the reference stays unresolved, neither
-	// linked to one of them nor called undeclared. A file that imports time names
-	// time's.
+fn test_a_c_struct_declared_in_modules_the_reference_cannot_see_is_undeclared() {
+	// `C.timespec` is declared by os and by time. picoev imports neither, so neither is
+	// the type it names: the reference is undeclared, as a system header's type is,
+	// and is not left unresolved. A file that imports time names time's; one whose
+	// module imports both, in another of its files, names each (see
+	// test_a_c_type_reference_names_each_nearest_declaration).
 	g := graph_of({
 		'vlib/os/sleeping.c.v':           'module os
 
@@ -3604,9 +3835,47 @@ import time
 
 fn wait(ts &C.timespec) {}
 '
+		'vlib/ev/ev.v':                   'module ev
+
+import os
+import time
+'
+		'vlib/ev/ev_macos.c.v':           'module ev
+
+fn C.kevent(kq i32, timeout &C.timespec) i32
+'
+		// a test is a program of its own, a platform's `_test.c.v` too: its imports are
+		// not its module's
+		'vlib/kq/kq.c.v':                 'module kq
+
+fn C.kevent(kq i32, timeout &C.timespec) i32
+'
+		'vlib/kq/kq_test.c.v':            'module kq
+
+import os
+
+fn test_kq() {}
+'
+		// nor are another program's, in a directory of separate programs
+		'examples/progs/a.v':             'module main
+
+import time
+
+fn main() {}
+'
+		'examples/progs/b.v':             'module main
+
+fn C.kevent(kq i32, timeout &C.timespec) i32
+
+fn main() {}
+'
 	})
 	kevent := g.edges.filter(it.kind == .references && it.from == 'C.kevent' && it.to.contains('timespec'))
-	assert kevent.len == 1 && kevent[0].to == 'C.timespec' && kevent[0].provenance != .undeclared, kevent.str()
+	// picoev's, kq's and b.v's copies see neither; ev's sees os and time through ev.v
+	mut got := kevent.map('${it.to} ${it.provenance}')
+	got.sort()
+	assert got == ['C.timespec undeclared', 'C.timespec undeclared', 'C.timespec undeclared',
+		'vlib.os.C.timespec inferred', 'vlib.time.C.timespec inferred'], kevent.str()
 	assert refs_of(g, 'vlib.fasthttp.wait') == ['vlib.time.C.timespec']
 }
 

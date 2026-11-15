@@ -1554,6 +1554,20 @@ fn resolve_edges(mut g Graph) {
 		}
 	}
 	mut builds := build_worlds(inf, alias_targets, g.symbols)
+	// mod_imports is what a module's files import, its tests apart (each is a program of
+	// its own): a C or JS type is one name for the whole program, so it is seen through
+	// an import in any file of the module (host_type_ref)
+	mut mod_imports := map[string][]string{}
+	for file, imps in imports_of {
+		mod := (scope_of[file] or { FileScope{} }).mod
+		if mod != '' && !is_test_file(file) {
+			for imp in imps {
+				if imp !in mod_imports[mod] {
+					mod_imports[mod] << imp
+				}
+			}
+		}
+	}
 	mut resolved := []Edge{cap: g.edges.len}
 	// variants_of maps each platform copy of a function or method to all of its
 	// copies: the same id before the `@file`, in the same module.
@@ -1773,6 +1787,31 @@ fn resolve_edges(mut g Graph) {
 			}
 		}
 		if e.kind == .embeds || e.kind == .references {
+			// a C or JS type: an edge to each of its nearest declarations, or, with
+			// none, one that keeps its name, in a system header or the JS host
+			if r := host_type_ref(e, by_type_name, site_of, imports_of, mod_imports) {
+				ids := r.ids.filter(!unaddressable[it])
+				if ids.len == 0 && r.ids.len > 0 {
+					// declared, but by no one addressable declaration: unresolved
+					resolved << e
+					continue
+				}
+				if ids.len == 0 {
+					resolved << Edge{...e, provenance: .undeclared}
+					continue
+				}
+				for id in ids {
+					resolved << Edge{
+						from:       e.from
+						to:         id
+						kind:       e.kind
+						provenance: if r.inferred { .inferred } else { .extracted }
+						file:       e.file
+						arg_sites:  e.arg_sites
+					}
+				}
+				continue
+			}
 			// Same refusal as above, generalized to type ids: a struct named
 			// `Config` in one standalone `main` program is not the `Config`
 			// referenced by an unrelated one.
@@ -1788,13 +1827,6 @@ fn resolve_edges(mut g Graph) {
 					}
 					continue
 				}
-			}
-			// a C or JS type that no `struct C.`, `type C.` or `JS.` declaration
-			// names is in a system header or the JS host, as an unbound C function
-			// is; one that is declared but doesn't resolve stays unresolved
-			if host_type_undeclared(e.to, by_type_name) {
-				resolved << Edge{...e, provenance: .undeclared}
-				continue
 			}
 		}
 		if e.kind == .calls {
@@ -2506,27 +2538,15 @@ fn resolve_type_ref(e Edge, by_type_name map[string][]TypeCand, site_of map[stri
 	if named.len == 0 {
 		return none
 	}
-	host := e.to.all_before('.')
-	if host in ['C', 'JS'] && e.to.count('.') == 1 {
-		// `C.Window` or `JS.Number`: a C or JS type is one name for the whole
-		// program, so the nearest declaration of that host is the one: in the
-		// referencing file, its module, a module it can see, then the program. A
-		// V type of the same name is none of it, `EveryFn` for `JS.EveryFn`
-		// included. With no such declaration the edge keeps its name and is
-		// undeclared (host_type_undeclared); with two in the nearest scope that
-		// has any, it stays unresolved.
-		hosts := named.filter(it.declares_host(host))
-		site := caller_site(e, site_of) or { DeclSite{
-			file: e.file
-		} }
-		imports := imports_of[site.file] or { []string{} }
-		c := nearest_type(hosts.filter(it.file == site.file), hosts.filter(it.mod == site.mod),
-			hosts.filter(visible_from(it.mod, site, imports)), hosts)?
-		// one declaration in the program is a unique name; several, a locality pick
-		unique := if _ := only_type_id(hosts) { true } else { false }
+	// (seen through the file's own imports alone: inference wants the one sure type)
+	if r := host_type_ref(e, by_type_name, site_of, imports_of, map[string][]string{}) {
+		// one declaration is the type; several tied ones, or none, are no one pick
+		if r.ids.len != 1 {
+			return none
+		}
 		return CallResolution{
-			id:       c.id
-			inferred: !unique
+			id:       r.ids[0]
+			inferred: r.inferred
 		}
 	}
 	// any other name is a V type: a C or JS declaration is named only with its
@@ -2619,15 +2639,71 @@ fn type_in_scope(cands []TypeCand, caller DeclSite, imports_of map[string][]stri
 	return none
 }
 
-// host_type_undeclared reports whether `name` is a C or JS type, `C.Window` or
-// `JS.Number`, that no declaration of that host in the program names.
-fn host_type_undeclared(name string, by_type_name map[string][]TypeCand) bool {
-	host := name.all_before('.')
-	if host !in ['C', 'JS'] || name.count('.') != 1 {
-		return false
+// HostTypeRef is what a C or JS type name on an `embeds` or `references` edge
+// names (host_type_ref): its declarations, or none when it is undeclared.
+struct HostTypeRef {
+	ids      []string
+	inferred bool
+}
+
+// host_type_ref is the declarations a C or JS type name, `C.Window` or `JS.Number`,
+// on edge `e` names; none when `e.to` is no such name. A C or JS type is one name
+// for the whole program, so the nearest declarations of that host are the ones: in
+// the referencing file, its module, or a module it can see, every one of the first
+// of these that has any, as each describes the same type (`C.timeval` in os and in
+// time, for a module importing both). It sees a module through the file's imports
+// and `mod_imports`, those of any file of its module, as the type is the program's,
+// not the file's; a file of a `module main` directory sees through its own alone, and
+// no other file of the directory is its module, unless the directory is one program
+// (one `fn main`, or none, as `v test` builds it). A V type of the same name is none of them,
+// `EveryFn` for `JS.EveryFn` included. Past those, the one declaration in the
+// program is it; with none, or several none of which the referencing code can see
+// (`C.XEvent` declared by modules x.x11 does not import), it is undeclared: `ids`
+// is empty, and the type is in a system header or the JS host, as an unbound C
+// function is. Several ids, or a pick among copies of the name, are inferred.
+fn host_type_ref(e Edge, by_type_name map[string][]TypeCand, site_of map[string]DeclSite, imports_of map[string][]string, mod_imports map[string][]string) ?HostTypeRef {
+	host := e.to.all_before('.')
+	if host !in ['C', 'JS'] || e.to.count('.') != 1 {
+		return none
 	}
-	cands := by_type_name[name.all_after('.')] or { return true }
-	return !cands.any(it.declares_host(host))
+	named := by_type_name[e.to.all_after('.')] or { []TypeCand{} }
+	hosts := named.filter(it.declares_host(host))
+	site := caller_site(e, site_of) or { DeclSite{
+		file: e.file
+	} }
+	mut imports := imports_of[site.file] or { []string{} }
+	// a `module main` directory of separate programs is no module its files share;
+	// one with no `fn main` is, as `v test` builds it together (type_in_scope)
+	one_module := site.mod != '' && (!site.is_main || site.solo || site.no_main)
+	if one_module {
+		imports << mod_imports[site.mod] or { []string{} }
+	}
+	// one declaration in the program is a unique name; several, a locality pick
+	unique := if _ := only_type_id(hosts) { true } else { false }
+	for tier in [hosts.filter(it.file == site.file), hosts.filter(one_module && it.mod == site.mod),
+		hosts.filter(visible_from(it.mod, site, imports))] {
+		if tier.len > 0 {
+			// (several ids are never unique)
+			return HostTypeRef{
+				ids:      type_ids(tier)
+				inferred: !unique
+			}
+		}
+	}
+	return HostTypeRef{
+		ids: if unique { [hosts[0].id] } else { []string{} }
+	}
+}
+
+// type_ids is the ids of `cands`, each once, in the order they come.
+fn type_ids(cands []TypeCand) []string {
+	mut out := []string{}
+	for c in cands {
+		if c.id !in out {
+			out << c.id
+		}
+	}
+	return out
 }
 
 // nearest_type is the one declaration in the first of tiers that has any, the

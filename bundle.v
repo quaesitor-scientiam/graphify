@@ -209,7 +209,7 @@ pub fn (g Graph) report() string {
 	}
 	b << ''
 	b << '## Edges by provenance'
-	b << '`extracted` = unique name or (calls only) a parser-typed receiver; `inferred` = picked among several real candidates by the inferred receiver type or by locality/visibility; `built-in` = a primitive type such as `int`, which has no declaration to resolve to; `library` = a declaration in a module the project imports from vlib or ~/.vmodules, outside its tree; `external` = a call to a `C.` or `JS.` function, or a `C.` or `JS.` type that nothing in the program declares; `undeclared` = a call with no declaration to resolve to, of a function value or a method V provides itself (`thread.wait()`); `comptime` = one of the methods a call on `x.\$(field.name)` in a `\$for field in T.fields` loop reaches, one edge per field type; `unresolved` = name stayed ambiguous or unknown.'
+	b << '`extracted` = unique name or (calls only) a parser-typed receiver; `inferred` = picked among several real candidates by the inferred receiver type or by locality/visibility; `built-in` = a primitive type such as `int`, which has no declaration to resolve to; `library` = a declaration in a module the project imports from vlib or ~/.vmodules, outside its tree; `external` = a call to a `C.` or `JS.` function, or a `C.` or `JS.` type that nothing in the program declares, or that several modules declare, none of them the module of the referencing code or one it imports; `undeclared` = a call with no declaration to resolve to, of a function value or a method V provides itself (`thread.wait()`); `comptime` = one of the methods a call on `x.\$(field.name)` in a `\$for field in T.fields` loop reaches, one edge per field type; `unresolved` = name stayed ambiguous or unknown.'
 	b << '- calls: ${calls_prov.str()}'
 	b << '- references: ${refs_prov.str()}'
 	b << '- embeds: ${embeds_prov.str()}'
@@ -305,7 +305,7 @@ mut:
 	comptime   int // one field type's method of a call in a field loop, see EdgeProvenance
 	builtin    int // a primitive type name, see builtin_type_names
 	library    int // a declaration in the library, Graph.library
-	external   int // a call to a `C.` or `JS.` function, or a `C.` or `JS.` type nothing declares
+	external   int // a call to a `C.` or `JS.` function, or a `C.` or `JS.` type undeclared (host_type_ref)
 	undeclared int // a call with no declaration, see EdgeProvenance
 	unresolved int
 }
@@ -349,7 +349,7 @@ fn count_provenance(idx Index, edges []Edge, kind EdgeKind) ProvCounts {
 				c.external++
 			} else if e.provenance == .undeclared {
 				// a type is undeclared only when it is a C or JS one no
-				// declaration names (see host_type_undeclared)
+				// declaration the referencing code can see names (see host_type_ref)
 				if e.kind == .calls {
 					c.undeclared++
 				} else {

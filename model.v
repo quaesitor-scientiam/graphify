@@ -41,7 +41,8 @@ pub enum EdgeKind {
 // enum's `has()`). Its `to` stays the raw name. A call of a function-typed
 // field resolves to the field instead. On a `references` or `embeds` edge,
 // `undeclared` marks a `C.` or `JS.` type that no declaration in the program
-// names (see host_type_undeclared), and the report counts it as external.
+// names, or several the referencing code can't see do (see host_type_ref), and
+// the report counts it as external.
 // `comptime` marks one of the edges of a call on `x.$(field.name)` in a
 // `$for field in T.fields` loop: each iteration is another field, so the call
 // is linked to the method on every field type the loop reaches, one edge each
