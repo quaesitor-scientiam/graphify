@@ -356,6 +356,68 @@ before the nearest-declaration change, and no reference on the vlang tree at
 `ce4f978a` is linked this way.
 `u128` and `i128`, V3's 128-bit integers, are counted as primitives.
 
+**Types named in bodies (November 2026).** A `references` edge came only from a signature,
+a field, a global or an alias, so a type named only in a body was referenced by no one: on
+vlang `846d7185`, 13 edges from 7 files went to `net.http.Server`, which 44 files name
+(comments included), and `&http.Server{}` in `vlib/mcp` was none of them. The body walk now
+records each type a body names as a reference from its declaration, with the lines it is
+named on (`body_type_refs` and `add_body_ref`, in backend_v.v): a struct literal and its
+`...` update, an array or map literal of a written type, a cast, `as`, `is` and a
+compile-time `$if x is T` or `!is T`, `sizeof`, `typeof` and `__offsetof`, a function literal's
+parameter and return types, a match branch's types, and a generic call's type arguments.
+A name counts when it is written as a type: with a capital, as a primitive (`int`, `char`,
+`thread`, `none`) or as a C or JS type. A type the signature names keeps the signature's
+edge, which has no lines. A constant's and a global's value is walked as the declaration's
+own, and a global's written type and its value are one edge, the type's. A field's default
+value is the field's own, apart from the struct's reference to the field's type. The edge
+resolves as a signature's does. A vlib file's body and initializer references are dropped
+with its calls, and a module from VMODULES keeps them. On vlang `846d7185`: references
+161,210 → 230,895 (84,736 of them to primitives, 56,720 before), unresolved 6 → 15, calls
+unchanged; 65 edges from 22 files go to `net.http.Server`. Checked against V3
+(`sample-accuracy.vsh -kind missing-references`, seed 20261110), of the places a body
+writes a capitalized name that V3 resolves to a type of the graph, 643 of 710 have an edge
+from their declaration to it (90.56%), against 114 of 710 (16.06%) before; with `-kind
+references`, 968 of the 971 sampled inferred reference edges that V3 answered are its
+(99.69%): in two V3 answers a JS-backend file as the C build, and in the third it answers
+`&C.xdg_toplevel(x)` as the struct field of that name on the line. An earlier sample, of
+the graph before `$if x !is T` was read, had 954 of 957: two linking each module's
+`C.fd_set` or `C.timeval` beside the one V3 picks, as the nearest-declaration rule above
+does, and one JS-backend file.
+
+Not read, and so not linked: an enum value or a static call, `Color.red` and `Foo.new()`,
+which the parser writes as a field of a name, as it writes a module's function or a
+variable's field (66 of the 67 places still missing); a type named in lower case, as
+`@[translated]` and `@[generated]` modules name theirs (`_ty_point{}`, `token(0)`), which
+a call resolves as a type; a generic struct's type arguments, `Bar[Foo]{}`, and a pointer
+type argument, `f[&Foo]()` (as in a signature); a struct declared in a function, which is
+no symbol (V3 names it `Tick@local@App_x2e_work`); the literal `$embed_file()` makes, of
+`embed_file.EmbedFileData`, which the file doesn't name; a `$if` condition other than
+`x is T` or `x !is T`; and the build a reference is made in (`Edge.build`, which a call records). An
+anonymous struct's literal is on its statement's line, as V3 places it elsewhere. The 9
+new unresolved references are 4 in checker tests meant to fail, 3 in constants whose id
+is declared in two test files of a directory, so the site of one is not found (as for
+their calls), and 2 to a `TestVector` that only `blake2b_test.v` and `blake2s_test.v`
+declare.
+
+**Copies of V in one tree (November 2026).** A tree holding two checkouts of V, such as
+S:/vProjects/native-backend's `native/` and `spydr06/`, has the same modules twice. A type
+reference took a type declared once in the program wherever it was, so `i32(x)` in
+`native/` linked the `type i32 = int` only `spydr06/`'s builtin declares (225 signature
+references on master, 173 more from bodies), and a type both copies declare was a tie
+between them, left unresolved. A copy is now the folder whose `vlib/builtin` holds a file
+(`copy_roots`, in graphify.v), and a type reference from code in one copy takes no
+declaration in another (`in_copy_of`, in `resolve_type_ref` and `host_type_ref`); a tree
+with one copy, the V tree itself or a project using vlib, has none. On native-backend:
+unresolved references 12,366 → 343 with body references (14,424 without the copy rule),
+and 76 calls move from unresolved to inferred, as type inference resolves through the
+same function. No reference goes from one copy to a type of the other, but for 7: those
+`spydr06/` makes to Windows C types only `native/` declares (`type C.HWND = voidptr`) are
+undeclared, and keep the name `C.HWND`, which is also that declaration's id, as a C type's
+is the program's; a reader looking the name up finds `native/`'s. The vlang tree doesn't
+change. Not covered: a reference from a declaration whose id several declarations share
+has no known site, so it takes no copy; and calls keep their own resolution, which does
+not read copies.
+
 The 46 references to `string` itself that stayed unresolved had four causes. A type declared
 once per platform (`gg.Config` in gg.c.v and gg.js.v) had no site, since only a function or
 method got its per-file site back, so its references had no locality to pick builtin's
@@ -1723,10 +1785,12 @@ costs well under a second, and it is cached like the project's files.
 
 **How they get into resolution.** Library files are parsed by the same workers
 and cache as the project's, before `disambiguate_ids` and `resolve_edges`. Their
-symbols and their `embeds` and `references` edges join the project's for
-resolution, so `resolve_edges` and infer.v see their declarations, return types,
-fields and embeds. Their `calls` edges are dropped: calls inside the library are
-not the project's. `resolve_import` gains the same two lookups after the
+symbols and their `embeds` edges and the `references` of their signatures, fields
+and aliases join the project's for resolution, so `resolve_edges` and infer.v see
+their declarations, return types, fields and embeds. Their `calls` edges are
+dropped, and so are the `references` their bodies and initializers make (the ones
+with lines, see "Types named in bodies" in §1): calls and type uses inside the
+library are not the project's. A module from VMODULES is kept whole. `resolve_import` gains the same two lookups after the
 project's, so a project's `import x.json2` is `json2` (vlib/x/json2 is an alias
 directory) as it is inside the V tree; the library roots are part of the cache
 envelope, since an import's name now depends on them.

@@ -2914,6 +2914,294 @@ fn walk[T](t Tree, start NodeId, v Visit, extra T) {}
 	assert !g.edges.any(it.kind == .references && it.to == 'T')
 }
 
+fn test_a_body_references_each_type_it_names_with_its_lines() {
+	// A reference edge came only from a signature, a field or an alias, so a type named
+	// only in a body (`&http.Server{}` in vlib/mcp) was referenced by no one. Each body
+	// use is now a reference from the declaration, with the lines it is on; one the
+	// signature names too stays the signature's edge, which has no lines.
+	src := [
+		'module app', // 1
+		'', // 2
+		'import shapes', // 3
+		'', // 4
+		'struct Foo {', // 5
+		'	n int', // 6
+		'}', // 7
+		'', // 8
+		'struct Bar {', // 9
+		'	f Foo = Foo{}', // 10
+		'}', // 11
+		'', // 12
+		'type Sum = Foo | shapes.Circle', // 13
+		'', // 14
+		'const origin = Bar{}', // 15
+		'', // 16
+		'fn sig(s Sum) Foo {', // 17
+		'	return s as Foo', // 18
+		'}', // 19
+		'', // 20
+		'fn body[T](s Sum, v T) {', // 21
+		'	a := &shapes.Circle{}', // 22
+		'	b := []Foo{}', // 23
+		'	if s is Foo {', // 24
+		'	}', // 25
+		'	match s {', // 26
+		'		shapes.Circle {}', // 27
+		'		else {}', // 28
+		'	}', // 29
+		'	n := sizeof(a)', // 30
+		'	c := T{}', // 31
+		'	d := map[string]Bar{}', // 32
+		'	g := fn (f Foo) shapes.Square {', // 33
+		'		return shapes.Square{}', // 34
+		'	}', // 35
+		'	\$if v is shapes.Square {', // 36
+		'	} \$else \$if v !is Foo {', // 37
+		'	}', // 38
+		'	e := Bar(d)', // 39
+		'	_ = b', // 40
+		'}', // 41
+		'', // 42
+		'struct C.timeval {', // 43
+		'	tv_sec int', // 44
+		'}', // 45
+		'struct Box {}', // 46
+		'__global g Foo = Foo{}', // 47
+		'', // 48
+		'fn decode[T](s string) T {', // 49
+		'	return T{}', // 50
+		'}', // 51
+		'', // 52
+		'fn (x Box) more(s Sum) {', // 53
+		'	f := s as Foo', // 54
+		"	t := decode[Bar]('')", // 55
+		'	k := typeof[shapes.Circle]().name', // 56
+		'	o := __offsetof(Foo, n)', // 57
+		'	u := Foo{...f}', // 58
+		'	i := int(o) + int(1)', // 59
+		'	tv := C.timeval{}', // 60
+		'	struct Local {', // 61
+		'		n int', // 62
+		'	}', // 63
+		'	l := Local{}', // 64
+		'	cb := fn () {', // 65
+		'	}', // 66
+		'	r := isreftype(Bar)', // 67
+		'	match s {', // 68
+		'		Foo, shapes.Circle { _ = 0 }', // 69
+		'		else {}', // 70
+		'	}', // 71
+		'	ch := &char(o)', // 72
+		'	a1 := struct { x Bar }{}', // 73
+		'	a2 := struct { x Bar }{}', // 74
+		"	ef := \$embed_file('app.v')", // 75
+		'	ss := []string{}', // 76
+		"	w := decode[Bar[int]]('')", // 77
+		'	jp := []JS.node_process{}', // 78
+		'	\$if t is \$int {', // 79
+		'	} \$else \$if t is \$map {', // 80
+		'	}', // 81
+		'	_ = t', // 82
+		'}', // 83
+	].join('\n') + '\n'
+	root := write_tree('body_type_refs', {
+		'app/app.v':       src
+		'shapes/shapes.v': 'module shapes\n\npub struct Circle {}\n\npub struct Square {}\n'
+	})
+	defer {
+		os.rmdir_all(root) or {}
+	}
+	g := build_graph(Options{ root: root })
+	refs := g.edges.filter(it.kind == .references)
+	of := fn [refs] (from string, to string) [][]int {
+		return refs.filter(it.from == from && it.to == to).map(it.lines)
+	}
+	// each type the body names, once, on every line it is named on
+	assert of('app.body', 'shapes.Circle') == [[22, 27]], refs.str()
+	assert of('app.body', 'app.Foo') == [[23, 24, 33, 37]], refs.str()
+	assert of('app.body', 'app.Bar') == [[32, 39]], refs.str()
+	assert of('app.body', 'shapes.Square') == [[33, 34, 36]], refs.str()
+	// a type the signature names keeps the signature's edge alone
+	assert of('app.body', 'app.Sum') == [[]int{}], refs.str()
+	assert of('app.sig', 'app.Foo') == [[]int{}], refs.str()
+	// not a type: a type parameter, a variable's size, a comptime kind
+	assert !refs.any(it.from == 'app.body' && it.to in ['T', 'a', 'map', 'builtin.map']), refs.str()
+	// an initializer's: a constant's value, and a field's default
+	assert of('app.origin', 'app.Bar') == [[15]], refs.str()
+	assert of('app.Bar.f', 'app.Foo') == [[10]], refs.str()
+	assert of('app.Bar', 'app.Foo') == [[]int{}], refs.str()
+	// a global's type and its value name one type: one edge, the type's
+	assert of('app.g', 'app.Foo') == [[]int{}], refs.str()
+	// `as`, `__offsetof`, an update and a branch of two types (once per line, and on a
+	// line the parser makes no place for, `sizeof` in `isreftype`); a generic call's type
+	// argument; `typeof`; a primitive; a C type named in lower case
+	assert of('app.Box.more', 'app.Foo') == [[54, 57, 58, 69]], refs.str()
+	// (and through each use of an anonymous struct, and as a generic type's argument)
+	assert of('app.Box.more', 'app.Bar') == [[55, 67, 73, 74, 77]], refs.str()
+	// a primitive outside `primitive_types`, as a signature names it, and one only in it
+	assert of('app.Box.more', 'char') == [[72]], refs.str()
+	assert of('app.Box.more', 'string') == [[76]], refs.str()
+	// a JS type named in lower case, as `vlib/builtin/js` declares `JS.node_process`
+	assert refs.any(it.from == 'app.Box.more' && it.to.ends_with('JS.node_process')
+		&& it.lines == [78]), refs.str()
+	// `$embed_file` is a literal of the parser's, of no type the file names
+	assert !refs.any(it.to.contains('EmbedFileData')), refs.str()
+	// while a literal of that module's written in the file is one
+	dg := graph_of({
+		'd/d.v': "module d\n\nimport v.embed_file\n\nfn f() {\n\tx := \$embed_file('d.v')\n\ty := embed_file.Decoder{}\n\tz := embed_file.EmbedFileData{}\n\t_ = x\n}\n"
+	})
+	dr := dg.edges.filter(it.kind == .references && it.from == 'd.f')
+	assert dr.len == 2 && dr[0].to.ends_with('embed_file.Decoder') && dr[0].lines == [7], dr.str()
+	assert dr[1].to.ends_with('embed_file.EmbedFileData') && dr[1].lines == [8], dr.str()
+	assert of('app.Box.more', 'shapes.Circle') == [[56, 69]], refs.str()
+	// (and `$if t is $int` names a kind, not `int`)
+	assert of('app.Box.more', 'int') == [[59]], refs.str()
+	assert !refs.any(it.from == 'app.Box.more' && it.to.ends_with('map')), refs.str()
+	assert of('app.Box.more', 'app.C.timeval') == [[60]], refs.str()
+	// a struct declared in the function is no symbol, and a literal returning nothing names none
+	assert !refs.any(it.from == 'app.Box.more' && (it.to.contains('Local') || it.to.contains('more')
+		|| it.to == 'void')), refs.str()
+}
+
+fn test_a_body_reference_takes_its_lines_and_a_call_of_that_name_keeps_its_own() {
+	// `s.u64()` is a call to `u64` before it is resolved: a later `u64(x)` in the
+	// body is a line of the reference to the type, not of that call (as in vlib/strconv)
+	g := graph_of({
+		'm/m.v': 'module m\n\nfn f(s string) {\n\ta := u64(1)\n\tb := s.u64()\n\tc := u64(2)\n\t_ = a + b + c\n}\n'
+	})
+	refs := g.edges.filter(it.from == 'm.f' && it.kind == .references && it.to == 'u64')
+	assert refs.len == 1 && refs[0].lines == [4, 6], g.edges.str()
+	calls := g.edges.filter(it.from == 'm.f' && it.kind == .calls)
+	assert calls.len == 1 && calls[0].lines == [5], calls.str()
+}
+
+fn test_a_body_reference_the_seen_map_holds_without_an_edge_is_still_made() {
+	// A repeat use merges into the edge the declaration's first use made. Every map in use
+	// today holds a type name only with that edge; if one ever held a name without it, the
+	// use would be dropped silently. It is recorded instead, and an earlier declaration's
+	// edge of that name is not taken for it.
+	// no AST: with no anonymous struct, add_body_ref reads only the file's names
+	f := V3File{
+		a:   unsafe { nil }
+		rel: 'm/m.v'
+	}
+	mut edges := [
+		Edge{
+			from:  'm.g'
+			to:    'Foo'
+			kind:  .references
+			lines: [1]
+		},
+	]
+	mut seen := {
+		'Foo': true
+	}
+	f.add_body_ref('m.f', 'Foo', 3, mut edges, mut seen)
+	assert edges.len == 2, edges.str()
+	assert edges[0].from == 'm.g' && edges[0].lines == [1], edges.str()
+	assert edges[1].from == 'm.f' && edges[1].to == 'Foo' && edges[1].kind == .references
+		&& edges[1].lines == [3], edges.str()
+	// and a second use merges into it
+	f.add_body_ref('m.f', 'Foo', 5, mut edges, mut seen)
+	assert edges.len == 2 && edges[1].lines == [3, 5], edges.str()
+	// with no edge at all, the scan stops at the first one
+	mut none_yet := []Edge{}
+	mut seen_bar := {
+		'Bar': true
+	}
+	f.add_body_ref('m.f', 'Bar', 7, mut none_yet, mut seen_bar)
+	assert none_yet.len == 1 && none_yet[0].to == 'Bar' && none_yet[0].lines == [7], none_yet.str()
+}
+
+fn test_a_type_reference_stays_in_its_copy_of_v() {
+	// A tree holding two checkouts of V (S:/vProjects/native-backend's two clones) has
+	// the same modules twice. `i32(x)` in one copy linked the `type i32 = int` only the
+	// other's builtin declares, as the program's one declaration; and a module both
+	// declare was a tie, so references to its types stayed unresolved. Each copy's code
+	// is built with its own copy: a declaration in the other is none of its candidates.
+	app := 'module app\n\nimport foo\nimport lone\n\nfn run(x int) {\n\ty := i32(x)\n\tf := foo.Foo{}\n\tl := lone.Lone{}\n\tt := C.tm{}\n\t_ = y\n}\n\nfn sig(x i32) {}\n'
+	root := write_tree('copies_of_v', {
+		'a/vlib/builtin/int.v': 'module builtin\n\ntype i32 = int\n'
+		'a/vlib/builtin/c.c.v': 'module builtin\n\npub struct C.tm {\n\ty int\n}\n'
+		'b/vlib/builtin/int.v': 'module builtin\n\npub fn b_only() {}\n'
+		'a/vlib/foo/foo.v':     'module foo\n\npub struct Foo {}\n'
+		'b/vlib/foo/foo.v':     'module foo\n\npub struct Foo {}\n'
+		'shared/lone/lone.v':   'module lone\n\npub struct Lone {}\n'
+		'shared/user/user.v':   'module user\n\nfn run(x int) {\n\ty := i32(x)\n\t_ = y\n}\n'
+		'a/app/app.v':          app
+		'b/app/app.v':          app
+	})
+	defer {
+		os.rmdir_all(root) or {}
+	}
+	g := build_graph(Options{ root: root })
+	refs := g.edges.filter(it.kind == .references)
+	to_of := fn [refs] (from string) []string {
+		return refs.filter(it.from == from).map(it.to)
+	}
+	a, b := to_of('a.app.run'), to_of('b.app.run')
+	// a copy's own declaration, from its body and its signature
+	assert 'a.vlib.builtin.i32' in a && 'a.vlib.builtin.i32' in to_of('a.app.sig'), refs.str()
+	// none of the other copy's: b's i32 is the primitive, and its C.tm is undeclared
+	assert 'i32' in b && 'i32' in to_of('b.app.sig'), refs.str()
+	assert !refs.any(it.from.starts_with('b.') && it.to.starts_with('a.')), refs.str()
+	assert refs.any(it.from == 'b.app.run' && it.to == 'C.tm' && it.provenance == .undeclared), refs.str()
+	assert 'a.vlib.builtin.C.tm' in a, refs.str()
+	// a module both declare is each copy's own, not a tie
+	assert 'a.vlib.foo.Foo' in a && 'b.vlib.foo.Foo' in b, refs.str()
+	// a declaration in no copy is seen from every one
+	assert 'shared.lone.Lone' in a && 'shared.lone.Lone' in b, refs.str()
+	// and code in no copy sees every copy's declarations, as before
+	assert 'a.vlib.builtin.i32' in to_of('shared.user.run'), refs.str()
+}
+
+fn test_the_copies_of_v_are_the_folders_holding_vlib_builtin() {
+	// two or more copies, each once, at a folder boundary
+	assert copy_roots(['a/vlib/builtin/x.v', 'a/vlib/builtin/y.v', 'b/vlib/builtin/x.v', 'b/app/a.v']) == [
+		'a/',
+		'b/',
+	]
+	// one copy is none: the V tree itself, or a project with its vlib
+	assert copy_roots(['a/vlib/builtin/x.v', 'a/vlib/builtin/y.v', 'a/app/a.v']) == []string{}
+	assert copy_roots(['vlib/builtin/x.v', 'app/a.v']) == []string{}
+	// `myvlib/builtin` is no vlib
+	assert copy_roots(['a/vlib/builtin/x.v', 'b/myvlib/builtin/x.v']) == []string{}
+	// a file is in the innermost copy that holds it, and in none outside them
+	assert copy_of('a/b/app/x.v', ['a/b/', 'a/']) == 'a/b/'
+	assert copy_of('a/app/x.v', ['a/b/', 'a/']) == 'a/'
+	assert copy_of('c/x.v', ['a/b/', 'a/']) == ''
+}
+
+fn test_a_library_body_names_no_type_of_the_project_graph() {
+	// A vlib body's type uses are its own, as its calls are: only the project's are kept,
+	// with the library declarations they reach. A module from VMODULES is kept whole.
+	base := write_tree('body_refs_library', {
+		'v/vlib/net/http/server.v': 'module http\n\npub struct Server {}\n\npub struct Handler {}\n\npub fn new_server() &Server {\n\th := Handler{}\n\t_ = h\n\treturn &Server{}\n}\n'
+		'vmodules/glyph/glyph.v':   'module glyph\n\npub struct Ctx {}\n\npub fn new() int {\n\tc := Ctx{}\n\t_ = c\n\treturn 0\n}\n'
+		'proj/v.mod':               "Module {\n\tname: 'proj'\n}\n"
+		'proj/main.v':              'module main\n\nimport net.http\nimport glyph\n\nfn serve() {\n\ts := &http.Server{}\n\t_ = s\n\t_ = glyph.new()\n}\n\nfn main() {}\n'
+	})
+	roots := LibraryRoots{
+		vroot:    os.real_path(os.join_path(base, 'v'))
+		vmodules: os.real_path(os.join_path(base, 'vmodules'))
+	}
+	defer {
+		os.rmdir_all(base) or {}
+		os.setenv('GRAPHIFY_LIB_VROOT', '', true)
+		os.setenv('GRAPHIFY_LIB_VMODULES', '', true)
+	}
+	g, _ := build_graph_with_library(os.join_path(base, 'proj'), '', os.join_path(base, 'out'),
+		roots)
+	refs := g.edges.filter(it.kind == .references)
+	assert refs.any(it.from == 'main.serve' && it.to == 'vlib.net.http.Server' && it.lines == [7]), refs.str()
+	assert 'vlib.net.http.Server' in g.library.symbols.map(it.id)
+	// vlib's own body: `Handler{}` in new_server is not the project's
+	assert !refs.any(it.to.ends_with('Handler')), refs.str()
+	assert !g.library.symbols.any(it.id.ends_with('Handler')), g.library.symbols.map(it.id).str()
+	// a VMODULES module's body is kept with it
+	assert refs.any(it.from == 'vmodules.glyph.new' && it.to == 'vmodules.glyph.Ctx' && it.lines == [6]), refs.str()
+}
+
 fn test_test_file_declarations_are_not_visible_to_other_files() {
 	// vlib/builtin/map_test.v declares `enum Color`; treating it as part of
 	// builtin made it visible everywhere and won `Color` over the real one.
@@ -3753,7 +4041,8 @@ fn test_default() {}
 	cs := 'vlib.v.tests.c_structs'
 	assert refs_of(g, '${cs}.get_size') == ['${cs}.C.Size']
 	assert refs_of(g, '${cs}.Size') == ['${cs}.C.Size']
-	assert refs_of(g, '${cs}.get_csize') == ['${cs}.Size']
+	// its body, `Size(C.Size{11})`, names the C struct too
+	assert refs_of(g, '${cs}.get_csize') == ['${cs}.Size', '${cs}.C.Size']
 	foo := '${cs}.Foo@vlib/v/tests/c_structs/arr_map_test.c.v'
 	assert refs_of(g, foo) == ['${cs}.C.Foo@vlib/v/tests/c_structs/arr_map_test.c.v']
 	assert refs_of(g, '${cs}.GameObject') == [foo]
@@ -7745,7 +8034,7 @@ pub fn describe[T](data T) string {
 	assert g.edges.any(it.kind == .calls && it.from == 'lib.describe' && it.to == 'leaf.Leaf.str'), g.edges.map(it.to).str()
 }
 
-fn test_comptime_is_on_an_interface_names_no_type() {
+fn test_comptime_is_on_an_interface_does_not_make_t_the_interface() {
 	// V's `T is Shape` holds for every T implementing Shape, so the block's T is
 	// not the interface: the call is not Shape.str, and lib imports Node's str()
 	// too, so the name fallback cannot pick Shape's either

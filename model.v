@@ -124,8 +124,10 @@ pub:
 	// Extraction-only and not persisted.
 	guards string @[json: '-']
 	// lines are the lines of a `calls` edge's call sites, in the caller's file, in
-	// order: an edge stands for every call of its callee in one declaration. Written
-	// to graph.json; empty on other edges, and on a graph extracted before them.
+	// order: an edge stands for every call of its callee in one declaration. A
+	// `references` edge from a body has the lines its type is named on (add_body_ref
+	// in backend_v.v); one from a signature or a field's type has none. Written to
+	// graph.json; empty on other edges, and on a graph extracted before them.
 	lines []int
 	// build is the condition, as a `$if` would write it, under which V compiles a
 	// `calls` edge's calls: the `$if` branches around them in the caller's body,

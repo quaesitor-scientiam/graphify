@@ -82,7 +82,7 @@ Pipeline: `walk files -> extract_v_file(file) -> []Symbol + []Edge -> Graph -> e
 ### Model
 
 - `Symbol{ id, name, kind, signature, file, line, end_line, is_pub, parent, doc }` — `end_line` is what lets `get_body` read one declaration instead of a whole file; `doc` is the `//` block directly above it
-- `Edge{ from, to, kind, provenance }` — kinds: `defines`, `calls`, `imports`, `implements`, `embeds`, `references`; `provenance` (`extracted`/`inferred`) is set on resolved `calls`, `embeds`, and `references` edges, and `undeclared` on an unresolved call that has no declaration to resolve to, or on a `C.` or `JS.` type reference that nothing declares, and `comptime` on each of the edges a call on `x.$(field.name)` in a `$for field in T.fields` loop makes, one per field type — see the edge provenance item in Status
+- `Edge{ from, to, kind, provenance, lines }` — kinds: `defines`, `calls`, `imports`, `implements`, `embeds`, `references`. A `references` edge is a type a declaration names. One its signature, its fields, its alias or a global's type names records no lines. One only its body names (a struct literal, an array or map literal, a cast, `as`/`is`, a match branch, a function literal's types, a generic call's type argument, `sizeof`/`typeof`, `$if x is T` or `!is T`), or a constant's, global's or field default's value, records the lines it is named on in `graph.json`; a type named in both is one edge, with no lines. A field's default value is the field's own, apart from its struct's reference to the field's type. `explain` and `get_node` list references without their lines. `provenance` (`extracted`/`inferred`) is set on resolved `calls`, `embeds`, and `references` edges, and `undeclared` on an unresolved call that has no declaration to resolve to, or on a `C.` or `JS.` type reference that nothing declares, and `comptime` on each of the edges a call on `x.$(field.name)` in a `$for field in T.fields` loop makes, one per field type — see the edge provenance item in Status
 - **`implements` is a declared vocabulary slot, not a planned feature.** V's interfaces are satisfied structurally — there is no `impl X for Y` syntax to read off the AST, so detecting it means matching a candidate's resolved method/field set (including through embeds) against every visible interface's, which needs a whole-program, fully-resolved type table exactly like `v/ast/table.does_type_implement_interface` builds — the opposite of graphify's per-file, parallel-worker, cacheable extraction. Investigated concretely, not just deferred by assumption: real yield data across 3 real corpora (V's own compiler, this project, and a real `veb`-framework app) found the obvious pitch — a project's own type implementing a project's own interface — in **zero of 288 measured pairs**, including a corpus that declares 6 of its own interfaces specifically to test this. The one real signal (app code satisfying a *framework's* interface) scored 2 meaningful pairs in the one corpus built to have it; the other 286 pairs were stdlib-satisfying-stdlib facts (`io.ReaderWriter`, `IError`) — the same static fact in every V program, not project-specific insight. Building this would mean a standing compiler-patch dependency (forking or upstreaming a change to `v/ast/table.v`) for a feature that, on the best evidence gathered, finds a handful of edges per framework-consumer project and nothing in most others.
 
 ### Emitters
@@ -513,8 +513,9 @@ file or doc; a test's declaration counts half. At most 50 seeds.
 
 A call is listed with the lines it is made on, in the caller's file:
 `called by : read_ptr (vlib/net/tcp.c.v:183) at lines 198, 224`. `graph.json` keeps
-them on each `calls` edge as `lines`; a graph extracted before has none, and lists
-its calls as before until it is extracted again.
+them on each `calls` edge as `lines`, and on a `references` edge from a body (see
+Model); a graph extracted before has none, and lists its calls as before until it is
+extracted again.
 
 Build and register it with the client you use. The binary name gets an
 `.exe` suffix on Windows only; the rest of this doc omits it.
@@ -817,11 +818,14 @@ Restart Claude Code after switching so the MCP server picks up the new graph.
 Checks a seeded random sample of the call sites of `inferred` call edges (or, with
 `-kind references`, of `inferred` reference edges) against V's own compiler: each
 is asked of V3's go-to-definition (`-vls-mode -line-info file:line:gd^col`), and
-the declaration V3 answers is compared with the edge's target.
+the declaration V3 answers is compared with the edge's target. With
+`-kind missing-references` it checks the other way, for edges the graph lacks (see
+below).
 
 ```
 v run bin/sample-accuracy.vsh S:\graph_data\vlang                  # 1000 sites, seed 20261110
 v run bin/sample-accuracy.vsh <graph> -kind references             # 1000 inferred reference edges
+v run bin/sample-accuracy.vsh <graph> -kind missing-references     # 1000 type names in bodies
 v run bin/sample-accuracy.vsh <graph> -n 2000 -seed 7              # another sample
 v run bin/sample-accuracy.vsh <graph> -v3 <binary> -out <dir>      # this V3, none built; where results go
 v run bin/sample-accuracy.vsh <graph> -no-worlds                   # the default build only
@@ -844,8 +848,8 @@ parameter of that name, or the declaration's own name) names nothing, and is
 dropped. It prints the accuracy over the scored edges with
 a 95% Wilson interval and writes `sample.csv`, `summary.txt` and `v3_raw.log`.
 
-A `references` edge records no line, so with `-kind references` the unit is the
-edge: it is asked at up to 8 lines of its `from` declaration that name its target,
+A signature's `references` edge records no line, and a body's lines are not used, so
+with `-kind references` the unit is the edge: it is asked at up to 8 lines of its `from` declaration that name its target,
 in every file that declares it under that id, at every place on those lines the
 name is written (a call of a method of that name included, which V3 tells apart
 from the type), and scored by its best line, so it is correct when any of them
@@ -872,6 +876,22 @@ that is right for another build; read those by hand. A seed draws the same sampl
 of the same graph with any V version, so a run after a resolver change compares
 with the one before it.
 
+The other kinds ask only about edges the graph has, so an edge it lacks is never
+sampled. `-kind missing-references` samples the places a function's or method's body
+writes a capitalized name of two characters or more (outside a string on its line,
+after no `//` and not on an attribute line; the declaration's first line, its
+signature's, is not asked), and asks V3 about each. A place V3 resolves to a type of
+the graph is `linked` when the graph has a `references` or `embeds` edge from that
+function to it, and `missing` when it has none; one V3 resolves to another symbol (a
+function) is `not-a-type`, one it resolves to nothing the graph declares (a C header) is
+`not-in-graph`, and neither is scored. Of the `missing`,
+it counts apart a name followed by `.` (`Color.red`, `Foo.new()`), which the graph does
+not read as a type. `-self-test` does not apply to it. The scan reads one line at a
+time: a `/* */` comment or a string over several lines is read as code, which V3 gives
+no answer for, and a `${...}` in a string is not read. The later lines of a signature
+written over several lines are asked too, and count as linked through the signature's
+edge, so the share is a little high.
+
 On the V tree at `ce4f978a` (November 2026), seed 20261110:
 
 - calls, 1000 of 195,949 inferred call sites: 931 of the 932 scored are correct,
@@ -895,6 +915,26 @@ At `f2edf668`, a day earlier, the same seed gave calls 947 of 950 (99.68%) and
 references 971 of 972 (99.90%); at `32a246c8`, calls 933 of 934 (99.89%). The
 graphs differ, so the samples do, and both ran before answers at the place asked
 about were dropped.
+
+On the V tree at `846d7185`, seed 20261110, with types named in bodies referenced:
+
+- missing references, 1000 of 116,462 places a body writes a capitalized name: of
+  the 710 V3 resolves to a type of the graph, 643 are linked, 90.56% (95%
+  88.19–92.50%); the graph before body references linked 114, 16.06%. Of the 67
+  missing, 66 are an enum value or a static call (`Color.red`, `Foo.new()`), and one
+  a JS-backend file V3 answers as C. 285 places were never answered.
+- references, 1000 of 63,902 inferred reference edges: 968 of the 971 scored are
+  correct, 99.69% (95% 99.10–99.89%). In two of the wrong V3 answers a JS-backend
+  file as the C build; in the third, `&C.xdg_toplevel(x)` in vlib/x/multiwindow, V3
+  answers the struct field `xdg_toplevel` on that line, where the graph links the
+  `struct C.xdg_toplevel {}` the file declares. The sample drawn before `$if x !is T`
+  was read (63,895 edges) had 954 of 957: two extra, linking each module's `C.fd_set`
+  or `C.timeval` beside the one V3 picks (see FUTURE_WORK.md, type references), and
+  one JS-backend file. 4 edges were unscored as no line asked names the type; the line
+  range the harness reads for a declaration (`decl_last_line`) ends early for some,
+  such as a sum type written over several lines.
+- calls, the same sample as before: 938 of the 942 scored are correct, 99.58%; calls
+  don't change with body references.
 
 ### `bench/session_stats.vsh` — token-free MCP usage stats
 
@@ -1130,6 +1170,7 @@ Known gaps and evidence-gated future work are recorded in
 - [x] **What V provides, and more receivers typed (2026-11-04).** Map literals that state no type, `{ ...base }`, `match` branches on `map[K]V`, `select` receive variables, every `$for` loop variable, `xs.map(it.name)`, calls of function literals (and so `$tmpl`), `rlock` tuples and `index` in an array's `init:` are typed, and `$if v is $map` is a fallback for what the variable's own type doesn't answer. `str()` that no declaration answers is V's on a channel, a C struct or a type with a data field named `str`, and a method on a type parameter is undeclared only when V writes it for every instance and every call site's type is known. `str()` on a narrowed value never falls back to the sum type's, as compiled programs show. On vlang `f7e5a403ff`: unresolved calls 141 → 87, none newly unresolved; 3 edges to a declared `str` corrected. See [FUTURE_WORK.md §1](FUTURE_WORK.md).
 - [x] **Regular-code calls (2026-11-05).** Under `$if T is Iface` a call with no instance that answers it is the interface's, not for `str()`; `$if T is $array_dynamic || T is $map` holds a type parameter to those kinds; `type_idx` and `type_name` on a type parameter are V's when nothing declares the name; a field read off a branch of several types has the type they agree on; and `JS.X.prototype.constructor()` is a `JS.X`. On the V compiler's tree: unresolved calls 87 → 78, none newly unresolved and no resolved edge lost. See [FUTURE_WORK.md §1](FUTURE_WORK.md).
 - [x] **Plain names (2026-11-05).** A `module main` test or program isn't in the module beside it, so `copy()` is builtin's. A callee's prefix is an import path before another import's alias. An import with no such function in a module it reaches may name a module a file beside the caller declares. A const or global holding a function of the caller's module, or else a type of it, takes a bare call unless the caller can see a function of the name. On vlang `4e0cc6baa8`: unresolved calls 84 → 73, and three wrong or accidental links corrected. See [FUTURE_WORK.md §1](FUTURE_WORK.md).
+- [x] **Types named in bodies, and copies of V (2026-11-16).** A function's body now references each type it names (a struct literal, a cast, `as`/`is`, a match branch, a function literal's types, a generic call's type argument, `sizeof`/`typeof`, `$if x is T` or `!is T`), with the lines it names it on, as a call records its call sites; before, only signatures, fields and aliases did, so 7 of the 44 files naming `net.http.Server` showed as referencing it. A type reference in a tree holding several checkouts of V takes no declaration from another copy. `sample-accuracy.vsh -kind missing-references` checks, against V3, how many of the types a body names have an edge. On vlang `846d7185`: references 161,210 → 230,895, unresolved 6 → 15, calls unchanged; body types linked 114 → 643 of 710 sampled (16.06% → 90.56%); inferred references 968 of 971 V3's. On native-backend's two clones: unresolved references 12,366 → 343, and none from one copy to the other's types but 7 to Windows C types, whose id is their C name (see FUTURE_WORK.md). See [FUTURE_WORK.md §1](FUTURE_WORK.md).
 - [x] Phase 5, **GraphML/Cypher export** — both formats emit one node per unique id (via `Index.by_id`, not the raw `Symbol` list) and only resolved edges, for the reasons the Usage section explains. A real bug was caught in the process, not just anticipated: a naive one-node-per-raw-`Symbol` version violated the Cypher export's own uniqueness constraint against this project's own files (they all declare `module graphify`), confirmed by actually running the export, not by inspection.
 - [x] Phase 5, **SVG export and `graph.html`** — both share one layout: communities (see above) arranged around an outer circle, each community's own members around a smaller circle centered on its spot, sized by degree and colored by community. Deterministic trigonometry, not a force-directed simulation — see Usage for why. `graph.html` adds a legend, hover-to-highlight-neighbors, and scroll-to-zoom/drag-to-pan — plain DOM/SVG, no framework. Capped at 300 symbols (proportional per-community, highest-degree first) with the cap always disclosed, never silent.
   Shipped once already believing it was verified, then genuinely wasn't: the first pass checked hover by dispatching a synthetic `mouseenter` in JS, which passed because it targets the element directly — it can't catch "the real click target is too small to hit," which is exactly what user feedback then reported. Re-verified with a real WebDriver session (`vebidor`, driving actual Edge) instead: a synthesized *pointer move*, not a dispatched event, landed dead-center on a node and measured its rendered size at ~4×4 CSS pixels. Fixed by decoupling the hover hit-target from the node's degree-sized visible dot (now independently sized, ~3× larger) and adding real zoom/pan, then re-confirmed the same honest way — synthesized pointer move on the new target, a dispatched wheel event, and a real drag — plus visual screenshots at each step.

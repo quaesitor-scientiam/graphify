@@ -84,6 +84,9 @@ mut:
 	// file, by the name anon_type gives it (`_VAnonStruct1`), to its
 	// declaration (see add_type_ref)
 	anon map[string]flat.NodeId
+	// body_line is the line of the last node the body walk met that has a place (see
+	// body_type_refs)
+	body_line int
 }
 
 fn extract_v3(path string, src string, rel string, real_path string) FileResult {
@@ -1473,14 +1476,15 @@ fn (mut f V3File) extract_fn(id flat.NodeId, mut syms []Symbol, mut edges []Edge
 		locals:    locals
 		vars:      vars
 	}
-	mut seen := map[string]bool{}
+	// the body's calls and type references share the signature's map, so a type both name
+	// is one edge, the signature's (a call's key has a \x00 in it, which no type name has)
 	mut body := []flat.NodeId{}
 	for k in kids {
 		if f.node(k).kind != .param {
 			body << k
 		}
 	}
-	f.walk_list(body, ctx, mut edges, mut seen)
+	f.walk_list(body, ctx, mut edges, mut rseen)
 }
 
 // param_text renders a parameter as its declaration writes it, `mut buf []u8` and
@@ -1594,7 +1598,9 @@ fn (mut f V3File) extract_struct(id flat.NodeId, mut syms []Symbol, mut edges []
 			is_pub:    f.field_is_pub(line, fline, n.value_text().starts_with('C.'))
 			parent:    sid
 		})
-		f.walk_initializer(.field, fname, fline, f.kids(k), mut edges)
+		// the default value is the field's own, apart from the struct's reference to its type
+		mut fseen := map[string]bool{}
+		f.walk_initializer(.field, fname, fline, f.kids(k), mut edges, mut fseen)
 		f.add_type_ref(sid, fd.typ_text(), mut edges, mut rseen)
 	}
 }
@@ -1747,7 +1753,8 @@ fn (mut f V3File) extract_consts(id flat.NodeId, mut syms []Symbol, mut edges []
 			// the type follows from the value, `const names = ['a']`
 			recipe: if value.len > 0 { f.recipe(value[0], V3CallCtx{}) } else { '' }
 		})
-		f.walk_initializer(.constant, name, f.line_of(cf.pos.offset), value, mut edges)
+		mut cseen := map[string]bool{}
+		f.walk_initializer(.constant, name, f.line_of(cf.pos.offset), value, mut edges, mut cseen)
 	}
 }
 
@@ -1780,13 +1787,15 @@ fn (mut f V3File) extract_globals(id flat.NodeId, mut syms []Symbol, mut edges [
 				''
 			}
 		})
-		f.walk_initializer(.global, g.value_text(), line, value, mut edges)
+		// the type comes first and its value shares its map, so a type both name is one edge,
+		// the type's, as a function's signature and body are (extract_fn)
+		mut rseen := map[string]bool{}
 		if typ != '' {
-			mut rseen := map[string]bool{}
 			// named as its calls are, since separate_member_ids may give it another id
 			f.add_type_ref(initializer_from(.global, f.rel, line, g.value_text()), g.typ_text(), mut edges,
 				mut rseen)
 		}
+		f.walk_initializer(.global, g.value_text(), line, value, mut edges, mut rseen)
 	}
 }
 
@@ -2403,8 +2412,8 @@ fn (f &V3File) comptime_ret_pin(sel flat.NodeId, ctx V3CallCtx) string {
 // from the declaration itself: a constant, a global or a struct field's
 // default value has no body to walk. The declaration is named by initializer_from
 // because its final id isn't known yet (see resolve_initializer_callers).
-fn (mut f V3File) walk_initializer(kind SymbolKind, name string, line int, ids []flat.NodeId, mut edges []Edge) {
-	mut seen := map[string]bool{}
+// `seen` is the declaration's own map, which a global's type has already written to.
+fn (mut f V3File) walk_initializer(kind SymbolKind, name string, line int, ids []flat.NodeId, mut edges []Edge, mut seen map[string]bool) {
 	f.walk_list(ids, V3CallCtx{
 		from: initializer_from(kind, f.rel, line, name)
 		file: f.rel
@@ -2530,6 +2539,7 @@ fn (mut f V3File) walk(id flat.NodeId, ctx V3CallCtx, mut edges []Edge, mut seen
 	}
 	n := f.node(id)
 	kids := f.kids(id)
+	f.body_type_refs(n, kids, ctx, mut edges, mut seen)
 	match n.kind {
 		.call {
 			if kids.len > 0 {
@@ -2873,6 +2883,192 @@ fn (mut f V3File) walk(id flat.NodeId, ctx V3CallCtx, mut edges []Edge, mut seen
 		return f.declare(n, kids, ctx)
 	}
 	return ctx
+}
+
+// body_type_refs records the types the body node `n` names as `references` edges from the
+// declaration the body is in (ctx.from), each with the lines it is named on: a struct
+// literal (`Foo{}`, `&http.Server{}`, `chan Foo{}`, `Foo{...b}`), an array or map literal of
+// a written type (`[]Foo{}`, `map[string]Foo{}`), a cast (`Foo(x)`), `as` and `is`, a
+// compile-time `$if x is Foo`, `sizeof`, `typeof[T]()` and `__offsetof`, a function literal's parameter and return
+// types, the types of a match's branches, and the type arguments of a generic call
+// (`json.decode[Config](s)`). A name is read as type_ref reads a signature's, so a
+// generic struct's type arguments are not followed there either. `Color.red` and
+// `Foo.new()` are not read: the parser writes them as a field of a name, which a type
+// shares with a variable or a module, and a static call is a `calls` edge already.
+fn (mut f V3File) body_type_refs(n &flat.Node, kids []flat.NodeId, ctx V3CallCtx, mut edges []Edge, mut seen map[string]bool) {
+	// a node the parser makes up has no place, `sizeof(T)` in `isreftype(T)`: it is on the
+	// line of the last node the walk met that has one, which encloses it. The literal of an
+	// anonymous struct, `struct { x Foo }{}`, has a place, but V3 gives it one elsewhere in
+	// the file, so it is on its statement's line too.
+	anon_literal := n.kind == .struct_init && f.anon.len > 0 && base_name(n.value_text()) in f.anon
+	if n.pos.offset > 0 && !anon_literal {
+		f.body_line = f.line_of(n.pos.offset)
+	}
+	line := f.body_line
+	match n.kind {
+		.struct_init, .map_init, .cast_expr, .as_expr, .is_expr, .sizeof_expr, .typeof_expr,
+		.offsetof_expr, .assoc {
+			// `$embed_file('x')` is a literal of `embed_file.EmbedFileData` the parser writes
+			// (as the implied-imports scan reads it), of a type the file doesn't name;
+			// `embed_file.Decoder{}` written in a file is a type it does
+			if !(n.value_text() == 'embed_file.EmbedFileData' && n.pos.offset < f.src.len
+				&& f.src[n.pos.offset..].starts_with('\$embed_file')) {
+				f.add_body_ref(ctx.from, n.value_text(), line, mut edges, mut seen)
+			}
+		}
+		.array_init {
+			f.add_body_ref(ctx.from, if n.typ_text() != '' { n.typ_text() } else { n.value_text() },
+				line, mut edges, mut seen)
+		}
+		.comptime_if {
+			// `$if v is ?time.Time {` or `$if v !is int {`: the condition is its text, split
+			// as comptime_type_is splits it, with the option or reference the type is written
+			// with; `!is` names the type too, though it narrows nothing (comptime_type_is
+			// reads `is` alone). A kind, `$int` or `$map`, or a longer condition names none.
+			parts := n.value_text().trim_space().split(' ')
+			if parts.len == 3 && parts[1] in ['is', '!is'] {
+				f.add_body_ref(ctx.from, parts[2], line, mut edges, mut seen)
+			}
+		}
+		.fn_literal {
+			for k in kids {
+				p := f.node(k)
+				if p.kind == .param {
+					f.add_body_ref(ctx.from, p.typ_text(), f.placed_line(p), mut edges, mut seen)
+				}
+			}
+			if n.typ_text() != 'void' {
+				f.add_body_ref(ctx.from, n.typ_text(), line, mut edges, mut seen)
+			}
+		}
+		.match_stmt {
+			// a branch's patterns are its first children, as many as its value says
+			if kids.len < 2 {
+				return
+			}
+			for b in kids[1..] {
+				count := f.node(b).value_text().int()
+				bk := f.kids(b)
+				for pat in bk[..if count < bk.len { count } else { bk.len }] {
+					if pt := f.match_pattern_type(pat) {
+						f.add_body_ref(ctx.from, pt, f.placed_line(f.node(pat)), mut edges, mut
+							seen)
+					}
+				}
+			}
+		}
+		.call {
+			// `decode[Config](s)`: the type arguments of a generic call
+			if kids.len > 0 && f.node(kids[0]).kind == .index && f.kids(kids[0]).len > 1 {
+				ik := f.kids(kids[0])
+				for ta in ik[1..] {
+					f.add_body_ref(ctx.from, f.type_arg_text(ta), line, mut edges, mut seen)
+				}
+			}
+		}
+		else {}
+	}
+}
+
+// placed_line is the line of the node `n`, or, for one the parser made up, of the node the
+// walk met last that has a place (see body_type_refs).
+fn (f &V3File) placed_line(n &flat.Node) int {
+	return if n.pos.offset > 0 { f.line_of(n.pos.offset) } else { f.body_line }
+}
+
+// type_arg_text is a generic call's type argument as written, `Config`, `json.Any` or
+// `[]Foo`; '' for an index that is no type, `fns[i](x)`, which add_body_ref then skips
+// as it does any name not written as a type.
+fn (f &V3File) type_arg_text(id flat.NodeId) string {
+	n := f.node(id)
+	match n.kind {
+		.ident {
+			return n.value_text()
+		}
+		.selector {
+			ks := f.kids(id)
+			if ks.len == 1 && f.node(ks[0]).kind == .ident {
+				return '${f.node(ks[0]).value_text()}.${n.value_text()}'
+			}
+		}
+		.array_init, .map_init {
+			return if n.typ_text() != '' { n.typ_text() } else { n.value_text() }
+		}
+		.index {
+			ks := f.kids(id)
+			if ks.len > 0 {
+				return f.type_arg_text(ks[0])
+			}
+		}
+		else {}
+	}
+	return ''
+}
+
+// add_body_ref records that `from` names the type written `t` on `line` of its body, as
+// add_type_ref does for its signature, and merges a repeat into the edge its first use
+// made. A name not written as a type is skipped: one starting with a capital, a primitive,
+// or a C or JS type is one (V names a variable, a constant or a module in lower case), so
+// `sizeof(x)` and `typeof(x)` of a variable make none, and neither does `x is $map`. A
+// struct declared in a function, which V3 names `Tick@local@App_x2e_work`, is no symbol of
+// the graph, so a use of it makes none either. A type the signature names already has its
+// edge, which keeps no lines.
+fn (f &V3File) add_body_ref(from string, t string, line int, mut edges []Edge, mut seen map[string]bool) {
+	if t == '' || t.starts_with('$') || t.contains('@local@') {
+		return
+	}
+	base := base_name(t)
+	if base == '' {
+		return
+	}
+	if f.anon.len > 0 {
+		if aid := f.anon[base] {
+			// each use, so a second one adds its line to the field types' edges (a field
+			// of an anonymous struct can't name the struct itself)
+			for k in f.kids(aid) {
+				fd := f.node(k)
+				if fd.kind == .field_decl {
+					f.add_body_ref(from, fd.typ_text(), line, mut edges, mut seen)
+				}
+			}
+			return
+		}
+	}
+	typename := f.type_ref(t)
+	if typename == '' || is_generic_param(typename) {
+		return
+	}
+	if !base[0].is_capital() && base !in primitive_types && base !in builtin_type_names
+		&& !typename.starts_with('C.') && !typename.starts_with('JS.') {
+		return
+	}
+	if typename in seen {
+		// the edge is this declaration's, among the last ones: each declaration walks with a
+		// map of its own (extract_fn, extract_globals, a field's and a constant's), whose type
+		// names come with a reference edge from it, and a call's key holds a \x00
+		for i := edges.len - 1; i >= 0 && edges[i].from == from; i-- {
+			e := edges[i]
+			if e.kind == .references && e.to == typename {
+				if e.lines.len > 0 {
+					edges[i] = Edge{
+						...e
+						lines: add_line(e.lines, line)
+					}
+				}
+				return
+			}
+		}
+		// none found: a name the map holds with no edge of this declaration's gets one, so a
+		// change to who fills the map loses no use (another declaration's edge is not this one)
+	}
+	seen[typename] = true
+	edges << Edge{
+		from:  from
+		to:    typename
+		kind:  .references
+		file:  f.rel
+		lines: [line]
+	}
 }
 
 // match_branch_ctx is `ctx` in the match branch `branch` on `subject`: a branch with
