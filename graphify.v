@@ -161,13 +161,14 @@ pub fn build_graph_with_library(root string, worker_exe string, out_dir string, 
 		if fr := run.by_rel[rel] {
 			lib_files[rel] = true
 			g.symbols << fr.symbols
-			// a call inside vlib is not one of the project's; a module from VMODULES is
+			// a call inside vlib is not one of the project's, nor is a type a vlib body
+			// names (a reference with lines, see add_body_ref); a module from VMODULES is
 			// kept whole, calls and all (keep_reached_library). The edges say which file
 			// they come from, which keep_reached_library goes by, since a `C.` binding's
 			// id is one for the project and the library
 			whole := rel.starts_with(lib_vmodules_prefix)
 			for e in fr.edges {
-				if e.kind != .calls || whole {
+				if (e.kind != .calls && !(e.kind == .references && e.lines.len > 0)) || whole {
 					g.edges << Edge{
 						...e
 						file: if e.file == '' { rel } else { e.file }
@@ -1062,6 +1063,9 @@ struct DeclSite {
 	no_main bool
 	// module_unwritten is set when the declaration's file has no `module` line
 	module_unwritten bool
+	// copy is the folder of the copy of V the file is in, when the tree holds several
+	// (copy_of); '' otherwise
+	copy string
 }
 
 // TypeCand is one declaration that a raw type name (on an `embeds` or
@@ -1074,6 +1078,43 @@ struct TypeCand {
 	c bool
 	// js is set for a JS binding type, `interface JS.name` or `struct JS.name`
 	js bool
+	// copy is the copy of V the declaration is in (see DeclSite.copy)
+	copy string
+}
+
+// in_copy_of reports whether the candidate is in the copy of V the code at `site` is in.
+// A tree holding two checkouts of V (native-backend's two clones) has the same modules
+// twice, and each copy's code is built with its own: `i32(x)` in one copy is not the
+// `type i32 = int` only the other's builtin declares. A candidate or a site in no copy,
+// or in a tree with one, is in every one.
+fn (c TypeCand) in_copy_of(site DeclSite) bool {
+	return c.copy == '' || site.copy == '' || c.copy == site.copy
+}
+
+// copy_roots is the folders of the copies of V a tree holds, each the folder whose
+// `vlib/builtin` holds a file of `files`, `native/` and `spydr06/`; none when it holds
+// one or none, as the V tree itself and a project using vlib do.
+fn copy_roots(files []string) []string {
+	mut roots := []string{}
+	for f in files {
+		at := f.index('vlib/builtin/') or { continue }
+		if (at == 0 || f[at - 1] == `/`) && f[..at] !in roots {
+			roots << f[..at]
+		}
+	}
+	return if roots.len > 1 { roots } else { []string{} }
+}
+
+// copy_of is the root in `roots` the file `file` is in, the longest that holds it;
+// '' for none.
+fn copy_of(file string, roots []string) string {
+	mut best := ''
+	for r in roots {
+		if r != '' && file.starts_with(r) && r.len > best.len {
+			best = r
+		}
+	}
+	return best
 }
 
 // declares_host reports whether the candidate declares a type of the host
@@ -1150,6 +1191,8 @@ fn resolve_edges(mut g Graph) {
 	// sees no function for (see own_fn_value)
 	mut fn_values := map[string][]CallCand{}
 	mut by_type_name := map[string][]TypeCand{}
+	// the folders of the copies of V the tree holds, when several (copy_roots)
+	roots := copy_roots(g.symbols.map(it.file))
 	// type aliases by name, for a bare call of one (see alias_conversion)
 	mut alias_by_name := map[string][]TypeCand{}
 	// enum_names holds each enum by module and name, to recognise V's own zero()
@@ -1299,6 +1342,7 @@ fn resolve_edges(mut g Graph) {
 				file: s.file
 				c:    s.signature.contains('struct C.')
 				js:   s.signature.contains('interface JS.') || s.signature.contains('struct JS.')
+				copy: copy_of(s.file, roots)
 			}
 		}
 		// site_of answers "where does this edge's `from` live", so it only
@@ -1316,6 +1360,7 @@ fn resolve_edges(mut g Graph) {
 				solo:             main_count[mod] == 1
 				no_main:          main_count[mod] == 0
 				module_unwritten: module_unwritten_in[s.file]
+				copy:             copy_of(s.file, roots)
 			}
 		}
 		// id_count/id_main/id_files feed the build-unit-aware duplicate check
@@ -1407,6 +1452,7 @@ fn resolve_edges(mut g Graph) {
 				solo:             main_count[mod] == 1
 				no_main:          main_count[mod] == 0
 				module_unwritten: module_unwritten_in[s.file]
+				copy:             copy_of(s.file, roots)
 			}
 		}
 	}
@@ -1808,6 +1854,7 @@ fn resolve_edges(mut g Graph) {
 						provenance: if r.inferred { .inferred } else { .extracted }
 						file:       e.file
 						arg_sites:  e.arg_sites
+						lines:      e.lines
 					}
 				}
 				continue
@@ -1823,7 +1870,8 @@ fn resolve_edges(mut g Graph) {
 						kind:       e.kind
 						provenance: if res.inferred { .inferred } else { .extracted }
 						file:       e.file
-	arg_sites:  e.arg_sites
+						arg_sites:  e.arg_sites
+						lines:      e.lines
 					}
 					continue
 				}
@@ -2534,7 +2582,9 @@ fn importable(id string, decl_file string, caller_file string, site_of map[strin
 // shortcut, which are calls-specific: a type name carries no notion of
 // "method vs function", and there is no receiver to type without inference.
 fn resolve_type_ref(e Edge, by_type_name map[string][]TypeCand, site_of map[string]DeclSite, imports_of map[string][]string) ?CallResolution {
-	named := by_type_name[e.to.all_after_last('.')] or { return none }
+	// a declaration in another copy of V in the tree is none of them (in_copy_of)
+	from_site := caller_site(e, site_of) or { DeclSite{} }
+	named := (by_type_name[e.to.all_after_last('.')] or { return none }).filter(it.in_copy_of(from_site))
 	if named.len == 0 {
 		return none
 	}
@@ -2667,10 +2717,11 @@ fn host_type_ref(e Edge, by_type_name map[string][]TypeCand, site_of map[string]
 		return none
 	}
 	named := by_type_name[e.to.all_after('.')] or { []TypeCand{} }
-	hosts := named.filter(it.declares_host(host))
 	site := caller_site(e, site_of) or { DeclSite{
 		file: e.file
 	} }
+	// a declaration in another copy of V in the tree is none of them (in_copy_of)
+	hosts := named.filter(it.declares_host(host) && it.in_copy_of(site))
 	mut imports := imports_of[site.file] or { []string{} }
 	// a `module main` directory of separate programs is no module its files share;
 	// one with no `fn main` is, as `v test` builds it together (type_in_scope)

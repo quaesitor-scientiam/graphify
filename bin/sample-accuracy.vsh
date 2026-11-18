@@ -7,6 +7,7 @@
 //
 //   v run bin/sample-accuracy.vsh S:\graph_data\vlang                  # 1000 sites, seed 20261110
 //   v run bin/sample-accuracy.vsh <graph> -kind references             # inferred reference edges
+//   v run bin/sample-accuracy.vsh <graph> -kind missing-references     # type names no edge links
 //   v run bin/sample-accuracy.vsh <graph dir or graph.json> -n 2000 -seed 7
 //   v run bin/sample-accuracy.vsh <graph> -out <dir>                   # where the results go
 //   v run bin/sample-accuracy.vsh <graph> -v3 <binary>                 # use this V3, don't build one
@@ -21,8 +22,8 @@
 //
 // A unit is one site of an inferred edge of the chosen kind: its caller (the symbol
 // the edge is from), its callee (the declaration it is to) and one line of the
-// edge's `lines`. A reference edge has no `lines`: its unit is the edge, asked at up
-// to 8 lines of its `from` (in each file declaring that id) that name its target, and
+// edge's `lines`. A reference edge is scored whole (a signature's has no `lines`, and a
+// body's are not used): its unit is the edge, asked at up to 8 lines of its `from` (in each file declaring that id) that name its target, and
 // scored by its best one. V3 is asked `-vls-mode -line-info file:line:gd^col`
 // at the callee's name on that line, inside a program that compiles the file. V3
 // checks only the bodies a program reaches, so a site is asked in one program after
@@ -42,12 +43,15 @@
 //   name-not-on-line the callee's name is not on the line the edge gives
 //   no-source        the line is not in the caller's file
 // Accuracy is correct / (correct + extra + wrong), with a 95% Wilson interval.
+// -kind missing-references scores places, not edges (see missing_references): linked,
+// missing, not-a-type, not-in-graph or no-answer, and linked / (linked + missing).
 // An `extra` or `wrong` row is where to look by hand: V3 answers for one build,
 // and an edge can be right for another one.
 //
 // It writes sample.csv (one row per sampled site), v3_raw.log (every V3 answer) and
-// summary.txt into -out (default: accuracy-<seed>, with -references after it for
-// -kind references and -self-test after that for -self-test, in the V temp folder).
+// summary.txt into -out (default: accuracy-<seed>, with -references or
+// -missing-references after it for that -kind, and -self-test after that for
+// -self-test, in the V temp folder).
 //
 // -self-test points each sampled edge at another declaration of the same name before
 // asking (a function or method for a call, one of the target's own kind for a
@@ -65,6 +69,7 @@ import x.json2
 
 const kind_function = 2
 const kind_method = 3
+const type_kinds = [4, 5, 6, 9] // struct, enum, interface, type alias
 const edge_calls = 1
 const edge_references = 5
 const prov_inferred = 1
@@ -132,7 +137,7 @@ struct Manifest {
 struct Options {
 mut:
 	graph     string
-	kind      string = 'calls' // or 'references'
+	kind      string = 'calls' // or 'references', or 'missing-references'
 	n         int    = 1000
 	seed      u64    = 20261110
 	out       string
@@ -205,7 +210,7 @@ mut:
 fn main() {
 	opts := parse_args(os.args[1..]) or {
 		eprintln(err.msg())
-		eprintln('usage: v run bin/sample-accuracy.vsh <graph dir or graph.json> [-kind calls|references] [-n 1000] [-seed 20261110] [-out dir] [-v3 binary] [-no-worlds] [-self-test] [-timeout 300]')
+		eprintln('usage: v run bin/sample-accuracy.vsh <graph dir or graph.json> [-kind calls|references|missing-references] [-n 1000] [-seed 20261110] [-out dir] [-v3 binary] [-no-worlds] [-self-test] [-timeout 300]')
 		exit(2)
 	}
 	graph_path := if os.is_dir(opts.graph) {
@@ -241,7 +246,7 @@ fn main() {
 	out_dir := if opts.out != '' {
 		os.abs_path(opts.out)
 	} else {
-		kind_suffix := if opts.kind == 'references' { '-references' } else { '' }
+		kind_suffix := if opts.kind == 'calls' { '' } else { '-' + opts.kind }
 		test_suffix := if opts.self_test { '-self-test' } else { '' }
 		os.join_path(os.vtmp_dir(), 'accuracy-${opts.seed}${kind_suffix}${test_suffix}')
 	}
@@ -283,9 +288,13 @@ fn main() {
 		syms[s.id] = s
 		by_pos['${s.file}:${s.line}'] << s.id
 	}
+	if opts.kind == 'missing-references' {
+		missing_references(mut ctx, g, by_pos, opts, commit, graph_path)
+		return
+	}
 	edge_kind := if opts.kind == 'references' { edge_references } else { edge_calls }
-	// a reference edge has no `lines`: its unit is the edge (line 0), asked at the
-	// lines of its `from` declaration that name its target
+	// a reference edge is scored as one unit (line 0), asked at the lines of its `from`
+	// declaration that name its target, as a signature's has no `lines`
 	by_edge := edge_kind == edge_references
 	mut units := []Unit{}
 	for e in g.edges {
@@ -544,8 +553,8 @@ fn parse_args(args []string) !Options {
 				// strconv refuses a number too big for its type; `.int()` would clamp it
 				match a {
 					'-kind' {
-						if v !in ['calls', 'references'] {
-							return error('-kind is calls or references, not `${v}`')
+						if v !in ['calls', 'references', 'missing-references'] {
+							return error('-kind is calls, references or missing-references, not `${v}`')
 						}
 						o.kind = v
 					}
@@ -584,6 +593,9 @@ fn parse_args(args []string) !Options {
 	}
 	if o.n < 1 || o.timeout < 1 {
 		return error('-n and -timeout must be positive')
+	}
+	if o.self_test && o.kind == 'missing-references' {
+		return error('-self-test checks the edges a graph has, not those it lacks')
 	}
 	return o
 }
@@ -793,11 +805,235 @@ fn tree_mismatch(root string, commit string) ?string {
 
 // unit_name is what one sampled unit of `kind` is, in the plural.
 fn unit_name(kind string) string {
-	return if kind == 'references' { 'reference edges' } else { 'call sites' }
+	return match kind {
+		'references' { 'reference edges' }
+		'missing-references' { 'type names in bodies' }
+		else { 'call sites' }
+	}
 }
 
-// site_key names a site: the caller and line of a call; for a reference, whose edge
-// has no lines, the symbol it is from.
+// missing_references measures what the reference edges leave out, which the other kinds,
+// asking only about edges the graph has, cannot: a seeded sample of the places a function's
+// or method's body writes a capitalized name (type_name_columns), each asked of V3. A place
+// V3 resolves to a type of the graph is `linked` when the graph has a `references` or
+// `embeds` edge from that declaration to it, and `missing` when it has none; one V3
+// resolves to something else (a function, an enum value, a constant) is `not-a-type`. A
+// declaration's first line is its signature's, which is not asked, but a signature written
+// over several lines has its later lines asked, and their types count as linked through the
+// signature's edge. The scan reads one line at a time: a `/* */` comment, a string over
+// several lines or a raw string's `\` is read as code (a place V3 gives no answer for), and a
+// `${...}` in a string is not read. A `missing` place whose
+// name is followed by `.` (`Color.red`, `Foo.new()`) is counted apart, as one the graph
+// does not read as a type (see add_body_ref in backend_v.v).
+fn missing_references(mut ctx Ctx, g GGraph, by_pos map[string][]string, opts Options, commit string, graph_path string) {
+	mut kind_of := map[string]int{}
+	mut in_file := map[string][]GSymbol{}
+	for s in g.symbols {
+		kind_of[s.id] = s.kind
+		in_file[s.file] << s
+	}
+	mut linked := map[string]bool{} // from \t to
+	for e in g.edges {
+		if e.kind in [edge_references, 4] {
+			linked['${e.from}\t${e.to}'] = true
+		}
+	}
+	mut units := []Row{}
+	for s in g.symbols {
+		if s.kind !in [kind_function, kind_method] {
+			continue
+		}
+		src := ctx.lines_of(s.file)
+		if s.line < 1 || s.line > src.len {
+			continue
+		}
+		for ln in s.line + 1 .. decl_last_line(src, s, in_file[s.file]) + 1 {
+			for col in type_name_columns(src[ln - 1]) {
+				units << Row{
+					from: s.id
+					file: s.file
+					line: ln
+					cols: [col]
+				}
+			}
+		}
+	}
+	println('population: ${units.len} ${unit_name(opts.kind)}')
+	if units.len == 0 {
+		exit(1)
+	}
+	mut rng := Rng{
+		s: opts.seed
+	}
+	mut picks := []int{len: units.len, init: index}
+	n := if opts.n < units.len { opts.n } else { units.len }
+	for i in 0 .. n {
+		j := i + rng.below(units.len - i)
+		picks[i], picks[j] = picks[j], picks[i]
+	}
+	mut rows := []Row{cap: n}
+	for i in 0 .. n {
+		mut row := units[picks[i]]
+		row.group = i
+		text := ctx.lines_of(row.file)[row.line - 1]
+		name := name_at(text, row.cols[0])
+		row.to = name
+		end := row.cols[0] + name.len
+		if end < text.len && text[end] == `.` {
+			row.note = 'followed by .'
+		}
+		row.progs = ctx.programs_for(row.file)
+		row.worlds = worlds_for(row.file, os.user_os())
+		rows << row
+	}
+	println('asking V3 in the default build...')
+	ctx.ask_world(mut rows, []string{}, all_rows(rows))
+	if opts.worlds {
+		mut tried := map[string]bool{}
+		for {
+			mut world := []string{}
+			for row in rows {
+				if row.answers.len > 0 {
+					continue
+				}
+				for w in row.worlds {
+					if w.join(' ') !in tried {
+						world = w.clone()
+						break
+					}
+				}
+				if world.len > 0 {
+					break
+				}
+			}
+			if world.len == 0 {
+				break
+			}
+			tried[world.join(' ')] = true
+			mut want := []int{}
+			for i, row in rows {
+				if row.answers.len == 0 && row.worlds.any(it.join(' ') == world.join(' ')) {
+					want << i
+				}
+			}
+			println('asking V3 again with ${world.join(' ')} (${want.len} places)...')
+			ctx.ask_world(mut rows, world, want)
+		}
+	}
+	for mut row in rows {
+		if row.answers.len == 0 {
+			row.status = 'no-answer'
+			continue
+		}
+		mut ids := []string{}
+		for a in row.answers {
+			path, ln := split_answer(a) or { continue }
+			at := by_pos['${path}:${ln}']
+			if at.len > 0 {
+				ids << at
+			} else {
+				ids << '?${path}:${ln}'
+			}
+		}
+		row.ids = dedupe(ids)
+		types := row.ids.filter(kind_of[it] in type_kinds)
+		row.status = if types.any('${row.from}\t${it}' in linked) {
+			'linked'
+		} else if types.len > 0 {
+			'missing'
+		} else if row.ids.all(it.starts_with('?')) {
+			'not-in-graph'
+		} else {
+			'not-a-type'
+		}
+	}
+	mut counts := map[string]int{}
+	for row in rows {
+		counts[row.status]++
+	}
+	found := counts['linked']
+	scored := found + counts['missing']
+	lo, hi := wilson(found, scored)
+	mut s := strings.new_builder(1024)
+	s.writeln('graph: ${graph_path}${if commit != '' { ' (' + commit#[..10] + ')' } else { '' }}')
+	s.writeln('population: ${units.len} ${unit_name(opts.kind)}; sample ${rows.len}, seed ${opts.seed}')
+	for st in ['linked', 'missing', 'not-a-type', 'not-in-graph', 'no-answer'] {
+		if counts[st] > 0 {
+			s.writeln('  ${st:-17} ${counts[st]}')
+		}
+	}
+	dotted := rows.filter(it.status == 'missing' && it.note != '').len
+	if scored > 0 {
+		s.writeln('linked: ${found}/${scored} = ${100 * f64(found) / f64(scored):.2f}% (95% Wilson ${100 * lo:.2f}-${100 * hi:.2f}%)')
+		s.writeln('  of the missing, ${dotted} are a name followed by `.` (an enum value or a static call)')
+	}
+	summary := s.str()
+	println(summary)
+	write_csv(os.join_path(ctx.out_dir, 'sample.csv'), rows)
+	os.write_file(os.join_path(ctx.out_dir, 'summary.txt'), summary) or { eprintln(err) }
+	os.write_file(os.join_path(ctx.out_dir, 'v3_raw.log'), ctx.log.str()) or { eprintln(err) }
+	println('wrote sample.csv, summary.txt and v3_raw.log in ${ctx.out_dir}')
+}
+
+// type_name_columns is the 0-based byte columns where `text`, a line of a body, writes a
+// name that starts with a capital and is two characters long or more, as V names a type
+// (a one-letter one is a type parameter): outside strings and after no `//`, and not
+// part of a longer name, of a `$` or `@` one, or of an attribute line.
+fn type_name_columns(text string) []int {
+	mut out := []int{}
+	if text.trim_left(' \t').starts_with('@[') {
+		return out
+	}
+	mut quote := u8(0)
+	mut i := 0
+	for i < text.len {
+		c := text[i]
+		if quote != 0 {
+			if c == `\\` {
+				i += 2
+				continue
+			}
+			if c == quote {
+				quote = 0
+			}
+			i++
+			continue
+		}
+		if c in [`'`, `"`, `\``] {
+			quote = c
+			i++
+			continue
+		}
+		if c == `/` && i + 1 < text.len && text[i + 1] == `/` {
+			break
+		}
+		if is_name_byte(c) {
+			start := i
+			for i < text.len && is_name_byte(text[i]) {
+				i++
+			}
+			prev := if start > 0 { text[start - 1] } else { ` ` }
+			if c.is_capital() && i - start >= 2 && prev !in [`$`, `@`] {
+				out << start
+			}
+			continue
+		}
+		i++
+	}
+	return out
+}
+
+// name_at is the name written at column `col` of `text`.
+fn name_at(text string, col int) string {
+	mut e := col
+	for e < text.len && is_name_byte(text[e]) {
+		e++
+	}
+	return text[col..e]
+}
+
+// site_key names a site: the caller and line of a call; for a reference, which is
+// scored whole, the symbol it is from.
 fn site_key(from string, line int, by_edge bool) string {
 	return if by_edge { from } else { '${from}\t${line}' }
 }

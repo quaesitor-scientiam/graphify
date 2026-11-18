@@ -11,7 +11,8 @@ module graphify
 //   parse_error : FileResult.parse_error (empty if the file parsed cleanly)
 //   sym  : id\x01name\x01kind_int\x01sig\x01file\x01line\x01end_line\x01is_pub\x01parent\x01doc\x01recipe\x01tparams\x01build
 //   edge : from\x01to\x01kind_int\x01is_method\x01recv_type\x01file\x01recv_recipe\x01provenance_int\x01arg_sites\x01guards\x01lines\x01build
-//   lines: a calls edge's call-site lines, joined by commas
+//   lines: a calls edge's call-site lines, or the lines a body's references edge names
+//          its type on, joined by commas
 //
 // \x01 = field sep, \x02 = record sep, \x03 = section sep, \x04 = encoded
 // newline. Signatures and doc strings may contain any printable char; the only
