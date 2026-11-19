@@ -654,6 +654,10 @@ fn (f &V3File) add_type_ref(from string, t string, mut edges []Edge, mut seen ma
 		}
 	}
 	add_ref(from, f.type_ref(t), f.rel, mut edges, mut seen)
+	// `Bar[Foo]` names Foo too (a type parameter, `Bar[T]`, is skipped by add_ref)
+	for arg in generic_type_args(t) {
+		f.add_type_ref(from, arg, mut edges, mut seen)
+	}
 }
 
 // recv_type renders a receiver type as walk_call stamps it: an unqualified type
@@ -2890,11 +2894,11 @@ fn (mut f V3File) walk(id flat.NodeId, ctx V3CallCtx, mut edges []Edge, mut seen
 // literal (`Foo{}`, `&http.Server{}`, `chan Foo{}`, `Foo{...b}`), an array or map literal of
 // a written type (`[]Foo{}`, `map[string]Foo{}`), a cast (`Foo(x)`), `as` and `is`, a
 // compile-time `$if x is Foo`, `sizeof`, `typeof[T]()` and `__offsetof`, a function literal's parameter and return
-// types, the types of a match's branches, and the type arguments of a generic call
-// (`json.decode[Config](s)`). A name is read as type_ref reads a signature's, so a
-// generic struct's type arguments are not followed there either. `Color.red` and
-// `Foo.new()` are not read: the parser writes them as a field of a name, which a type
-// shares with a variable or a module, and a static call is a `calls` edge already.
+// types, the types of a match's branches, the type arguments of a generic call
+// (`json.decode[Config](s)`), and a type before a field: `Color.red`, `Foo.new()` and
+// `mod.Color.red`, which the parser writes as a field of a name (see the selector case).
+// A name is read as type_ref reads a signature's, and its generic arguments and a map's
+// key, `Bar[Foo]` and `map[Foo]int`, are types it names too (generic_type_args).
 fn (mut f V3File) body_type_refs(n &flat.Node, kids []flat.NodeId, ctx V3CallCtx, mut edges []Edge, mut seen map[string]bool) {
 	// a node the parser makes up has no place, `sizeof(T)` in `isreftype(T)`: it is on the
 	// line of the last node the walk met that has one, which encloses it. The literal of an
@@ -2957,6 +2961,62 @@ fn (mut f V3File) body_type_refs(n &flat.Node, kids []flat.NodeId, ctx V3CallCtx
 				}
 			}
 		}
+		.comptime_for {
+			// `$for f in Todo.fields`: the type whose members it loops over (a type
+			// parameter, `T.fields`, add_body_ref skips)
+			if n.typ_text() != '' {
+				f.add_body_ref(ctx.from, n.typ_text(), line, mut edges, mut seen)
+			}
+		}
+		.sql_expr {
+			// an ORM query, `delete from Todo where ...`, kept as its text: its table's type
+			// follows `from`, `into`, `table` or `update`, and is on the line it is written on
+			words := n.value_text().fields()
+			for i, w in words {
+				if w in ['from', 'into', 'table', 'update'] && i + 1 < words.len {
+					t := words[i + 1]
+					at := f.src.index_after(t, n.pos.offset) or { -1 }
+					f.add_body_ref(ctx.from, t, if at > 0 { f.line_of(at) } else { line }, mut
+						edges, mut seen)
+				}
+			}
+		}
+		.selector {
+			// `Color.red`, `Foo.new()` and `mod.Color.red` name a type: V names a variable, a
+			// constant, a parameter, a global and a function in lower case, so a capital before
+			// `.` is a type, apart from `C.`, `JS.` and `WASM.`, a type parameter (add_body_ref
+			// skips it) and a module imported under a capital alias, `import os as Os`.
+			// `Foo[int].new()` and `mod.Foo[int].new()` name Foo and its arguments (the
+			// inner `mod.Foo` is a selector of its own, read when the walk meets it).
+			if kids.len == 1 {
+				k := f.node(kids[0])
+				if k.kind == .ident {
+					if t := f.selector_type(k, n) {
+						f.add_body_ref(ctx.from, t, line, mut edges, mut seen)
+					}
+				} else if k.kind == .index {
+					ik := f.kids(kids[0])
+					if ik.len > 1 {
+						base := f.node(ik[0])
+						mut generic := false
+						if base.kind == .ident && f.capital_type_name(base.value_text()) {
+							f.add_body_ref(ctx.from, base.value_text(), line, mut edges, mut seen)
+							generic = true
+						} else if base.kind == .selector {
+							bk := f.kids(ik[0])
+							generic = bk.len == 1 && f.node(bk[0]).kind == .ident
+								&& f.selector_type(f.node(bk[0]), base) != none
+						}
+						if generic {
+							for ta in ik[1..] {
+								f.add_body_ref(ctx.from, f.type_arg_text(ta), line, mut edges, mut
+									seen)
+							}
+						}
+					}
+				}
+			}
+		}
 		.call {
 			// `decode[Config](s)`: the type arguments of a generic call
 			if kids.len > 0 && f.node(kids[0]).kind == .index && f.kids(kids[0]).len > 1 {
@@ -2969,6 +3029,35 @@ fn (mut f V3File) body_type_refs(n &flat.Node, kids []flat.NodeId, ctx V3CallCtx
 		else {}
 	}
 }
+
+// capital_type_name reports whether `name`, written before a `.`, is a type's: it starts
+// with a capital and is not a foreign prefix, `C`, `JS` or `WASM` (`WASM.fd_write()` in
+// vlib/builtin/wasm), or a module this file imports under that alias.
+fn (f &V3File) capital_type_name(name string) bool {
+	return name.len > 0 && name[0].is_capital() && name !in foreign_prefixes
+		&& name !in f.imports
+}
+
+// selector_type is the type the selector `sel`, written `name.field` with `name` the
+// identifier `name_node`, names before its field: `name` itself when it is written as a type
+// (capital_type_name), or the module's type `name.Field` when `name` is a module this file
+// imports and the field has a capital (a module's function or constant has none, so
+// `rand.int()` is no type); none otherwise.
+fn (f &V3File) selector_type(name_node &flat.Node, sel &flat.Node) ?string {
+	name := name_node.value_text()
+	if f.capital_type_name(name) {
+		return name
+	}
+	field := sel.value_text()
+	if name in f.imports && field.len > 0 && field[0].is_capital() {
+		return '${name}.${field}'
+	}
+	return none
+}
+
+// foreign_prefixes are the names V declares another language's functions and types
+// under, `fn C.puts()`, `struct JS.Map`, `fn WASM.proc_exit()`
+const foreign_prefixes = ['C', 'JS', 'WASM']
 
 // placed_line is the line of the node `n`, or, for one the parser made up, of the node the
 // walk met last that has a place (see body_type_refs).
@@ -3016,6 +3105,10 @@ fn (f &V3File) type_arg_text(id flat.NodeId) string {
 fn (f &V3File) add_body_ref(from string, t string, line int, mut edges []Edge, mut seen map[string]bool) {
 	if t == '' || t.starts_with('$') || t.contains('@local@') {
 		return
+	}
+	// `Bar[Foo]{}` and `[]Bar[Foo]{}` name Foo too, on the same line
+	for arg in generic_type_args(t) {
+		f.add_body_ref(from, arg, line, mut edges, mut seen)
 	}
 	base := base_name(t)
 	if base == '' {

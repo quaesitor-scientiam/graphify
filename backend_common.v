@@ -78,6 +78,68 @@ fn strip_generic_args(name string) string {
 	return out.bytestr()
 }
 
+// generic_type_args is the other types `name` names in brackets: each generic argument,
+// `Bar[Foo, mod.Baz]` -> [Foo, mod.Baz], `[]Bar[Foo]` -> [Foo], and a map's key,
+// `map[string]Foo` -> [string] (base_name reads the value). A `[` that follows a name
+// opens them, as in strip_generic_args, which keeps a map's; an array's brackets
+// (`[]Foo`, `[4]Foo`) follow none. An argument that is itself generic,
+// `Bar[Queue[Foo]]`, stays whole: its own arguments are read when it is. What isn't
+// written as a type is no argument: a fixed array's size after a map, `map[string][3]int`,
+// and an old field attribute V3 leaves in the type text, `int [primary]` or
+// `string [json: 'id']` (see written_as_type).
+fn generic_type_args(name string) []string {
+	mut args := []string{}
+	mut before := []u8{cap: name.len}
+	mut i := 0
+	for i < name.len {
+		ch := name[i]
+		if ch == `[` && before.len > 0 && (before.last().is_alnum() || before.last() == `_`) {
+			mut depth := 1
+			mut start := i + 1
+			mut j := i + 1
+			for j < name.len && depth > 0 {
+				c := name[j]
+				if c == `[` {
+					depth++
+				} else if c == `]` {
+					depth--
+					if depth == 0 {
+						break
+					}
+				} else if c == `,` && depth == 1 {
+					args << name[start..j].trim_space()
+					start = j + 1
+				}
+				j++
+			}
+			// (an empty list, `Foo[]`, adds '', which the filter below drops)
+			args << name[start..j].trim_space()
+			// the bracket closed: a `[` right after it, `map[string][3]int`, follows no name
+			before << `]`
+			i = j + 1
+			continue
+		}
+		before << ch
+		i++
+	}
+	return args.filter(written_as_type(it))
+}
+
+// written_as_type reports whether `t` is written as V writes a type: a name with a
+// capital, a primitive, or one a module or `C.` qualifies, as `Foo`, `[]int`,
+// `&mod.Bar[T]`. A number or an old field attribute is not: V3 keeps `[primary]` and the
+// name before a `:` or `;`, `[json: x]` -> `json`, in the field's type text. V names a
+// type in lower case only in a `@[translated]` module, whose generic arguments are then
+// not read.
+fn written_as_type(t string) bool {
+	base := base_name(t)
+	if base == '' {
+		return false
+	}
+	return base[0].is_capital() || base in primitive_types || base in builtin_type_names
+		|| strip_generic_args(t).trim_left('&?![]0123456789').contains('.')
+}
+
 // is_generic_param reports whether a type name is a generic parameter such as
 // `T`: V requires those to be exactly one capital letter, and they name no
 // declaration, so a reference to one could never resolve.
