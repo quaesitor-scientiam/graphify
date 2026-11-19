@@ -384,13 +384,43 @@ the graph before `$if x !is T` was read, had 954 of 957: two linking each module
 `C.fd_set` or `C.timeval` beside the one V3 picks, as the nearest-declaration rule above
 does, and one JS-backend file.
 
-Not read, and so not linked: an enum value or a static call, `Color.red` and `Foo.new()`,
-which the parser writes as a field of a name, as it writes a module's function or a
-variable's field (66 of the 67 places still missing); a type named in lower case, as
-`@[translated]` and `@[generated]` modules name theirs (`_ty_point{}`, `token(0)`), which
-a call resolves as a type; a generic struct's type arguments, `Bar[Foo]{}`, and a pointer
-type argument, `f[&Foo]()` (as in a signature); a struct declared in a function, which is
-no symbol (V3 names it `Tick@local@App_x2e_work`); the literal `$embed_file()` makes, of
+**A type before a field, and type arguments (November 2026).** `Color.red`, `Foo.new()`
+and `mod.Color.red`, which the parser writes as a field of a name as it writes a module's
+function or a variable's field, were not read (66 of the 67 places missing above). V's
+checker rejects a variable, a constant, a parameter, a global and a function named with a
+capital, and a module alias may have one (`import os as Os`, checked with `v -check`), so a
+capital before `.` is now a type (the selector case of `body_type_refs`), apart from the
+foreign prefixes `C.`, `JS.` and `WASM.` (`WASM.fd_write()` in vlib/builtin/wasm), a type
+parameter, and a module the file imports under that alias; after a module alias, a
+capital name is that module's type, and `Foo[int].new()` and `mod.Foo[int].new()` name
+Foo and its arguments. A
+type's generic arguments and a map's key, `Bar[Foo]` and `map[Foo]int`, are types it names
+too, in a signature as in a body (`generic_type_args`, beside `strip_generic_args`): only
+what is written as a type counts, so a fixed array's size after a map (`map[string][3]int`)
+and an old field attribute V3 leaves in the type text (`id int [primary]` reads
+`int[primary]`) are none. A `$for x in Todo.fields` names Todo, and an ORM query names the
+type after `from`, `into`, `table` or `update`, on its own line. A pointer type argument,
+`f[&Foo]()`, was already read, in a body and in a signature. On vlang `eeee53a268`:
+references 230,941 → 242,512 (85,997 to primitives, 84,758 before), unresolved 15 → 18,
+calls unchanged; of the places a body writes a capitalized name that V3 resolves to a type
+of the graph, 722 of 722 are linked (vlang `0409a631a7`), and 959 of 960 sampled inferred
+reference edges are V3's (the other links a `C.` function's type in one module beside the
+one V3 picks, as above). The 3 new unresolved references: `const a = Foo.a` in a test file
+whose id another test file's `const a` shares; `zmod_foo.Foo` from a test project whose
+module name is not its folder's; and `promise.Promise[JS.Response, String]` in vlib/js,
+where `String` is written but declared nowhere. On native-backend, unresolved references
+343 → 351: test modules the old copy's imports don't find (`geometry.Shape`), and
+`gg.KeyCode` from `examples/breakout`, whose `import gg` finds the sibling folder
+`examples/gg` there (its calls and signature references go there too, `gg.window_size()` and
+`gg.Context`).
+
+Not read, and so not linked: a type named in lower case, as `@[translated]` and
+`@[generated]` modules name theirs (`_ty_point{}`, `token(0)`), which a call resolves as a
+type, and whose generic arguments are then not read either; a function type's
+parameters written as a generic argument, `Bar[fn (Foo) Color]{}`, of which only the
+return type, `Color`, is read; a struct declared in a
+function, which is no symbol (V3 names it `Tick@local@App_x2e_work`); the literal
+`$embed_file()` makes, of
 `embed_file.EmbedFileData`, which the file doesn't name; a `$if` condition other than
 `x is T` or `x !is T`; and the build a reference is made in (`Edge.build`, which a call records). An
 anonymous struct's literal is on its statement's line, as V3 places it elsewhere. The 9

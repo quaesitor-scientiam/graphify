@@ -823,8 +823,9 @@ fn unit_name(kind string) string {
 // signature's edge. The scan reads one line at a time: a `/* */` comment, a string over
 // several lines or a raw string's `\` is read as code (a place V3 gives no answer for), and a
 // `${...}` in a string is not read. A `missing` place whose
-// name is followed by `.` (`Color.red`, `Foo.new()`) is counted apart, as one the graph
-// does not read as a type (see add_body_ref in backend_v.v).
+// name is followed by `.` (`Color.red`, `Foo.new()`) is counted apart: the graph reads
+// one as a type by its capital (see body_type_refs in backend_v.v), so one still missing
+// is a name it read some other way.
 fn missing_references(mut ctx Ctx, g GGraph, by_pos map[string][]string, opts Options, commit string, graph_path string) {
 	mut kind_of := map[string]int{}
 	mut in_file := map[string][]GSymbol{}

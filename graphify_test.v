@@ -3113,6 +3113,217 @@ fn test_a_body_reference_the_seen_map_holds_without_an_edge_is_still_made() {
 	assert none_yet.len == 1 && none_yet[0].to == 'Bar' && none_yet[0].lines == [7], none_yet.str()
 }
 
+fn test_a_capitalized_name_before_a_field_and_a_type_argument_are_types() {
+	// `Color.red` and `Foo.new()` name a type: V names a variable, a constant, a parameter,
+	// a global and a function in lower case, so a capital before `.` is a type, apart from
+	// `C.`, `JS.`, a type parameter and a module imported under a capital alias. A generic
+	// type's arguments, `Bar[Foo]{}` and `f[&Foo]()`, are types it names too.
+	src := [
+		'module app', // 1
+		'', // 2
+		'import shapes', // 3
+		'import geo as Geo', // 4
+		'', // 5
+		'enum Color {', // 6
+		'	red', // 7
+		'}', // 8
+		'', // 9
+		'struct Foo {}', // 10
+		'', // 11
+		'fn Foo.new() Foo {', // 12
+		'	return Foo{}', // 13
+		'}', // 14
+		'', // 15
+		'struct Bar[T] {', // 16
+		'	x T', // 17
+		'}', // 18
+		'', // 19
+		'fn f[T]() {}', // 20
+		'', // 21
+		'fn sig(b Bar[Foo], m map[Color]int) {}', // 22
+		'', // 23
+		'fn body[T](x T) {', // 24
+		'	a := Color.red', // 25
+		'	b := Foo.new()', // 26
+		'	c := shapes.Circle.new()', // 27
+		'	d := C.SOME_CONST', // 28
+		'	e := T.name', // 29
+		'	g := Bar[Foo]{}', // 30
+		'	f[&Foo]()', // 31
+		'	h := Bar[shapes.Square]{}', // 32
+		'	i := Geo.area()', // 33
+		'	j := Bar[Color].zero()', // 34
+		'	match a {', // 35
+		'		Color.red {}', // 36
+		'	}', // 37
+		'	k := shapes.helper()', // 38
+		'	m := b.Count', // 39
+		'	n := Bar[Pair[Foo, Color]]{}', // 40
+		'	o := JS.Number(1)', // 41
+		'	p := map[Color]Foo{}', // 42
+		'	q := WASM.fd_write(1)', // 43
+		'	s := Pair[Foo, Color].zero()', // 44
+		'	u := f[Foo, Color]()', // 45
+		'	w := fn (y Foo, z Color) {}', // 46
+		'	match x {', // 47
+		'		Foo {}', // 48
+		'		Bar, Pair {}', // 49
+		'	}', // 50
+		'	_ = b', // 51
+		'}', // 52
+		'', // 53
+		'struct Pair[A, B] {}', // 54
+		'', // 55
+		'struct Row {', // 56
+		'	id int [primary]', // 57
+		'	pk int [json: Pkey]', // 58
+		'	nk int [skip; Unique]', // 59
+		'}', // 60
+		'', // 61
+		'fn fixed(m map[string][3]int, c map[char]int, t Bar[C.timeval]) {}', // 62
+		'', // 63
+		'fn two(p Pair[shapes.Square, shapes.Circle]) {}', // 64
+	].join('\n') + '\n'
+	root := write_tree('type_selectors', {
+		'app/app.v':       src
+		'shapes/shapes.v': 'module shapes\n\npub struct Circle {}\n\npub fn Circle.new() Circle {\n\treturn Circle{}\n}\n\npub struct Square {}\n'
+		'geo/geo.v':       'module geo\n\npub fn area() int {\n\treturn 0\n}\n'
+	})
+	defer {
+		os.rmdir_all(root) or {}
+	}
+	g := build_graph(Options{ root: root })
+	refs := g.edges.filter(it.kind == .references)
+	of := fn [refs] (from string, to string) [][]int {
+		return refs.filter(it.from == from && it.to == to).map(it.lines)
+	}
+	// a capital before a field: an enum value, a static call, a match branch's value
+	// (and a map's key, line 42, beside its value)
+	// (each of several type arguments, function literal parameters, match branches and a
+	// branch's patterns, lines 44 to 49)
+	assert of('app.body', 'app.Color') == [[25, 34, 36, 40, 42, 44, 45, 46]], refs.str()
+	assert of('app.body', 'app.Foo') == [[26, 30, 31, 40, 42, 44, 45, 46, 48]], refs.str()
+	// a module's type, before a field
+	assert of('app.body', 'shapes.Circle') == [[27]], refs.str()
+	// type arguments, of a literal and of a static call's type, and nested ones
+	assert of('app.body', 'app.Bar') == [[30, 32, 34, 40, 49]], refs.str()
+	assert of('app.body', 'shapes.Square') == [[32]], refs.str()
+	assert of('app.body', 'app.Pair') == [[40, 44, 49]], refs.str()
+	// a signature's type with two arguments names both
+	assert refs.filter(it.from == 'app.two').map(it.to) == ['app.Pair', 'shapes.Square',
+		'shapes.Circle'], refs.str()
+	// and of a signature's type, as its other types are (no lines)
+	assert of('app.sig', 'app.Foo') == [[]int{}], refs.str()
+	assert of('app.sig', 'app.Color') == [[]int{}], refs.str()
+	// not a type: `C.`, `JS.` and `WASM.`, a type parameter, a module under a capital
+	// alias, a module's function, a variable's field written with a capital
+	assert !refs.any(it.from == 'app.body' && (it.to in ['C', 'JS', 'WASM', 'T', 'Geo', 'SOME_CONST']
+		|| it.to.contains('geo') || it.to.contains('Geo') || it.to.contains('helper')
+		|| it.to.contains('Count'))), refs.str()
+	// nor is what follows a closed bracket, a fixed array's size, or an old field
+	// attribute the parser leaves in the type text
+	// (a map's key that is a builtin name, `char`, and a C type as an argument are types)
+	assert refs.filter(it.from == 'app.fixed').map(it.to) == ['int', 'string', 'char', 'app.Bar',
+		'C.timeval'], refs.str()
+	// (V3 keeps the name before an old attribute's `:` or `;` in the type text, `int[json]`;
+	// what follows it, `Pkey`, it makes a field of its own, as it did before)
+	assert !refs.any(it.to in ['primary', '3', 'json', 'skip']), refs.str()
+}
+
+fn test_the_types_in_a_type_names_brackets() {
+	// each argument list that follows a name, split at its own commas, and a map's key;
+	// an array's brackets, a fixed array's size and an old field attribute are none
+	assert generic_type_args('Bar[Foo, mod.Baz]') == ['Foo', 'mod.Baz']
+	assert generic_type_args('[]Bar[Foo]') == ['Foo']
+	assert generic_type_args('Bar[Pair[A, B]]') == ['Pair[A, B]']
+	assert generic_type_args('map[string]Foo') == ['string']
+	assert generic_type_args('map[string][3]int') == ['string']
+	assert generic_type_args('[2][3]Foo') == []string{}
+	assert generic_type_args('int[primary]') == []string{}
+	assert generic_type_args('Foo[]') == []string{}
+	// text the parser left unclosed still gives what it holds
+	assert generic_type_args('Bar[Foo') == ['Foo']
+	// a lower-case name is no type, even with a module's type in its brackets
+	assert !written_as_type('pair[mod.Bar]')
+	assert written_as_type('mod.Bar[T]') && written_as_type('&C.timeval') && written_as_type('[]int')
+}
+
+fn test_what_reads_as_a_type_and_what_does_not_around_a_field() {
+	// Shapes from vlib and the examples that a rule of the body walk must leave alone, or
+	// read whole: a module's function named like a primitive (`rand.int()`), a variable
+	// named like a builtin type before a field (`any.str()`), a variable indexed by a C
+	// constant (`attrs[C.ATTR_vs_pos]`), a module's generic static call, a query's other
+	// words (`where x is none`), a one-word `$if`, and anonymous structs of two fields.
+	src := [
+		'module m', // 1
+		'', // 2
+		'import mymod', // 3
+		'import rand as rnd', // 4
+		'', // 5
+		'struct Foo {}', // 6
+		'', // 7
+		'struct Bar {}', // 8
+		'', // 9
+		'struct Holder {', // 10
+		'	inner struct {', // 11
+		'		p Foo', // 12
+		'		q Bar', // 13
+		'	}', // 14
+		'}', // 15
+		'', // 16
+		'fn f(xs []int, db int) {', // 17
+		'	a := rnd.int()', // 18
+		'	b := mymod.any()', // 19
+		'	any := 1', // 20
+		'	c := any.str()', // 21
+		'	d := xs[C.FOO].len', // 22
+		'	e := mymod.Box[Foo].new()', // 23
+		'	sql db {', // 24
+		'		select from Foo where id is none', // 25
+		'	}', // 26
+		'	\$if windows {', // 27
+		'	}', // 28
+		'	h := struct { p Foo q Bar }{}', // 29
+		'	k := pd.attrs[C.ATTR].format', // 30
+		'}', // 31
+	].join('\n') + '\n'
+	g := graph_of({
+		'm/m.v': src
+	})
+	refs := g.edges.filter(it.kind == .references)
+	from_f := refs.filter(it.from == 'm.f').map(it.to)
+	// none of these names a type
+	// (`int` is the signature's, `xs []int`, with no lines)
+	assert refs.filter(it.from == 'm.f' && it.to == 'int').map(it.lines) == [[]int{}], refs.str()
+	assert !from_f.any(it in ['any', 'none', 'Box', 'C.FOO', 'C.ATTR'] || it.contains('rnd')
+		|| it.contains('rand.') || it.ends_with('.int') || it.ends_with('.any')), refs.str()
+	// a module's generic static call names its type and the argument
+	assert from_f.any(it.ends_with('mymod.Box')), refs.str()
+	assert refs.any(it.from == 'm.f' && it.to == 'm.Foo' && it.lines == [23, 25, 29]), refs.str()
+	// both fields of an anonymous struct, in a body and in a field's type
+	assert refs.any(it.from == 'm.f' && it.to == 'm.Bar' && it.lines == [29]), refs.str()
+	holder := refs.filter(it.from == 'm.Holder').map(it.to)
+	assert 'm.Foo' in holder && 'm.Bar' in holder, refs.str()
+}
+
+fn test_a_comptime_loop_and_an_orm_query_name_their_types() {
+	// `$for f in Todo.fields` loops over Todo's members, and an ORM query names its table's
+	// type after `from`, `into`, `table` or `update`, on the line it is written on
+	g := graph_of({
+		'm/m.v': 'module m\n\nstruct Todo {\n\tid int\n}\n\nstruct Tag {}\n\nstruct Note {}\n\nfn f[T](db int, t Tag) {\n\t$for attr in Todo.attributes {\n\t}\n\t$for x in T.fields {\n\t}\n\tsql db {\n\t\tdelete from Note where id == 1\n\t\tinsert t into Tag\n\t\tinsert t into Log\n\t}\n}\n\nstruct Log {}\n'
+	})
+	refs := g.edges.filter(it.kind == .references && it.from == 'm.f')
+	lines := fn [refs] (to string) [][]int {
+		return refs.filter(it.to == to).map(it.lines)
+	}
+	assert lines('m.Todo') == [[12]], refs.str()
+	assert lines('m.Note') == [[17]], refs.str()
+	assert lines('m.Log') == [[19]], refs.str()
+	// a type the signature names keeps its edge
+	assert lines('m.Tag') == [[]int{}], refs.str()
+	assert !refs.any(it.to in ['T', 'id', 'db', 'where']), refs.str()
+}
+
 fn test_a_type_reference_stays_in_its_copy_of_v() {
 	// A tree holding two checkouts of V (S:/vProjects/native-backend's two clones) has
 	// the same modules twice. `i32(x)` in one copy linked the `type i32 = int` only the
@@ -6554,8 +6765,9 @@ fn load(a map[string]json.Any) gfx.Image {
 	assert 'vlib.sokol.gfx.Pass' in slot
 	assert 'vlib.gg.Image' in slot // the field written `Image`
 	assert 'vlib.gg.Pass' !in slot
-	// through an alias, written (`json.Any`) or rendered (`x.json2.Any`)
-	assert refs('vlib.gg.load') == ['vlib.x.json2.Any', 'vlib.sokol.gfx.Image']
+	// through an alias, written (`json.Any`) or rendered (`x.json2.Any`); the map's key,
+	// `string`, is a type the signature names too
+	assert refs('vlib.gg.load') == ['vlib.x.json2.Any', 'string', 'vlib.sokol.gfx.Image']
 	assert 'vlib.x.json2.Any' in refs('vlib.gg.Doc')
 	assert 'vlib.gg.Any' !in refs('vlib.gg.Doc')
 	// an import inside a `$if` names its module as any other does
