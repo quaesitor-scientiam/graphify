@@ -819,18 +819,27 @@ Checks a seeded random sample of the call sites of `inferred` call edges (or, wi
 `-kind references`, of `inferred` reference edges) against V's own compiler: each
 is asked of V3's go-to-definition (`-vls-mode -line-info file:line:gd^col`), and
 the declaration V3 answers is compared with the edge's target. With
-`-kind missing-references` it checks the other way, for edges the graph lacks (see
-below).
+`-kind missing-references` or `-kind missing-calls` it checks the other way, for edges
+the graph lacks (see below).
 
 ```
 v run bin/sample-accuracy.vsh S:\graph_data\vlang                  # 1000 sites, seed 20261110
 v run bin/sample-accuracy.vsh <graph> -kind references             # 1000 inferred reference edges
 v run bin/sample-accuracy.vsh <graph> -kind missing-references     # 1000 type names in bodies
+v run bin/sample-accuracy.vsh <graph> -kind missing-calls          # 1000 calls in bodies
 v run bin/sample-accuracy.vsh <graph> -n 2000 -seed 7              # another sample
 v run bin/sample-accuracy.vsh <graph> -v3 <binary> -out <dir>      # this V3, none built; where results go
 v run bin/sample-accuracy.vsh <graph> -no-worlds                   # the default build only
 v run bin/sample-accuracy.vsh <graph> -self-test                   # check the harness itself
 ```
+
+The tree must be the one the graph was extracted from, or V3 answers about other text: the
+harness refuses a tree whose HEAD is not the manifest's `source_commit`, a file whose text
+differs from the hash the extract recorded (or is gone), and a new untracked `.v` file in a
+folder the graph read (it changes that module's compile). Against a shared checkout another
+session is editing, run on a clean copy of the tree at the graph's commit (`git archive`),
+with a copy of the graph whose `root` names it. A manifest with no file hashes (a merged
+graph) is not checked this way, and the harness says so.
 
 Without `-v3` the graph's root must be a V checkout: its V3 is built once per
 commit and change under `vlib`, as `vls_line_info_test.v` builds it, and not
@@ -892,6 +901,26 @@ no answer for, and a `${...}` in a string is not read. The later lines of a sign
 written over several lines are asked too, and count as linked through the signature's
 edge, so the share is a little high.
 
+`-kind missing-calls` does the same for calls: it samples the places a body writes a
+name right before `(`, other than a keyword or a primitive type (the cast `int(x)`, which
+V3 gives no answer for) not after a `.` (`m.lock()` and `s.int()` are calls), a `$` or
+`@` name, or a capitalized one (a cast or a struct's
+name) that is not a `C.` or `JS.` function. A place V3 resolves to a function, a method,
+or a constant, global or field holding one is `linked` when the graph has a `calls` edge
+from that function to it whose lines hold the place's line. One that isn't is, in this
+order: `other-target` (an edge on the line, of the call's name, goes to another
+declaration), `undeclared` or `unresolved` (one on the line, of that name, is marked so),
+or `missing` (none of that name on the line). Recall is `linked` over `linked` and these.
+Not scored, and counted apart: `other-line`, an edge to V3's declaration whose lines don't
+hold this one, which is either a call written over several lines (the graph places it on
+the line it starts) or a second call of a function whose own place has no edge, so read
+those by hand; `not-a-call`, a place V3 resolves to a type (a cast to a struct or an
+alias); and `not-in-graph`, one it resolves to nothing the graph declares (a local
+variable holding a function, or a parameter, which V3 answers with the caller's own first
+line). The scan reads lines as `-kind missing-references` does, so a call in a string's
+`${...}` is not sampled, and neither is a generic call written with its type arguments
+(`f[int](x)`).
+
 On the V tree at `ce4f978a` (November 2026), seed 20261110:
 
 - calls, 1000 of 195,949 inferred call sites: 931 of the 932 scored are correct,
@@ -948,6 +977,16 @@ On the V tree at `0409a631a7`, seed 20261110, with a type before a field (`Color
   type.
 - calls don't change: on a frozen copy of the tree at `eeee53a268`, the graph's calls are
   the same before and after.
+- missing calls (graphify `edb7c83`, on a clean copy of the tree at that commit), 1000 of
+  598,273 places a body writes a call: all 863 V3 resolves to a function, method, or a
+  field, constant or global holding one have an edge on that line, 100% (95%
+  99.56–100%). Unscored: 2 `other-line` (`.encode()` after a struct literal written over
+  several lines, which the graph places on the line it starts), 2 `not-in-graph` (a call of
+  a local function value, one of a parameter), and 133 places never answered (77 in tests,
+  many of them code in a test's string; 8 need a `-d ownership` V3, which V doesn't build
+  at that commit). The harness was checked on a copy of the graph without the call edges
+  of every other caller: its 1000 places were scored exactly as predicted from this run,
+  429 of 863 linked.
 
 ### `bench/session_stats.vsh` — token-free MCP usage stats
 
