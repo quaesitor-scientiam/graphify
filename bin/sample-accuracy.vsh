@@ -8,6 +8,7 @@
 //   v run bin/sample-accuracy.vsh S:\graph_data\vlang                  # 1000 sites, seed 20261110
 //   v run bin/sample-accuracy.vsh <graph> -kind references             # inferred reference edges
 //   v run bin/sample-accuracy.vsh <graph> -kind missing-references     # type names no edge links
+//   v run bin/sample-accuracy.vsh <graph> -kind missing-calls          # calls no edge links
 //   v run bin/sample-accuracy.vsh <graph dir or graph.json> -n 2000 -seed 7
 //   v run bin/sample-accuracy.vsh <graph> -out <dir>                   # where the results go
 //   v run bin/sample-accuracy.vsh <graph> -v3 <binary>                 # use this V3, don't build one
@@ -43,14 +44,17 @@
 //   name-not-on-line the callee's name is not on the line the edge gives
 //   no-source        the line is not in the caller's file
 // Accuracy is correct / (correct + extra + wrong), with a 95% Wilson interval.
-// -kind missing-references scores places, not edges (see missing_references): linked,
+// -kind missing-references scores places, not edges (see missing_places): linked,
 // missing, not-a-type, not-in-graph or no-answer, and linked / (linked + missing).
+// -kind missing-calls scores the places a body writes a call the same way (see
+// missing_places and call_status): linked over the places V3 resolves to a function,
+// method, field, constant or global of the graph, `other-line` apart.
 // An `extra` or `wrong` row is where to look by hand: V3 answers for one build,
 // and an edge can be right for another one.
 //
 // It writes sample.csv (one row per sampled site), v3_raw.log (every V3 answer) and
-// summary.txt into -out (default: accuracy-<seed>, with -references or
-// -missing-references after it for that -kind, and -self-test after that for
+// summary.txt into -out (default: accuracy-<seed>, with -references,
+// -missing-references or -missing-calls after it for that -kind, and -self-test after that for
 // -self-test, in the V temp folder).
 //
 // -self-test points each sampled edge at another declaration of the same name before
@@ -59,6 +63,10 @@
 // none is scored, or if one is scored correct where V3 also names the edge's own
 // target. One scored correct where V3 never names the edge's own target means that
 // edge is wrong and the stand-in is V's declaration: it is reported, not failed.
+//
+// The tree must be the one the graph was extracted from: its HEAD the manifest's
+// source_commit, and each file the text the extract read (the manifest's source_files
+// hashes, tree_drift). An edited or deleted file, or a new one beside them, refuses the run.
 import os
 import math
 import time
@@ -66,13 +74,33 @@ import strings
 import hash.fnv1a
 import strconv
 import x.json2
+import crypto.sha256
 
 const kind_function = 2
 const kind_method = 3
 const type_kinds = [4, 5, 6, 9] // struct, enum, interface, type alias
+// what a call can name: a function, a method, and a constant, global or field holding one
+const callable_kinds = [kind_function, kind_method, 7, 8, 10]
 const edge_calls = 1
 const edge_references = 5
 const prov_inferred = 1
+const prov_undeclared = 2
+// names written before `(` that are no call V3 can answer for: V's keywords (the `.key_`
+// strings of vlib/v/token/token.v, some of them what the compiler provides with no
+// declaration, `sizeof(x)`), and the primitive types a cast names (`int(x)`)
+const call_keywords = ['as', 'asm', 'assert', 'atomic', 'break', 'const', 'continue', 'defer',
+	'dump', 'else', 'enum', 'false', 'fn', 'for', '__global', 'go', 'goto', 'if', 'import', 'in',
+	'interface', 'is', 'isreftype', '_likely_', 'lock', 'match', 'module', 'mut', 'nil', 'none',
+	'__offsetof', 'or', 'pub', 'return', 'rlock', 'select', 'shared', 'sizeof', 'spawn', 'static',
+	'struct', 'true', 'type', 'typeof', 'union', '_unlikely_', 'unsafe', 'volatile', 'i8', 'i16',
+	'i32', 'int', 'i64', 'isize', 'u8', 'u16', 'u32', 'u64', 'usize', 'uint', 'byte', 'f32', 'f64',
+	'rune', 'char', 'bool', 'string', 'voidptr', 'byteptr', 'charptr', 'chan', 'thread', 'any',
+	'int_literal', 'float_literal']
+// the statuses of a call place the graph doesn't link, in the order call_status tries them
+// (after `other-line`, which is not scored: an edge to V3's declaration names other lines,
+// which a call written over several lines is, placed on the line it starts, and so is a
+// second call of one function whose own site has no edge; read those by hand)
+const call_misses = ['other-target', 'undeclared', 'unresolved', 'missing']
 const batch_size = 100
 const max_mention_lines = 8 // the lines of a reference edge's `from` asked about it, at most
 
@@ -132,12 +160,20 @@ struct GGraph {
 
 struct Manifest {
 	source_commit string
+	source_files  []SourceFile
+}
+
+// SourceFile is one file the extract read, root-relative, and its text hash (graphify's
+// text_hash in cache.v: sha256 of the text with CRLF read as LF).
+struct SourceFile {
+	path string
+	hash string
 }
 
 struct Options {
 mut:
 	graph     string
-	kind      string = 'calls' // or 'references', or 'missing-references'
+	kind      string = 'calls' // or 'references', 'missing-references' or 'missing-calls'
 	n         int    = 1000
 	seed      u64    = 20261110
 	out       string
@@ -210,7 +246,7 @@ mut:
 fn main() {
 	opts := parse_args(os.args[1..]) or {
 		eprintln(err.msg())
-		eprintln('usage: v run bin/sample-accuracy.vsh <graph dir or graph.json> [-kind calls|references|missing-references] [-n 1000] [-seed 20261110] [-out dir] [-v3 binary] [-no-worlds] [-self-test] [-timeout 300]')
+		eprintln('usage: v run bin/sample-accuracy.vsh <graph dir or graph.json> [-kind calls|references|missing-references|missing-calls] [-n 1000] [-seed 20261110] [-out dir] [-v3 binary] [-no-worlds] [-self-test] [-timeout 300]')
 		exit(2)
 	}
 	graph_path := if os.is_dir(opts.graph) {
@@ -226,13 +262,9 @@ fn main() {
 		eprintln('cannot parse ${graph_path}: ${err}')
 		exit(1)
 	}
-	commit := if m := json2.decode[Manifest](os.read_file(os.join_path(os.dir(graph_path),
-		'manifest.json')) or { '' })
-	{
-		m.source_commit
-	} else {
-		''
-	}
+	manifest := json2.decode[Manifest](os.read_file(os.join_path(os.dir(graph_path),
+		'manifest.json')) or { '' }) or { Manifest{} }
+	commit := manifest.source_commit
 	root := os.real_path(g.root)
 	if !os.exists(os.join_path(root, 'vlib', 'v', 'v.v')) && opts.v3 == '' {
 		eprintln('the graph root ${root} is not a V checkout (no vlib/v/v.v); pass -v3 <binary>')
@@ -241,6 +273,22 @@ fn main() {
 	if why := tree_mismatch(root, commit) {
 		eprintln(why)
 		exit(1)
+	}
+	if manifest.source_files.len == 0 {
+		println('note: the manifest records no file hashes (a merged or older graph), so edits to the tree since the extract are not checked')
+	} else {
+		drift := tree_drift(root, manifest.source_files)
+		if drift.len > 0 {
+			eprintln('the tree at ${root} is not the one the graph was extracted from: ${drift.len} file(s) differ, so V3 would answer about other text')
+			for d in drift#[..10] {
+				eprintln('  ${d}')
+			}
+			if drift.len > 10 {
+				eprintln('  ... and ${drift.len - 10} more')
+			}
+			eprintln('re-extract the graph, or run against a clean copy of the tree at the graph commit')
+			exit(1)
+		}
 	}
 	// absolute before the chdir into the root below, which a relative path would follow
 	out_dir := if opts.out != '' {
@@ -288,8 +336,8 @@ fn main() {
 		syms[s.id] = s
 		by_pos['${s.file}:${s.line}'] << s.id
 	}
-	if opts.kind == 'missing-references' {
-		missing_references(mut ctx, g, by_pos, opts, commit, graph_path)
+	if opts.kind in ['missing-references', 'missing-calls'] {
+		missing_places(mut ctx, g, by_pos, opts, commit, graph_path)
 		return
 	}
 	edge_kind := if opts.kind == 'references' { edge_references } else { edge_calls }
@@ -553,8 +601,8 @@ fn parse_args(args []string) !Options {
 				// strconv refuses a number too big for its type; `.int()` would clamp it
 				match a {
 					'-kind' {
-						if v !in ['calls', 'references', 'missing-references'] {
-							return error('-kind is calls, references or missing-references, not `${v}`')
+						if v !in ['calls', 'references', 'missing-references', 'missing-calls'] {
+							return error('-kind is calls, references, missing-references or missing-calls, not `${v}`')
 						}
 						o.kind = v
 					}
@@ -594,7 +642,7 @@ fn parse_args(args []string) !Options {
 	if o.n < 1 || o.timeout < 1 {
 		return error('-n and -timeout must be positive')
 	}
-	if o.self_test && o.kind == 'missing-references' {
+	if o.self_test && o.kind in ['missing-references', 'missing-calls'] {
 		return error('-self-test checks the edges a graph has, not those it lacks')
 	}
 	return o
@@ -803,18 +851,60 @@ fn tree_mismatch(root string, commit string) ?string {
 	return 'the graph was extracted at ${commit#[..12]}, but ${root} is at ${head#[..12]}: re-extract it, or check out ${commit#[..12]}'
 }
 
+// tree_drift lists how the tree at `root` differs from the `files` the extract read,
+// each as `changed <path>`, `missing <path>` or `new <path>`: a file whose text hash is
+// not the recorded one, or that is gone, and an untracked `.v` file (as git lists them)
+// in a folder that holds one of `files`, which changes that module's compile. A new file
+// elsewhere changes no answer and is not listed (a folder the extract skips, such as
+// `thirdparty`, holds none of `files`). An untracked file the extract read is one of
+// `files`, not new. Not a git checkout, the new files are not looked for.
+fn tree_drift(root string, files []SourceFile) []string {
+	mut out := []string{}
+	mut known := map[string]bool{}
+	mut dirs := map[string]bool{}
+	for f in files {
+		known[f.path] = true
+		dirs[folder_of(f.path)] = true
+		text := os.read_file(os.join_path(root, f.path)) or {
+			out << 'missing ${f.path}'
+			continue
+		}
+		if sha256.hexhash(text.replace('\r\n', '\n')) != f.hash {
+			out << 'changed ${f.path}'
+		}
+	}
+	res := os.exec(['git', '-C', root, 'ls-files', '--others', '--exclude-standard', '-z', '--',
+		'*.v'])
+	if res.exit_code == 0 {
+		for p in res.output.split('\0') {
+			if p == '' || p in known || !dirs[folder_of(p)] {
+				continue
+			}
+			out << 'new ${p}'
+		}
+	}
+	return out
+}
+
+// folder_of is the folder of `path`, root-relative with `/` separators ('' at the root).
+fn folder_of(path string) string {
+	p := path.replace('\\', '/')
+	return if p.contains('/') { p.all_before_last('/') } else { '' }
+}
+
 // unit_name is what one sampled unit of `kind` is, in the plural.
 fn unit_name(kind string) string {
 	return match kind {
 		'references' { 'reference edges' }
 		'missing-references' { 'type names in bodies' }
+		'missing-calls' { 'calls written in bodies' }
 		else { 'call sites' }
 	}
 }
 
-// missing_references measures what the reference edges leave out, which the other kinds,
-// asking only about edges the graph has, cannot: a seeded sample of the places a function's
-// or method's body writes a capitalized name (type_name_columns), each asked of V3. A place
+// missing_places measures what the edges leave out, which the other kinds, asking only
+// about edges the graph has, cannot. With -kind missing-references it takes a seeded
+// sample of the places a function's or method's body writes a capitalized name (type_name_columns), each asked of V3. A place
 // V3 resolves to a type of the graph is `linked` when the graph has a `references` or
 // `embeds` edge from that declaration to it, and `missing` when it has none; one V3
 // resolves to something else (a function, an enum value, a constant) is `not-a-type`. A
@@ -826,16 +916,53 @@ fn unit_name(kind string) string {
 // name is followed by `.` (`Color.red`, `Foo.new()`) is counted apart: the graph reads
 // one as a type by its capital (see body_type_refs in backend_v.v), so one still missing
 // is a name it read some other way.
-fn missing_references(mut ctx Ctx, g GGraph, by_pos map[string][]string, opts Options, commit string, graph_path string) {
+//
+// With -kind missing-calls it does the same for calls: the places a body writes a
+// name followed by `(` (call_name_columns). A place V3 resolves to a function, method, or
+// a constant, global or field holding one, is `linked` when the graph has a `calls` edge
+// from that declaration to it whose lines hold the place's line. One that isn't is, in
+// this order:
+//   other-line   an edge to it exists, but its lines don't hold this one: not scored
+//                (see call_misses), to be read by hand
+//   other-target an edge on the line, of the call's name, goes to another declaration
+//   undeclared   one on the line, of that name, is marked undeclared
+//   unresolved   one on the line, of that name, is left unresolved
+//   missing      no edge of that name on the line at all
+// and recall is linked over linked and the last four. A place V3 resolves to a type (a
+// cast) is `not-a-call`; one it resolves to a declaration that is no graph symbol (a local
+// variable holding a function, a C header, or a parameter: an answer on the caller's own
+// first line, for another name than the caller's) is `not-in-graph`. As for types, a line
+// is read on its own, so a call inside a string's `${...}` is not sampled, nor is a generic
+// call written with its type arguments (`f[int](x)`), nor a cast to a primitive type. An
+// edge records lines, not the file, so a function declared once per platform under one id
+// counts a place as linked when another copy has an edge to V3's declaration on the same
+// line number.
+fn missing_places(mut ctx Ctx, g GGraph, by_pos map[string][]string, opts Options, commit string, graph_path string) {
+	calls := opts.kind == 'missing-calls'
 	mut kind_of := map[string]int{}
+	mut name_of := map[string]string{}
+	// an id is callable when any symbol under it is: a module and its function can share one
+	// (`vlib.rand.seed`), and kind_of keeps only the last
+	mut callable := map[string]bool{}
 	mut in_file := map[string][]GSymbol{}
 	for s in g.symbols {
 		kind_of[s.id] = s.kind
+		name_of[s.id] = s.name
+		if s.kind in callable_kinds {
+			callable[s.id] = true
+		}
 		in_file[s.file] << s
 	}
-	mut linked := map[string]bool{} // from \t to
+	mut linked := map[string]bool{} // from \t to, and for a call from \t to \t line
+	mut on_line := map[string][]GEdge{} // a call's edges, by from \t line
 	for e in g.edges {
-		if e.kind in [edge_references, 4] {
+		if calls && e.kind == edge_calls {
+			linked['${e.from}\t${e.to}'] = true
+			for ln in e.lines {
+				linked['${e.from}\t${e.to}\t${ln}'] = true
+				on_line['${e.from}\t${ln}'] << e
+			}
+		} else if !calls && e.kind in [edge_references, 4] {
 			linked['${e.from}\t${e.to}'] = true
 		}
 	}
@@ -849,7 +976,12 @@ fn missing_references(mut ctx Ctx, g GGraph, by_pos map[string][]string, opts Op
 			continue
 		}
 		for ln in s.line + 1 .. decl_last_line(src, s, in_file[s.file]) + 1 {
-			for col in type_name_columns(src[ln - 1]) {
+			cols := if calls {
+				call_name_columns(src[ln - 1])
+			} else {
+				type_name_columns(src[ln - 1])
+			}
+			for col in cols {
 				units << Row{
 					from: s.id
 					file: s.file
@@ -880,7 +1012,11 @@ fn missing_references(mut ctx Ctx, g GGraph, by_pos map[string][]string, opts Op
 		name := name_at(text, row.cols[0])
 		row.to = name
 		end := row.cols[0] + name.len
-		if end < text.len && text[end] == `.` {
+		if calls {
+			if row.cols[0] > 0 && text[row.cols[0] - 1] == `.` {
+				row.note = 'method or qualified'
+			}
+		} else if end < text.len && text[end] == `.` {
 			row.note = 'followed by .'
 		}
 		row.progs = ctx.programs_for(row.file)
@@ -930,13 +1066,20 @@ fn missing_references(mut ctx Ctx, g GGraph, by_pos map[string][]string, opts Op
 		for a in row.answers {
 			path, ln := split_answer(a) or { continue }
 			at := by_pos['${path}:${ln}']
-			if at.len > 0 {
+			if calls && row.from in at && name_of[row.from] != row.to {
+				// the caller's own first line, for a name that isn't its own: a parameter
+				ids << '?parameter ${path}:${ln}'
+			} else if at.len > 0 {
 				ids << at
 			} else {
 				ids << '?${path}:${ln}'
 			}
 		}
 		row.ids = dedupe(ids)
+		if calls {
+			row.status = call_status(row, callable, name_of, linked, on_line)
+			continue
+		}
 		types := row.ids.filter(kind_of[it] in type_kinds)
 		row.status = if types.any('${row.from}\t${it}' in linked) {
 			'linked'
@@ -953,20 +1096,35 @@ fn missing_references(mut ctx Ctx, g GGraph, by_pos map[string][]string, opts Op
 		counts[row.status]++
 	}
 	found := counts['linked']
-	scored := found + counts['missing']
+	misses := if calls { call_misses } else { ['missing'] }
+	mut scored := found
+	for st in misses {
+		scored += counts[st]
+	}
 	lo, hi := wilson(found, scored)
 	mut s := strings.new_builder(1024)
 	s.writeln('graph: ${graph_path}${if commit != '' { ' (' + commit#[..10] + ')' } else { '' }}')
 	s.writeln('population: ${units.len} ${unit_name(opts.kind)}; sample ${rows.len}, seed ${opts.seed}')
-	for st in ['linked', 'missing', 'not-a-type', 'not-in-graph', 'no-answer'] {
+	unscored := if calls { 'not-a-call' } else { 'not-a-type' }
+	mut listed := ['linked']
+	listed << misses
+	if calls {
+		listed << 'other-line'
+	}
+	listed << [unscored, 'not-in-graph', 'no-answer']
+	for st in listed {
 		if counts[st] > 0 {
 			s.writeln('  ${st:-17} ${counts[st]}')
 		}
 	}
-	dotted := rows.filter(it.status == 'missing' && it.note != '').len
+	noted := rows.filter(it.status in misses && it.note != '').len
 	if scored > 0 {
 		s.writeln('linked: ${found}/${scored} = ${100 * f64(found) / f64(scored):.2f}% (95% Wilson ${100 * lo:.2f}-${100 * hi:.2f}%)')
-		s.writeln('  of the missing, ${dotted} are a name followed by `.` (an enum value or a static call)')
+		if calls {
+			s.writeln("  of the not linked, ${noted} are a name after `.` (a method, or a module's function)")
+		} else {
+			s.writeln('  of the missing, ${noted} are a name followed by `.` (an enum value or a static call)')
+		}
 	}
 	summary := s.str()
 	println(summary)
@@ -976,12 +1134,60 @@ fn missing_references(mut ctx Ctx, g GGraph, by_pos map[string][]string, opts Op
 	println('wrote sample.csv, summary.txt and v3_raw.log in ${ctx.out_dir}')
 }
 
-// type_name_columns is the 0-based byte columns where `text`, a line of a body, writes a
-// name that starts with a capital and is two characters long or more, as V names a type
-// (a one-letter one is a type parameter): outside strings and after no `//`, and not
-// part of a longer name, of a `$` or `@` one, or of an attribute line.
-fn type_name_columns(text string) []int {
-	mut out := []int{}
+// call_status is what a sampled call place is, once V3 has answered it (see missing_places):
+// `callable` holds the ids of functions, methods, and constants, globals and fields that can
+// hold one; `name_of` every symbol's name by id; `linked` from \t to and from \t to \t line
+// for each calls edge; and `on_line` a caller's calls edges by from \t line.
+fn call_status(row Row, callable_ids map[string]bool, name_of map[string]string, linked map[string]bool, on_line map[string][]GEdge) string {
+	callable := row.ids.filter(it in callable_ids)
+	if callable.len == 0 {
+		return if row.ids.all(it.starts_with('?')) { 'not-in-graph' } else { 'not-a-call' }
+	}
+	if callable.any('${row.from}\t${it}\t${row.line}' in linked) {
+		return 'linked'
+	}
+	if callable.any('${row.from}\t${it}' in linked) {
+		return 'other-line'
+	}
+	// the edges on the line that are of this call's name: a resolved one by its target's
+	// name, an unresolved one by its raw name's last part
+	mut seen := map[string]bool{}
+	for e in on_line['${row.from}\t${row.line}'] {
+		// (an unresolved static call keeps its type before the method: `Foo__static__new`)
+		target := name_of[e.to] or {
+			e.to.all_before('[').all_after_last('.').all_after_last('__static__')
+		}
+		if target != row.to {
+			continue
+		}
+		seen[if e.to in name_of {
+			'other-target'
+		} else if e.provenance == prov_undeclared {
+			'undeclared'
+		} else {
+			'unresolved'
+		}] = true
+	}
+	for st in call_misses {
+		if st in seen {
+			return st
+		}
+	}
+	return 'missing'
+}
+
+// NameSpan is a name a line writes: its first byte's column, the column after it, and
+// the byte before it (a space at the line's start).
+struct NameSpan {
+	start int
+	end   int
+	prev  u8
+}
+
+// code_names is every name `text`, a line of a body, writes outside strings and before
+// any `//`: none on an attribute line.
+fn code_names(text string) []NameSpan {
+	mut out := []NameSpan{}
 	if text.trim_left(' \t').starts_with('@[') {
 		return out
 	}
@@ -1013,13 +1219,63 @@ fn type_name_columns(text string) []int {
 			for i < text.len && is_name_byte(text[i]) {
 				i++
 			}
-			prev := if start > 0 { text[start - 1] } else { ` ` }
-			if c.is_capital() && i - start >= 2 && prev !in [`$`, `@`] {
-				out << start
+			out << NameSpan{
+				start: start
+				end:   i
+				prev:  if start > 0 { text[start - 1] } else { ` ` }
 			}
 			continue
 		}
 		i++
+	}
+	return out
+}
+
+// call_name_columns is the 0-based byte columns where `text`, a line of a body, writes a
+// call: a name right before `(`, not a keyword or primitive type (call_keywords) unless
+// after a `.`, a number, a `$` or `@` name, or a capitalized one (a cast or a struct's
+// name), except a `C.` or `JS.` function's.
+fn call_name_columns(text string) []int {
+	mut out := []int{}
+	for n in code_names(text) {
+		if n.end >= text.len || text[n.end] != `(` || n.prev in [`$`, `@`]
+			|| text[n.start].is_digit() {
+			continue
+		}
+		name := text[n.start..n.end]
+		// after a `.` the name is a member, which may be named as a keyword or a primitive
+		// type is (`m.lock()`, `s.int()`)
+		if n.prev != `.` && name in call_keywords {
+			continue
+		}
+		if text[n.start].is_capital() {
+			before := text[..n.start]
+			mut foreign := false
+			for p in ['C.', 'JS.'] {
+				if before.ends_with(p) {
+					k := before.len - p.len
+					foreign = k == 0 || !is_name_byte(before[k - 1])
+				}
+			}
+			if !foreign {
+				continue
+			}
+		}
+		out << n.start
+	}
+	return out
+}
+
+// type_name_columns is the 0-based byte columns where `text`, a line of a body, writes a
+// name that starts with a capital and is two characters long or more, as V names a type
+// (a one-letter one is a type parameter): outside strings and after no `//`, and not
+// part of a longer name, of a `$` or `@` one, or of an attribute line.
+fn type_name_columns(text string) []int {
+	mut out := []int{}
+	for n in code_names(text) {
+		if text[n.start].is_capital() && n.end - n.start >= 2 && n.prev !in [`$`, `@`] {
+			out << n.start
+		}
 	}
 	return out
 }

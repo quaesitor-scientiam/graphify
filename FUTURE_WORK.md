@@ -1124,6 +1124,14 @@ methods. `val.str()` in `comptime_var_param_test.v`, called with `Aa`, now has t
 open: its field loop passes `val.$(field.name)` on, which gives no instance yet. The other trees don't
 change.
 
+**Call recall (November 2026).** The call figures above count the edges the graph has that
+V3 agrees with; `sample-accuracy.vsh -kind missing-calls` counts the other way, the calls a
+body writes that have no edge. On vlang `0409a631a7` (graphify `edb7c83`, seed 20261110),
+all 863 sampled places V3 resolves to a declaration of the graph have an edge on their line
+(95% 99.56–100%). That bounds what a sample of 1000 can see, not the 38 calls the graph
+leaves unresolved. Not measured: a call in a string's `${...}`, a generic call written with
+its type arguments, and the places V3 doesn't answer (133 of 1000, mostly in tests).
+
 The raw edge is retained and `explain` reports ambiguous callers rather than
 inventing links. A future opt-in deep mode could run the checker over a whole
 project, but given the small remainder, it would need to address these
