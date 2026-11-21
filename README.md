@@ -827,12 +827,26 @@ type (`int`), to a library declaration (on a project graph, `vlib.builtin.printl
 `C.` or `JS.` function or to an unresolved name can be stored as extracted too, and is
 left out, as the overview counts it apart.
 
+With `-provenance undeclared` (calls only) the sites sampled are those of calls the graph
+marks `undeclared`: no declaration found, taken to be one V writes (`str()` on a type that
+declares none, a flag enum's `has`, a thread's `wait`) or a value holding a function (a
+parameter, a local). Their target is a name. A site is `correct` when V3 names no function,
+method, or constant, global or field of the graph there (a local, a parameter, a type, or
+nothing the graph has), `extra` when it names one another edge of the site links, and
+`wrong` when it names one no edge links: a declaration the graph missed. V3 gives no answer
+for a name nothing declares, and none for a body its program doesn't check either, so up to
+4 other names on the line are asked too. A site V3 answers one of those for, but not the
+call, is `silent`, and is not scored: V3 is silent about some calls that have a
+declaration too (`i.str()` on an int, whose `str` is builtin's), so silence is no evidence.
+`-self-test` does not apply, as an undeclared call has no declaration to stand in for.
+
 ```
 v run bin/sample-accuracy.vsh S:\graph_data\vlang                  # 1000 sites, seed 20261110
 v run bin/sample-accuracy.vsh <graph> -kind references             # 1000 inferred reference edges
 v run bin/sample-accuracy.vsh <graph> -kind missing-references     # 1000 type names in bodies
 v run bin/sample-accuracy.vsh <graph> -kind missing-calls          # 1000 calls in bodies
 v run bin/sample-accuracy.vsh <graph> -provenance extracted        # 1000 extracted call sites
+v run bin/sample-accuracy.vsh <graph> -provenance undeclared       # 1000 undeclared call sites
 v run bin/sample-accuracy.vsh <graph> -n 2000 -seed 7              # another sample
 v run bin/sample-accuracy.vsh <graph> -v3 <binary> -out <dir>      # this V3, none built; where results go
 v run bin/sample-accuracy.vsh <graph> -no-worlds                   # the default build only
@@ -1002,6 +1016,15 @@ On the V tree at `0409a631a7`, seed 20261110, with a type before a field (`Color
   In the self-tests only an edge whose name has another declaration gets a stand-in: 288
   call sites and 188 reference edges did. Of the 269 and 179 of them scored, no stand-in
   scored correct, and the originals scored all 269 and 179 correct.
+- undeclared calls, 1000 of 8,747 sites of the 4,839 undeclared call edges: 154 of the 155
+  V3 names a declaration for are correct, 99.35% (95% 96.44–99.89%). The wrong one is a
+  call of a generic function after a block that declared a local of its name had closed
+  (FUTURE_WORK §1). 831 are silent and not scored: `has` 459, `str` 231, `wait` 95, `set`
+  19, `type_name` 12, `type_idx` 6, `clear` 3, and 6 other names once each. 6 were never answered and 8 could
+  not be asked. The harness was checked on a copy of the graph whose undeclared calls were
+  all planted from resolved ones: of the 1000 sampled, the 481 relabelled undeclared scored
+  `wrong`, the 456 kept beside their edge scored `extra`, none scored correct, and 47 were
+  silent (`close`, `str` and `join_path` among them: V3 is silent about some declared calls).
 
 ### `bench/session_stats.vsh` — token-free MCP usage stats
 
