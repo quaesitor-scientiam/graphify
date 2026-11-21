@@ -11,6 +11,7 @@
 //   v run bin/sample-accuracy.vsh <graph> -kind missing-references     # type names no edge links
 //   v run bin/sample-accuracy.vsh <graph> -kind missing-calls          # calls no edge links
 //   v run bin/sample-accuracy.vsh <graph> -provenance extracted        # extracted edges instead
+//   v run bin/sample-accuracy.vsh <graph> -provenance undeclared       # calls marked undeclared
 //   v run bin/sample-accuracy.vsh <graph dir or graph.json> -n 2000 -seed 7
 //   v run bin/sample-accuracy.vsh <graph> -out <dir>                   # where the results go
 //   v run bin/sample-accuracy.vsh <graph> -v3 <binary>                 # use this V3, don't build one
@@ -28,6 +29,20 @@
 // same way. An edge to a built-in type, to a library declaration (a project graph's vlib), to
 // a `C.`/`JS.` function or to an unresolved name can be stored as extracted too, and is left
 // out, as the overview counts it apart. Inferred edges are all sampled, as before.
+//
+// With -provenance undeclared (calls only) the sites sampled are those of the calls the graph
+// marks `undeclared`: a call it finds no declaration for and takes to be one V writes or a
+// value it holds (`str()` on a type that declares none, a flag enum's `has`, a parameter
+// holding a function). Their target is a name, not a symbol. Such a site is `correct` when V3
+// names no function, method, or constant, global or field of the graph there (it names a
+// local, a parameter, a type or nothing the graph has), `extra` when it names one another edge
+// of the site links, and `wrong` when it names one no edge of the site links: the call has a
+// declaration the graph missed. V3 gives no answer for a name nothing declares, and none
+// for a body its program doesn't check either, so the other names on the line are asked
+// too (control_columns): a site V3 is silent about, where it answers one of those in the
+// same program and build, is `silent`; one where it answers neither is `no-answer`. Silent
+// sites are not scored: V3 is silent about some calls that have a declaration too (`str()`
+// on an int, whose declaration is builtin's), so its silence doesn't tell them apart.
 //
 // A unit is one site of an edge of the chosen kind and provenance: its caller (the symbol
 // the edge is from), its callee (the declaration it is to) and one line of the
@@ -183,7 +198,7 @@ struct Options {
 mut:
 	graph     string
 	kind      string = 'calls'    // or 'references', 'missing-references' or 'missing-calls'
-	prov      string = 'inferred' // or 'extracted': the edges -kind calls or references samples
+	prov      string = 'inferred' // or 'extracted', or for calls 'undeclared': the edges sampled
 	n         int    = 1000
 	seed      u64    = 20261110
 	out       string
@@ -219,6 +234,16 @@ mut:
 	program string
 	world   string
 	note    string
+	// -provenance undeclared: the other names on the line, asked too, and the first answer
+	// to one: V3 checked the body, so its silence at the call is `silent`, not `no-answer`
+	ctrl_cols []int
+	ctrl      string
+}
+
+// settled tells whether V3 has said what it will about a row: an answer, or for an
+// undeclared call an answer to another name on its line.
+fn (row Row) settled() bool {
+	return row.answers.len > 0 || row.ctrl != ''
 }
 
 // Rng is splitmix64: a seed draws the same sample with any V version.
@@ -256,7 +281,7 @@ mut:
 fn main() {
 	opts := parse_args(os.args[1..]) or {
 		eprintln(err.msg())
-		eprintln('usage: v run bin/sample-accuracy.vsh <graph dir or graph.json> [-kind calls|references|missing-references|missing-calls] [-provenance inferred|extracted] [-n 1000] [-seed 20261110] [-out dir] [-v3 binary] [-no-worlds] [-self-test] [-timeout 300]')
+		eprintln('usage: v run bin/sample-accuracy.vsh <graph dir or graph.json> [-kind calls|references|missing-references|missing-calls] [-provenance inferred|extracted|undeclared] [-n 1000] [-seed 20261110] [-out dir] [-v3 binary] [-no-worlds] [-self-test] [-timeout 300]')
 		exit(2)
 	}
 	graph_path := if os.is_dir(opts.graph) {
@@ -343,9 +368,14 @@ fn main() {
 
 	mut syms := map[string]GSymbol{}
 	mut by_pos := map[string][]string{} // 'file:line' -> the symbols declared there
+	// an id is callable when any symbol under it is (see missing_places)
+	mut callable := map[string]bool{}
 	for s in g.symbols {
 		syms[s.id] = s
 		by_pos['${s.file}:${s.line}'] << s.id
+		if s.kind in callable_kinds {
+			callable[s.id] = true
+		}
 	}
 	if opts.kind in ['missing-references', 'missing-calls'] {
 		missing_places(mut ctx, g, by_pos, opts, commit, graph_path)
@@ -355,14 +385,19 @@ fn main() {
 	// a reference edge is scored as one unit (line 0), asked at the lines of its `from`
 	// declaration that name its target, as a signature's has no `lines`
 	by_edge := edge_kind == edge_references
-	prov := if opts.prov == 'extracted' { prov_extracted } else { prov_inferred }
+	prov := match opts.prov {
+		'extracted' { prov_extracted }
+		'undeclared' { prov_undeclared }
+		else { prov_inferred }
+	}
 	mut units := []Unit{}
 	for e in g.edges {
 		// an edge to a built-in type, a library declaration, a `C.` function or an unresolved
 		// name can be stored as extracted too, told apart by a target that is no symbol
 		// (count_provenance in bundle.v); inferred ones stay unfiltered, as before, as on a
 		// project graph many go to a library declaration
-		if e.kind == edge_kind && e.provenance == prov && (prov == prov_inferred || e.to in syms) {
+		// (an undeclared edge's target is a name, never a symbol)
+		if e.kind == edge_kind && e.provenance == prov && (prov != prov_extracted || e.to in syms) {
 			if by_edge {
 				units << Unit{
 					from: e.from
@@ -459,6 +494,10 @@ fn main() {
 		callee := syms[u.to] or { GSymbol{} }
 		name := if callee.name != '' {
 			callee.name
+		} else if prov == prov_undeclared {
+			// the name called, as call_status reads an unresolved one: a static call keeps its
+			// type before the method (`Foo__static__new`)
+			u.to.all_before('[').all_after_last('.').all_after_last('__static__')
 		} else {
 			u.to.all_before('@').all_after_last('.')
 		}
@@ -499,6 +538,9 @@ fn main() {
 			if row.cols.len > 1 {
 				row.note = '${row.cols.len} occurrences'
 			}
+			if prov == prov_undeclared {
+				row.ctrl_cols = control_columns(src[ln - 1], row.cols)
+			}
 			row.progs = ctx.programs_for(spot.file)
 			row.worlds = worlds_for(spot.file, os.user_os())
 			rows << row
@@ -513,7 +555,7 @@ fn main() {
 			// the next build some unanswered site is compiled for
 			mut world := []string{}
 			for row in rows {
-				if row.status != '' || row.answers.len > 0 {
+				if row.status != '' || row.settled() {
 					continue
 				}
 				for w in row.worlds {
@@ -532,7 +574,7 @@ fn main() {
 			tried[world.join(' ')] = true
 			mut want := []int{}
 			for i, row in rows {
-				if row.status == '' && row.answers.len == 0
+				if row.status == '' && !row.settled()
 					&& row.worlds.any(it.join(' ') == world.join(' ')) {
 					want << i
 				}
@@ -547,21 +589,16 @@ fn main() {
 			continue
 		}
 		if row.answers.len == 0 {
-			row.status = 'no-answer'
+			row.status, row.note = unanswered(row, prov == prov_undeclared)
 			continue
 		}
-		mut ids := []string{}
-		for a in row.answers {
-			path, ln := split_answer(a) or { continue }
-			at := by_pos['${path}:${ln}']
-			if at.len > 0 {
-				ids << at
-			} else {
-				ids << '?${path}:${ln}'
-			}
-		}
-		row.ids = dedupe(ids)
+		caller_name := if prov == prov_undeclared { syms[row.from].name } else { '' }
+		row.ids = answer_ids(row, by_pos, caller_name)
 		targets := site_targets[site_key(row.from, row.line, by_edge)]
+		if prov == prov_undeclared {
+			row.status = undeclared_status(row.ids, callable, targets)
+			continue
+		}
 		row.status = if row.to in row.ids {
 			'correct'
 		} else if row.ids.any(it in targets) {
@@ -578,6 +615,22 @@ fn main() {
 	mut summary := summarize(results, units.len, opts, commit, graph_path)
 	if by_edge && !opts.self_test {
 		summary += '  of the correct, ${mixed_groups(rows, results)} have a mention V3 resolves to a declaration their `from` has no edge to\n'
+	}
+	if prov == prov_undeclared {
+		mut by_name := map[string]int{}
+		for r in results {
+			if r.status == 'silent' {
+				by_name[r.to]++
+			}
+		}
+		mut names := by_name.keys()
+		names.sort_with_compare(fn [by_name] (a &string, b &string) int {
+			return by_name[*b] - by_name[*a]
+		})
+		if names.len > 0 {
+			more := if names.len > 8 { ', and ${names.len - 8} more names' } else { '' }
+			summary += '  silent (V3 answers another name on the line, none at the call; not scored), by name: ${names#[..8].map('${it} ${by_name[it]}').join(', ')}${more}\n'
+		}
 	}
 	println(summary)
 	write_csv(os.join_path(out_dir, 'sample.csv'), rows)
@@ -623,8 +676,8 @@ fn parse_args(args []string) !Options {
 						o.kind = v
 					}
 					'-provenance' {
-						if v !in ['inferred', 'extracted'] {
-							return error('-provenance is inferred or extracted, not `${v}`')
+						if v !in ['inferred', 'extracted', 'undeclared'] {
+							return error('-provenance is inferred, extracted or undeclared, not `${v}`')
 						}
 						o.prov = v
 					}
@@ -669,6 +722,12 @@ fn parse_args(args []string) !Options {
 	}
 	if o.prov != 'inferred' && o.kind in ['missing-references', 'missing-calls'] {
 		return error('-provenance picks the edges a graph has; -kind ${o.kind} samples places in bodies')
+	}
+	if o.prov == 'undeclared' && o.kind != 'calls' {
+		return error('-provenance undeclared samples calls; the undeclared references are to C and JS types')
+	}
+	if o.prov == 'undeclared' && o.self_test {
+		return error('-self-test points an edge at another declaration, and an undeclared call has none')
 	}
 	return o
 }
@@ -1201,6 +1260,93 @@ fn call_status(row Row, callable_ids map[string]bool, name_of map[string]string,
 	return 'missing'
 }
 
+// unanswered is the status and note of a row V3 gave no answer at the call for: `silent`
+// for an undeclared call (`undeclared`) when V3 answered another name on its line (its
+// `ctrl`), as it checked the body; not scored, as V3 is silent about some calls of a
+// declaration too (`i.str()` on an int). `no-answer` otherwise.
+fn unanswered(row Row, undeclared bool) (string, string) {
+	if !undeclared || row.ctrl == '' {
+		return 'no-answer', row.note
+	}
+	answered := 'answers ${normalize_answer(row.ctrl)} on the line'
+	return 'silent', if row.note == '' { answered } else { '${row.note}; ${answered}' }
+}
+
+// answer_ids is what each of `row`'s answers names: the symbols declared on its line
+// (`by_pos`), or `?file:line` when none is. With a `caller_name` (for an undeclared call),
+// an answer on the caller's own first line, for a call of another name than the caller's,
+// is a parameter, `?parameter file:line`, as missing_places reads it.
+fn answer_ids(row Row, by_pos map[string][]string, caller_name string) []string {
+	called := row.to.all_before('[').all_after_last('.').all_after_last('__static__')
+	mut ids := []string{}
+	for a in row.answers {
+		path, ln := split_answer(a) or { continue }
+		at := by_pos['${path}:${ln}']
+		if caller_name != '' && row.from in at && caller_name != called {
+			ids << '?parameter ${path}:${ln}'
+		} else if at.len > 0 {
+			ids << at
+		} else {
+			ids << '?${path}:${ln}'
+		}
+	}
+	return dedupe(ids)
+}
+
+// take records answer `a` to one of `row`'s questions, asked in program `prog` and build
+// `world`: at the call, or (`ctrl`) at another name on its line, of which the first answer
+// is kept. Either names where the row was answered, an answer at the call first.
+fn (mut row Row) take(a string, ctrl bool, prog string, world string) {
+	if ctrl {
+		if row.ctrl == '' {
+			row.ctrl = a
+		}
+		if row.answers.len == 0 {
+			row.program = prog
+			row.world = world
+		}
+		return
+	}
+	row.answers << a
+	row.program = prog
+	row.world = world
+}
+
+// undeclared_status scores a site of a call the graph marks undeclared, from the ids V3's
+// answers name there: `correct` when none is in `callable` (a function, method, or constant,
+// global or field of the graph), `extra` when one is and the site has an edge to it too
+// (`targets`), and `wrong` when the site has no edge to any: a declaration the graph missed.
+fn undeclared_status(ids []string, callable map[string]bool, targets map[string]bool) string {
+	named := ids.filter(it in callable)
+	return if named.len == 0 {
+		'correct'
+	} else if named.any(it in targets) {
+		'extra'
+	} else {
+		'wrong'
+	}
+}
+
+// control_columns is where to ask V3 about other names on `text` than the call at `cols`,
+// nearest first and at most 4: an answer to one shows V3 checked the body, which tells a
+// silent site from one never reached. Keywords, primitive types (call_keywords) and numbers are
+// left out, as V3 names no declaration for them.
+fn control_columns(text string, cols []int) []int {
+	mut found := []int{}
+	for span in code_names(text) {
+		if span.start in cols || text[span.start].is_digit()
+			|| text[span.start..span.end] in call_keywords {
+			continue
+		}
+		found << span.start
+	}
+	at := if cols.len > 0 { cols[0] } else { 0 }
+	found.sort_with_compare(fn [at] (a &int, b &int) int {
+		return math.abs(*a - at) - math.abs(*b - at)
+	})
+	return found#[..4]
+}
+
 // NameSpan is a name a line writes: its first byte's column, the column after it, and
 // the byte before it (a space at the line's start).
 struct NameSpan {
@@ -1572,7 +1718,7 @@ fn (mut ctx Ctx) ask_world(mut rows []Row, world []string, want []int) {
 		mut queries := map[string][]int{} // program -> rows asked in it
 		for i in want {
 			row := rows[i]
-			if row.answers.len == 0 && round < row.progs.len {
+			if !row.settled() && round < row.progs.len {
 				queries[row.progs[round]] << i
 			}
 		}
@@ -1595,11 +1741,19 @@ fn (mut ctx Ctx) ask_program(mut rows []Row, world []string, prog string, idxs [
 	mut specs := []string{}
 	mut owner := []int{}
 	mut owner_col := []int{}
+	mut is_ctrl := []bool{}
 	for i in idxs {
 		for c in rows[i].cols {
 			specs << '${rows[i].file}:${rows[i].line}:gd^${c}'
 			owner << i
 			owner_col << c
+			is_ctrl << false
+		}
+		for c in rows[i].ctrl_cols {
+			specs << '${rows[i].file}:${rows[i].line}:gd^${c}'
+			owner << i
+			owner_col << c
+			is_ctrl << true
 		}
 	}
 	for start := 0; start < specs.len; start += batch_size {
@@ -1608,11 +1762,10 @@ fn (mut ctx Ctx) ask_program(mut rows []Row, world []string, prog string, idxs [
 		got := ctx.ask(world, prog, chunk)
 		for k, a in got {
 			ri := owner[start + k]
-			if is_answer(a) && !at_question(a, rows[ri].file, rows[ri].line, owner_col[start + k]) {
-				rows[ri].answers << a
-				rows[ri].program = prog
-				rows[ri].world = world.join(' ')
+			if !is_answer(a) || at_question(a, rows[ri].file, rows[ri].line, owner_col[start + k]) {
+				continue
 			}
+			rows[ri].take(a, is_ctrl[start + k], prog, world.join(' '))
 		}
 	}
 }
@@ -1802,7 +1955,7 @@ fn summarize(rows []Row, population int, opts Options, commit string, graph_path
 	} else {
 		''
 	}}')
-	for st in ['correct', 'extra', 'wrong', 'not-in-graph', 'no-answer', 'name-not-on-line', 'no-source'] {
+	for st in ['correct', 'extra', 'wrong', 'not-in-graph', 'silent', 'no-answer', 'name-not-on-line', 'no-source'] {
 		if counts[st] > 0 {
 			s.writeln('  ${st:-17} ${counts[st]}')
 		}

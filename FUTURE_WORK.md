@@ -1140,6 +1140,20 @@ a declaration (234,645 and 88,663).
 of 924 call sites and 946 of 946 reference edges V3 answers are correct (95% lower bounds
 99.59% and 99.60%).
 
+**Undeclared calls (November 2026).** The 4,839 call edges marked `undeclared` (8,747 sites)
+claim no declaration: one V writes, or a value holding a function. `sample-accuracy.vsh
+-provenance undeclared` asks V3 about them: on the same copy and graph, 154 of the 155 sites V3
+names a declaration for are right (95% 96.44–99.89%). The wrong one is a local's scope: in
+`vlib/v/tests/generics/generic_function_block_local_shadow_test.v`, a `for` body declares a
+local `make_gate` holding functions, and the call `make_gate[Gate]()` after the loop (line 39)
+is marked undeclared, as a call of that local, instead of linking the generic function
+`make_gate` beside it. A local declared in an `if` block in the same file ends with its
+block (line 19 links the function), so the loop body's end looks to be what isn't seen (from
+these two cases; the resolver's scope code was not read). 831 of the
+1000 sites are calls V3 says nothing about while it answers another name on their line
+(`has` 459, `str` 231, `wait` 95): V3 is silent about some calls that have a declaration too
+(`i.str()` on an int), so these are not measured.
+
 **Uses of a constant or global have no edge.** A body that reads `os.args` or
 `os.path_separator`, or a `__global` such as `g_main_argc`, gives no edge to it: such a
 symbol shows no `referenced-by`, so "who uses this constant" can't be answered from the
