@@ -1132,6 +1132,20 @@ all 863 sampled places V3 resolves to a declaration of the graph have an edge on
 leaves unresolved. Not measured: a call in a string's `${...}`, a generic call written with
 its type arguments, and the places V3 doesn't answer (133 of 1000, mostly in tests).
 
+**Extracted edges (November 2026).** The edges marked `extracted` (a name with one
+declaration, or a call on a receiver the parser typed) were taken to be right, not
+measured; on vlang they are two thirds of the call edges and 57% of the reference edges to
+a declaration (234,645 and 88,663).
+`sample-accuracy.vsh -provenance extracted` samples them: on the same copy and graph, 924
+of 924 call sites and 946 of 946 reference edges V3 answers are correct (95% lower bounds
+99.59% and 99.60%).
+
+**Uses of a constant or global have no edge.** A body that reads `os.args` or
+`os.path_separator`, or a `__global` such as `g_main_argc`, gives no edge to it: such a
+symbol shows no `referenced-by`, so "who uses this constant" can't be answered from the
+graph. On vlang no `references` edge goes to a constant or a global; only a call of a
+function one holds gives a `calls` edge to it (8 such edges to constants, 14 to globals).
+
 The raw edge is retained and `explain` reports ambiguous callers rather than
 inventing links. A future opt-in deep mode could run the checker over a whole
 project, but given the small remainder, it would need to address these
