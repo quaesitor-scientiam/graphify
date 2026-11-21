@@ -813,20 +813,26 @@ with `-Force`.
 
 Restart Claude Code after switching so the MCP server picks up the new graph.
 
-### `bin/sample-accuracy.vsh` — how often inferred calls and references are right
+### `bin/sample-accuracy.vsh` — how often calls and references are right
 
 Checks a seeded random sample of the call sites of `inferred` call edges (or, with
 `-kind references`, of `inferred` reference edges) against V's own compiler: each
 is asked of V3's go-to-definition (`-vls-mode -line-info file:line:gd^col`), and
 the declaration V3 answers is compared with the edge's target. With
 `-kind missing-references` or `-kind missing-calls` it checks the other way, for edges
-the graph lacks (see below).
+the graph lacks (see below). With `-provenance extracted` the calls and references
+sampled are the `extracted` ones instead: a name with one declaration, or a call on a
+receiver the parser typed, whose target is a symbol of the graph. An edge to a built-in
+type (`int`), to a library declaration (on a project graph, `vlib.builtin.println`), to a
+`C.` or `JS.` function or to an unresolved name can be stored as extracted too, and is
+left out, as the overview counts it apart.
 
 ```
 v run bin/sample-accuracy.vsh S:\graph_data\vlang                  # 1000 sites, seed 20261110
 v run bin/sample-accuracy.vsh <graph> -kind references             # 1000 inferred reference edges
 v run bin/sample-accuracy.vsh <graph> -kind missing-references     # 1000 type names in bodies
 v run bin/sample-accuracy.vsh <graph> -kind missing-calls          # 1000 calls in bodies
+v run bin/sample-accuracy.vsh <graph> -provenance extracted        # 1000 extracted call sites
 v run bin/sample-accuracy.vsh <graph> -n 2000 -seed 7              # another sample
 v run bin/sample-accuracy.vsh <graph> -v3 <binary> -out <dir>      # this V3, none built; where results go
 v run bin/sample-accuracy.vsh <graph> -no-worlds                   # the default build only
@@ -987,6 +993,15 @@ On the V tree at `0409a631a7`, seed 20261110, with a type before a field (`Color
   at that commit). The harness was checked on a copy of the graph without the call edges
   of every other caller: its 1000 places were scored exactly as predicted from this run,
   429 of 863 linked.
+- extracted calls (the same graph and copy), 1000 of 373,932 extracted call sites: all 924
+  scored are correct, 100% (95% 99.59–100%). 55 sites were never answered (27 in tests),
+  and 21 could not be asked.
+- extracted references, 1000 of 88,663 extracted reference edges: all 946 scored are
+  correct, 100% (95% 99.60–100%). 45 edges were never answered (11 in other backends, 10
+  in `-d` files, 8 in tests), and 9 could not be asked.
+  In the self-tests only an edge whose name has another declaration gets a stand-in: 288
+  call sites and 188 reference edges did. Of the 269 and 179 of them scored, no stand-in
+  scored correct, and the originals scored all 269 and 179 correct.
 
 ### `bench/session_stats.vsh` — token-free MCP usage stats
 

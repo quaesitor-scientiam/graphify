@@ -1,7 +1,8 @@
 #!/usr/bin/env -S v -raw-vsh-tmp-prefix tmp
 
 // Measures how often graphify's `inferred` call edges (or, with -kind references,
-// its inferred reference edges) link the declaration that V's own compiler resolves
+// its inferred reference edges; with -provenance extracted, the `extracted` ones) link
+// the declaration that V's own compiler resolves
 // the name to: a seeded random sample of their sites, each asked of V3's
 // go-to-definition.
 //
@@ -9,6 +10,7 @@
 //   v run bin/sample-accuracy.vsh <graph> -kind references             # inferred reference edges
 //   v run bin/sample-accuracy.vsh <graph> -kind missing-references     # type names no edge links
 //   v run bin/sample-accuracy.vsh <graph> -kind missing-calls          # calls no edge links
+//   v run bin/sample-accuracy.vsh <graph> -provenance extracted        # extracted edges instead
 //   v run bin/sample-accuracy.vsh <graph dir or graph.json> -n 2000 -seed 7
 //   v run bin/sample-accuracy.vsh <graph> -out <dir>                   # where the results go
 //   v run bin/sample-accuracy.vsh <graph> -v3 <binary>                 # use this V3, don't build one
@@ -21,7 +23,13 @@
 // it). The `v` launcher is not used, as it falls back to the old compiler when V3
 // fails. With -v3 no V3 is built, not even one a `-d` needs.
 //
-// A unit is one site of an inferred edge of the chosen kind: its caller (the symbol
+// With -provenance extracted the edges sampled are the `extracted` ones (a unique name, or
+// for a call a receiver the parser typed) whose target is a symbol of the graph, scored the
+// same way. An edge to a built-in type, to a library declaration (a project graph's vlib), to
+// a `C.`/`JS.` function or to an unresolved name can be stored as extracted too, and is left
+// out, as the overview counts it apart. Inferred edges are all sampled, as before.
+//
+// A unit is one site of an edge of the chosen kind and provenance: its caller (the symbol
 // the edge is from), its callee (the declaration it is to) and one line of the
 // edge's `lines`. A reference edge is scored whole (a signature's has no `lines`, and a
 // body's are not used): its unit is the edge, asked at up to 8 lines of its `from` (in each file declaring that id) that name its target, and
@@ -83,6 +91,7 @@ const type_kinds = [4, 5, 6, 9] // struct, enum, interface, type alias
 const callable_kinds = [kind_function, kind_method, 7, 8, 10]
 const edge_calls = 1
 const edge_references = 5
+const prov_extracted = 0
 const prov_inferred = 1
 const prov_undeclared = 2
 // names written before `(` that are no call V3 can answer for: V's keywords (the `.key_`
@@ -173,7 +182,8 @@ struct SourceFile {
 struct Options {
 mut:
 	graph     string
-	kind      string = 'calls' // or 'references', 'missing-references' or 'missing-calls'
+	kind      string = 'calls'    // or 'references', 'missing-references' or 'missing-calls'
+	prov      string = 'inferred' // or 'extracted': the edges -kind calls or references samples
 	n         int    = 1000
 	seed      u64    = 20261110
 	out       string
@@ -246,7 +256,7 @@ mut:
 fn main() {
 	opts := parse_args(os.args[1..]) or {
 		eprintln(err.msg())
-		eprintln('usage: v run bin/sample-accuracy.vsh <graph dir or graph.json> [-kind calls|references|missing-references|missing-calls] [-n 1000] [-seed 20261110] [-out dir] [-v3 binary] [-no-worlds] [-self-test] [-timeout 300]')
+		eprintln('usage: v run bin/sample-accuracy.vsh <graph dir or graph.json> [-kind calls|references|missing-references|missing-calls] [-provenance inferred|extracted] [-n 1000] [-seed 20261110] [-out dir] [-v3 binary] [-no-worlds] [-self-test] [-timeout 300]')
 		exit(2)
 	}
 	graph_path := if os.is_dir(opts.graph) {
@@ -295,8 +305,9 @@ fn main() {
 		os.abs_path(opts.out)
 	} else {
 		kind_suffix := if opts.kind == 'calls' { '' } else { '-' + opts.kind }
+		prov_suffix := if opts.prov == 'inferred' { '' } else { '-' + opts.prov }
 		test_suffix := if opts.self_test { '-self-test' } else { '' }
-		os.join_path(os.vtmp_dir(), 'accuracy-${opts.seed}${kind_suffix}${test_suffix}')
+		os.join_path(os.vtmp_dir(), 'accuracy-${opts.seed}${kind_suffix}${prov_suffix}${test_suffix}')
 	}
 	os.mkdir_all(out_dir) or {
 		eprintln('cannot create ${out_dir}: ${err}')
@@ -344,9 +355,14 @@ fn main() {
 	// a reference edge is scored as one unit (line 0), asked at the lines of its `from`
 	// declaration that name its target, as a signature's has no `lines`
 	by_edge := edge_kind == edge_references
+	prov := if opts.prov == 'extracted' { prov_extracted } else { prov_inferred }
 	mut units := []Unit{}
 	for e in g.edges {
-		if e.kind == edge_kind && e.provenance == prov_inferred {
+		// an edge to a built-in type, a library declaration, a `C.` function or an unresolved
+		// name can be stored as extracted too, told apart by a target that is no symbol
+		// (count_provenance in bundle.v); inferred ones stay unfiltered, as before, as on a
+		// project graph many go to a library declaration
+		if e.kind == edge_kind && e.provenance == prov && (prov == prov_inferred || e.to in syms) {
 			if by_edge {
 				units << Unit{
 					from: e.from
@@ -363,7 +379,7 @@ fn main() {
 			}
 		}
 	}
-	println('population: ${units.len} inferred ${unit_name(opts.kind)}')
+	println('population: ${units.len} ${opts.prov} ${unit_name(opts.kind)}')
 	if units.len == 0 {
 		exit(1)
 	}
@@ -590,7 +606,7 @@ fn parse_args(args []string) !Options {
 	for i < args.len {
 		a := args[i]
 		match a {
-			'-kind', '-n', '-seed', '-out', '-v3', '-timeout' {
+			'-kind', '-provenance', '-n', '-seed', '-out', '-v3', '-timeout' {
 				if i + 1 >= args.len {
 					return error('${a} needs a value')
 				}
@@ -605,6 +621,12 @@ fn parse_args(args []string) !Options {
 							return error('-kind is calls, references, missing-references or missing-calls, not `${v}`')
 						}
 						o.kind = v
+					}
+					'-provenance' {
+						if v !in ['inferred', 'extracted'] {
+							return error('-provenance is inferred or extracted, not `${v}`')
+						}
+						o.prov = v
 					}
 					'-n' { o.n = strconv.atoi(v) or { return error('-n ${v} is too big') } }
 					'-seed' {
@@ -644,6 +666,9 @@ fn parse_args(args []string) !Options {
 	}
 	if o.self_test && o.kind in ['missing-references', 'missing-calls'] {
 		return error('-self-test checks the edges a graph has, not those it lacks')
+	}
+	if o.prov != 'inferred' && o.kind in ['missing-references', 'missing-calls'] {
+		return error('-provenance picks the edges a graph has; -kind ${o.kind} samples places in bodies')
 	}
 	return o
 }
@@ -1772,7 +1797,7 @@ fn summarize(rows []Row, population int, opts Options, commit string, graph_path
 	lo, hi := wilson(correct, scored)
 	mut s := strings.new_builder(1024)
 	s.writeln('graph: ${graph_path}${if commit != '' { ' (' + commit#[..10] + ')' } else { '' }}')
-	s.writeln('population: ${population} inferred ${unit_name(opts.kind)}; sample ${rows.len}, seed ${opts.seed}${if opts.self_test {
+	s.writeln('population: ${population} ${opts.prov} ${unit_name(opts.kind)}; sample ${rows.len}, seed ${opts.seed}${if opts.self_test {
 		', SELF-TEST'
 	} else {
 		''
