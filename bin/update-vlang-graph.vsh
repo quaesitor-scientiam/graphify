@@ -125,6 +125,133 @@ fn log_output(log_path string, out string) {
 	}
 }
 
+// compiler_names are the processes count_compilers counts: V and the C compilers and
+// linkers it runs, by file name without `.exe`.
+const compiler_names = ['v', 'cc', 'cc1', 'clang', 'gcc', 'cl', 'tcc', 'ld', 'link']
+
+// RunningProcess is one process of list_processes: its id, its parent's, and its file
+// name, lower case on Windows and without `.exe`.
+struct RunningProcess {
+	pid  int
+	ppid int
+	name string
+}
+
+// tlhelp32.h, or for TCC, which lacks it, what this script uses of it
+$if windows {
+	#include "@VMODROOT/bin/process_list_windows.h"
+}
+
+@[typedef]
+struct C.PROCESSENTRY32W {
+mut:
+	dwSize              u32
+	th32ProcessID       u32
+	th32ParentProcessID u32
+	szExeFile           [260]u16
+}
+
+fn C.CreateToolhelp32Snapshot(flags u32, pid u32) voidptr
+fn C.Process32FirstW(snapshot voidptr, entry &C.PROCESSENTRY32W) bool
+fn C.Process32NextW(snapshot voidptr, entry &C.PROCESSENTRY32W) bool
+
+// list_processes lists the processes running, or none when they can't be read.
+// Windows' own snapshot, not `tasklist`, which gives no parent; `ps` elsewhere.
+fn list_processes() []RunningProcess {
+	mut procs := []RunningProcess{}
+	$if windows {
+		snapshot := C.CreateToolhelp32Snapshot(u32(C.TH32CS_SNAPPROCESS), 0)
+		if snapshot == voidptr(-1) {
+			return procs
+		}
+		mut entry := C.PROCESSENTRY32W{}
+		entry.dwSize = u32(sizeof(C.PROCESSENTRY32W))
+		mut more := C.Process32FirstW(snapshot, &entry)
+		for more {
+			exe := unsafe { string_from_wide(&entry.szExeFile[0]) }
+			procs << RunningProcess{
+				pid:  int(entry.th32ProcessID)
+				ppid: int(entry.th32ParentProcessID)
+				name: exe.to_lower().trim_string_right('.exe')
+			}
+			more = C.Process32NextW(snapshot, &entry)
+		}
+		C.CloseHandle(snapshot)
+	} $else {
+		res := os.exec(['ps', '-A', '-o', 'pid=,ppid=,comm='])
+		if res.exit_code != 0 {
+			return procs
+		}
+		for line in res.output.split_into_lines() {
+			// 1234 1 /usr/bin/cc
+			fields := line.fields()
+			if fields.len < 3 || !fields[0].bytes().all(it.is_digit())
+				|| !fields[1].bytes().all(it.is_digit()) {
+				continue
+			}
+			procs << RunningProcess{
+				pid:  fields[0].int()
+				ppid: fields[1].int()
+				name: os.file_name(fields[2..].join(' '))
+			}
+		}
+	}
+	return procs
+}
+
+// count_compilers names the compilers in `procs` besides this run's own, counted by name
+// ('v 3, clang 2'), 'none', or '' when there is no process list. Not counted: this
+// process (`self`), the processes it was started from, and every child of one of those
+// that is a `v`: under a `v run` of this script, the `v`s that run it. Windows keeps a
+// parent's id after the parent ends, so a newer process given that id is taken for an
+// ancestor, and left out of the count, as are its children if it is a `v`.
+fn count_compilers(procs []RunningProcess, self int) string {
+	if procs.len == 0 {
+		return ''
+	}
+	mut by_pid := map[int]RunningProcess{}
+	for p in procs {
+		by_pid[p.pid] = p
+	}
+	// self and its ancestors; a pid reused by a newer process can make a loop
+	mut own := map[int]bool{}
+	mut v_ancestors := map[int]bool{}
+	mut at := self
+	for at !in own {
+		own[at] = true
+		p := by_pid[at] or { break }
+		if p.name == 'v' && at != self {
+			v_ancestors[at] = true
+		}
+		at = p.ppid
+	}
+	mut counts := map[string]int{}
+	mut order := []string{}
+	for p in procs {
+		if p.name !in compiler_names || p.pid in own || p.ppid in v_ancestors {
+			continue
+		}
+		if p.name !in counts {
+			order << p.name
+		}
+		counts[p.name]++
+	}
+	if order.len == 0 {
+		return 'none'
+	}
+	return order.map('${it} ${counts[it]}').join(', ')
+}
+
+// log_load logs the compilers running before a step whose time the log gives: a
+// rebuild or an extract that takes twice its usual time beside them was sharing the
+// machine.
+fn log_load(log_path string) {
+	busy := count_compilers(list_processes(), os.getpid())
+	if busy != '' {
+		log_line(log_path, 'other compilers running: ${busy}')
+	}
+}
+
 fn fail(log_path string, msg string) {
 	log_line(log_path, 'ERROR: ${msg}')
 	log_line(log_path, '--- done ---')
@@ -391,7 +518,7 @@ const key_source_exts = ['.c', '.h', '.m', '.S']
 fn parse_key(graphify_root string, v_exe string) string {
 	v_root := os.real_path(os.dir(os.real_path(v_exe)))
 	own_root := os.real_path(graphify_root)
-	// as build_one builds it, from graphify's checkout: V finds `import graphify` in the
+	// as compile_one builds it, from graphify's checkout: V finds `import graphify` in the
 	// working directory, so from another one it would list another checkout's files
 	cwd := os.getwd()
 	os.chdir(own_root) or { return '' }
@@ -451,8 +578,7 @@ fn parse_key(graphify_root string, v_exe string) string {
 	return sha256.hexhash(lines.join('\n'))
 }
 
-// build_one builds one binary next to its final name and then swaps it in,
-// so a running copy (the MCP server, on Windows) never blocks the build.
+// Build is one binary to build: where it goes, whether with -prod, and V's arguments.
 // `prod` (-prod: optimised, link-time) is for the CLI and the MCP server. The CLI
 // takes 2 min to build where a plain build takes 8 s, but it is what extracts and
 // answers queries: a plain CLI extracts vlang in about 80 s against 25-50 s, and
@@ -460,19 +586,99 @@ fn parse_key(graphify_root string, v_exe string) string {
 // against 7 s and answers 3-6x faster (get_node 5 ms against 16 ms, query_graph 70 ms
 // against 330 ms; macOS, V 4b1f3e2, whose plain builds use TCC). The hook takes 36 s
 // and 6 s, and answers about as fast either way (a call 0.04 s against 0.03 s).
-fn build_one(log_path string, v_exe string, out string, prod bool, args []string) ! {
-	tmp := out + '.new' + $if windows { '.exe' } $else { '' }
-	mut cmd := [v_exe, '-o', tmp]
-	if prod {
-		cmd.insert(1, '-prod')
+struct Build {
+	out  string
+	prod bool
+	args []string
+}
+
+// Compiled is how compiling a Build went: the compiler's output, and how long it took.
+struct Compiled {
+	ok     bool
+	output string
+	secs   f64
+}
+
+// new_binary is where a Build of `out` is compiled to, beside it (install_one).
+fn new_binary(out string) string {
+	return out + '.new' + $if windows { '.exe' } $else { '' }
+}
+
+// compile_one compiles one binary to new_binary(b.out), leaving the one in use alone.
+// rebuild_if_stale runs one per binary at once, each in a thread of its own.
+// Not os.exec: on Windows each compiler inherits the others' output pipes, so
+// os.exec returns only once every compile running beside it has ended too (a
+// 1 s command beside a 6 s one took 6.4 s), and each would log the longest one's time.
+// Asking whether the compiler is still running, and reading only what is waiting in
+// its pipes, times each one on its own, and a compiler that writes more than a pipe
+// holds still ends.
+fn compile_one(v_exe string, b Build) Compiled {
+	sw := time.new_stopwatch()
+	tmp := new_binary(b.out)
+	mut args := ['-o', tmp]
+	if b.prod {
+		args.insert(0, '-prod')
 	}
-	cmd << args
-	res := os.exec(cmd)
-	if res.exit_code != 0 {
-		log_output(log_path, res.output)
-		os.rm(tmp) or {}
-		return error('building ${os.file_name(out)} failed')
+	args << b.args
+	// On Windows a program os.Process can't start ends this whole run (exit 1, the lock
+	// held for an hour), where os.exec only failed the build. A `v` gone since build_stamp
+	// ran it fails the build here; one still there that can't start, as when `v up`
+	// replaces it at that moment, still ends the run.
+	if !os.is_file(v_exe) {
+		return Compiled{
+			ok:     false
+			output: 'cannot run ${v_exe}: it is gone'
+		}
 	}
+	mut p := os.new_process(v_exe)
+	p.set_args(args)
+	p.set_redirect_stdio()
+	p.run()
+	mut out := []string{}
+	for p.is_alive() {
+		read_waiting(mut p, mut out)
+		time.sleep(100 * time.millisecond)
+	}
+	secs := sw.elapsed().seconds()
+	read_waiting(mut p, mut out)
+	p.wait()
+	ok := p.code == 0 && p.err == ''
+	if p.err != '' {
+		out << p.err
+	}
+	p.close()
+	if !ok {
+		discard_new(b.out)
+	}
+	return Compiled{
+		ok:     ok
+		output: out.join('')
+		secs:   secs
+	}
+}
+
+// discard_new removes a binary compile_one built for `out` that is not installed, and
+// the `.manifest` the Windows linker leaves beside it.
+fn discard_new(out string) {
+	tmp := new_binary(out)
+	os.rm(tmp) or {}
+	os.rm(tmp + '.manifest') or {}
+}
+
+// read_waiting reads what a child has written so far, without waiting for more.
+fn read_waiting(mut p os.Process, mut out []string) {
+	for p.is_pending(.stdout) {
+		out << p.stdout_read()
+	}
+	for p.is_pending(.stderr) {
+		out << p.stderr_read()
+	}
+}
+
+// install_one swaps the binary compile_one built for `out` in, so a running copy (the
+// MCP server, on Windows) never blocks the build.
+fn install_one(out string) ! {
+	tmp := new_binary(out)
 	if os.exists(out) {
 		// Windows lets a running program be renamed but not deleted, so a
 		// copy set aside by an earlier build may still be in use: take a name
@@ -483,7 +689,7 @@ fn build_one(log_path string, v_exe string, out string, prod bool, args []string
 			old = '${out}.old-${time.now().unix_milli()}'
 		}
 		os.rename(out, old) or {
-			os.rm(tmp) or {}
+			discard_new(out)
 			return error('cannot replace ${out}: ${err}')
 		}
 		os.rm(old) or {}
@@ -551,6 +757,7 @@ fn rebuild_if_stale(log_path string, root string, exe string) !bool {
 		return false
 	}
 	log_line(log_path, 'graphify is out of date; rebuilding...')
+	log_load(log_path)
 	os.chdir(root)!
 	ext := $if windows { '.exe' } $else { '' }
 	// what the CLI and the extractor key their parse cache on (parse_key)
@@ -559,52 +766,88 @@ fn rebuild_if_stale(log_path string, root string, exe string) !bool {
 	if key == '' {
 		log_line(log_path, 'WARNING: cannot name what graphify is built from; its parse cache is keyed on the binary')
 	}
-	// the CLI is what extracts; without it there is nothing to run
 	mut cli_args := key_args.clone()
 	cli_args << 'cmd/cli'
-	build_one(log_path, v_exe, exe, true, cli_args)!
+	mut extractor_args := ['-prealloc']
+	extractor_args << key_args
+	extractor_args << 'cmd/cli'
+	// the CLI first, then the extractor: install order below
+	mut builds := [Build{exe, true, cli_args}, Build{extractor, true, extractor_args}]
+	mcp := os.join_path(root, 'bin', 'graphify-mcp' + ext)
+	if os.exists(mcp) {
+		builds << Build{mcp, true, ['cmd/mcp']}
+	}
+	hook := os.join_path(root, 'bin', 'graphify-hook' + ext)
+	if os.exists(hook) {
+		builds << Build{hook, false, ['build', 'cmd/hooks/graphify_hook.vsh']}
+	}
+	// this script, prebuilt for the Windows task; it is running, which the
+	// swap in install_one allows
+	updater := os.join_path(root, 'bin', 'update-vlang-graph' + ext)
+	if os.exists(updater) {
+		builds << Build{updater, false, ['build', 'bin/update-vlang-graph.vsh']}
+	}
+	// They don't depend on each other, so they compile at once: the three -prod
+	// builds take 18-32 s each on their own (Windows, idle). Nothing is installed until all are done.
+	sw := time.new_stopwatch()
+	mut threads := []thread Compiled{}
+	for b in builds {
+		threads << spawn compile_one(v_exe, b)
+	}
+	compiled := threads.wait()
+	log_line(log_path, 'compiled ${builds.len} binaries at once in ${sw.elapsed().seconds():.1f}s')
+	for i, b in builds {
+		c := compiled[i]
+		failed := if c.ok { '' } else { ', failed' }
+		log_line(log_path, '  ${os.file_name(b.out)}: ${c.secs:.1f}s${failed}')
+		if !c.ok {
+			log_output(log_path, c.output)
+		}
+	}
+	// the CLI is what extracts; without it there is nothing to run, and nothing
+	// else is installed, so the binaries stay one build
+	if !compiled[0].ok {
+		for b in builds {
+			discard_new(b.out)
+		}
+		return error('building ${os.file_name(exe)} failed')
+	}
+	install_one(exe) or {
+		for b in builds {
+			discard_new(b.out)
+		}
+		return err
+	}
 	// the others only serve the graph: a failure is logged, the extract goes
 	// ahead, and the stamp stays old so the next run tries them again
 	mut all_built := true
 	pair := extractor + extractor_pair_suffix
-	// the CLI just built, whatever replaces it during the slow build below
+	// the CLI just installed
 	cli_hash := sha256.hexhash(os.read_file(exe)!)
 	// an extractor of older code must not extract: until this build, bin/graphify does
 	os.rm(pair) or {}
-	mut extractor_built := true
-	mut extractor_args := ['-prealloc']
-	extractor_args << key_args
-	extractor_args << 'cmd/cli'
-	build_one(log_path, v_exe, extractor, true, extractor_args) or {
-		log_line(log_path, 'WARNING: ${err}')
-		all_built = false
-		extractor_built = false
-		os.rm(extractor) or {}
-	}
-	if extractor_built {
-		os.write_file(pair, cli_hash)!
-	}
-	mcp := os.join_path(root, 'bin', 'graphify-mcp' + ext)
-	if os.exists(mcp) {
-		build_one(log_path, v_exe, mcp, true, ['cmd/mcp']) or {
-			log_line(log_path, 'WARNING: ${err}')
-			all_built = false
+	for i, b in builds {
+		if i == 0 {
+			continue
 		}
-	}
-	hook := os.join_path(root, 'bin', 'graphify-hook' + ext)
-	if os.exists(hook) {
-		build_one(log_path, v_exe, hook, false, ['build', 'cmd/hooks/graphify_hook.vsh']) or {
-			log_line(log_path, 'WARNING: ${err}')
+		if !compiled[i].ok {
+			log_line(log_path, 'WARNING: building ${os.file_name(b.out)} failed')
 			all_built = false
+			if b.out == extractor {
+				os.rm(extractor) or {}
+			}
+			continue
 		}
-	}
-	// this script, prebuilt for the Windows task; it is running, which the
-	// swap in build_one allows
-	updater := os.join_path(root, 'bin', 'update-vlang-graph' + ext)
-	if os.exists(updater) {
-		build_one(log_path, v_exe, updater, false, ['build', 'bin/update-vlang-graph.vsh']) or {
+		install_one(b.out) or {
 			log_line(log_path, 'WARNING: ${err}')
 			all_built = false
+			if b.out == extractor {
+				os.rm(extractor) or {}
+			}
+			continue
+		}
+		if b.out == extractor {
+			os.write_file(pair, cli_hash)!
 		}
 	}
 	if all_built {
@@ -715,6 +958,7 @@ fn main() {
 		log_line(log_path, 'The graph is up to date. Skipping extract.')
 	} else {
 		log_line(log_path, 'extracting graph (${why})...')
+		log_load(log_path)
 		start := time.now()
 		result := os.exec([extract_exe, 'extract', vlang, '--store', store])
 		log_output(log_path, result.output)
@@ -755,6 +999,7 @@ fn extract_project(log_path string, exe string, project string, store string, ex
 		return
 	}
 	log_line(log_path, 'extracting ${project} (${why})...')
+	log_load(log_path)
 	result := os.exec([exe, 'extract', project, '--store', store])
 	log_output(log_path, result.output)
 	if result.exit_code != 0 {

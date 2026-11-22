@@ -14072,8 +14072,10 @@ fn test_the_updater_keys_the_parse_cache_on_what_is_compiled_in() {
 			}
 		}
 	}
-	os.cp(os.join_path(@DIR, 'bin', 'update-vlang-graph.vsh'), os.join_path(dir, 'bin',
-		'update-vlang-graph.vsh')) or { panic(err) }
+	// the script and the header it includes on Windows
+	for name in ['update-vlang-graph.vsh', 'process_list_windows.h'] {
+		os.cp(os.join_path(@DIR, 'bin', name), os.join_path(dir, 'bin', name)) or { panic(err) }
+	}
 	ext := $if windows { '.exe' } $else { '' }
 	updater := os.join_path(dir, 'bin', 'updater' + ext)
 	built := os.exec([@VEXE, '-o', updater, 'build', os.join_path(dir, 'bin', 'update-vlang-graph.vsh')])
