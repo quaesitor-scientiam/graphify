@@ -711,14 +711,25 @@ collector) it compiles in. The script records what each build saw in
 `bin/.build-stamp` (graphify's commit and uncommitted changes, `v version`, and
 the git trees of `vlib` and `thirdparty` with their uncommitted changes) and,
 after pulling, rebuilds `bin/graphify` and any `graphify-mcp` and
-`graphify-hook` beside it whenever that no longer matches. Each binary is built
-under a temporary name and swapped in, so an MCP server that is running it
-doesn't block the build on Windows. So every `v up` rebuilds them, about a minute:
+`graphify-hook` beside it whenever that no longer matches. So every `v up`
+rebuilds them, about a minute:
 a new compiler can change how they run even when the graph they extract is the
 same (vlang/v#30996, a fix in the C backend alone, stopped `graphify-mcp`
 losing live strings to the garbage collector). If `v` isn't a git checkout, the
 stamp names its `vlib` and `thirdparty` directories instead. `-PrintStamp`
 prints the stamp and stops.
+
+The binaries compile at once, each under a temporary name, and are swapped in when
+all are done, so an MCP server that is running one doesn't block the build on
+Windows. If `bin/graphify` fails to build, none is swapped in. On one Windows
+machine the five took 46 s together, against 98 s one after another. The log gives
+each compile's time (`compiled 5 binaries at once in 46.1s`, then one line per
+binary). Before the rebuild and before each extract it names the compilers running
+that aren't the run's own (`other compilers running: v 2, clang 3`, or `none`;
+nothing when the process list can't be read): a step that takes twice its usual
+time beside them was sharing the machine. On Windows, a `v` that is there but can't
+be started, as when `v up` is replacing it at that moment, ends the run (with its
+lock left for an hour) instead of failing the build.
 
 The script also builds `bin/graphify-extract` (`graphify-extract.exe` on Windows), the CLI
 with `-prealloc`, and extracts with it: on the V repo, about 4 s against 8 s and 4.2 GB against
