@@ -422,7 +422,7 @@ fn (mut d Daemon) call(session string, name string, args string) (string, bool) 
 		a
 	}
 	if folder != '' {
-		return app.answer_for(dir, extract_wait, name, args)
+		return app.answer_for(dir, folder_wait, name, args)
 	}
 	return app.answer(name, args)
 }

@@ -405,13 +405,15 @@ fn with_folder(text string, is_error bool, root string) (string, bool) {
 // reports whether it did. Its outcome stays in `done` for poll to take, as refresh
 // does. The daemon's lock is let go of between looks, so that the other sessions'
 // tool calls are answered meanwhile, and one in this directory may take the outcome
-// first: the extract is then done as well.
+// first: the extract is then done as well. The App is in use all the while, not idle
+// since the call began: a wait longer than daemon_idle() would see it dropped.
 fn (mut app App) wait_extract(timeout time.Duration) bool {
 	deadline := time.now().add(timeout)
 	for app.wt.running && app.wt.done.len == 0 {
 		if time.now() >= deadline {
 			return false
 		}
+		app.used_at = time.now().unix()
 		if isnil(app.held) {
 			time.sleep(100 * time.millisecond)
 		} else {
@@ -441,6 +443,10 @@ fn (mut app App) wait_stale(timeout time.Duration) {
 // extract_wait bounds how long a lookup that found nothing waits for the worktree's
 // extract (App.answer): a vlang worktree's takes about 20 s with its cache.
 const extract_wait = 30 * time.second
+
+// folder_wait bounds how long a call that names a folder waits for its graph
+// (App.answer_for).
+const folder_wait = 90 * time.second
 
 // missed reports whether `text`, the tool `name`'s answer, is that it found nothing.
 fn missed(name string, text string) bool {
