@@ -237,7 +237,7 @@ pub fn store_project_dir(store string, root string) string {
 }
 
 // path_holds reports whether `path` is `root` or a path inside it.
-fn path_holds(root string, path string) bool {
+pub fn path_holds(root string, path string) bool {
 	if path == root {
 		return true
 	}
