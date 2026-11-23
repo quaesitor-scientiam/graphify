@@ -626,6 +626,16 @@ changes, committed or not, the next tool call starts another extract, and the
 graph is replaced when it is done. A store whose worktree is gone is removed when
 a server starts.
 
+Each tool also takes a `folder`, the full path of one, for a call to be answered from
+that folder's graph and not the session's: a review agent started elsewhere names the
+worktree it reviews. The answer's first line says which root's graph it is. A worktree
+that is being extracted is waited for, up to 30 seconds, and then the call is an error
+that says to call again. A worktree whose graph could not be extracted is an error,
+until the worktree changes or has been idle, and so is a folder no graph of the server
+covers. Another root's graph never answers in its place. A path that is
+relative, or on Windows does not start with a drive (`C:\`), as `\\server\share` does
+not, is refused. Each root named costs the memory of a session in it, until it is idle.
+
 One daemon answers for every session. Each session's server is a small relay
 (about 12 MB) that passes its tool calls over a Unix socket in
 `~/.cache/graphify` (or `GRAPHIFY_DAEMON_DIR`) to `graphify-mcp --daemon`, which

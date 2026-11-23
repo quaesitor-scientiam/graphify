@@ -334,6 +334,25 @@ fn (mut d Daemon) done(exe string, exe_stamp string) bool {
 	defer {
 		d.mu.unlock()
 	}
+	d.drop_unused()
+	if d.conns > 0 {
+		return false
+	}
+	return time.now().unix() - d.used_at >= daemon_idle() || file_stamp(exe) != exe_stamp
+}
+
+// drop_idle drops what is idle for a server with no daemon, which no check does it for.
+fn (mut d Daemon) drop_idle() {
+	d.mu.lock()
+	defer {
+		d.mu.unlock()
+	}
+	d.drop_unused()
+}
+
+// drop_unused drops each App no tool call has asked for in daemon_idle(), and the base
+// graphs none left uses. It runs under the daemon's lock.
+fn (mut d Daemon) drop_unused() {
 	now := time.now().unix()
 	idle := daemon_idle()
 	mut used := {
@@ -348,10 +367,6 @@ fn (mut d Daemon) done(exe string, exe_stamp string) bool {
 	}
 	d.bases.keep(used)
 	gc_collect()
-	if d.conns > 0 {
-		return false
-	}
-	return now - d.used_at >= idle || file_stamp(exe) != exe_stamp
 }
 
 // serve_conn answers the tool calls one server relays, one line each, until it
@@ -381,6 +396,19 @@ fn (mut d Daemon) answer(line string) (string, bool) {
 	dir := (request['dir'] or { json2.Any('') }).str()
 	name := (request['name'] or { json2.Any('') }).str()
 	args := (request['arguments'] or { json2.Any('{}') }).str()
+	return d.call(dir, name, args)
+}
+
+// call runs the tool `name` on the App of the folder its arguments name, as a root of
+// a graph (covered_root), so that each folder in one worktree is one App, or else on
+// that of the session's directory `session`, made when it is the first call for it.
+fn (mut d Daemon) call(session string, name string, args string) (string, bool) {
+	folder := folder_of(args) or { return err.msg(), true }
+	mut dir := session
+	if folder != '' {
+		// git is asked before the lock is taken: other sessions' calls go on
+		dir = covered_root(d.cfg, folder) or { return err.msg(), true }
+	}
 	d.mu.lock()
 	defer {
 		d.mu.unlock()
@@ -392,6 +420,9 @@ fn (mut d Daemon) answer(line string) (string, bool) {
 		a.held = d.mu
 		d.apps[key] = a
 		a
+	}
+	if folder != '' {
+		return app.answer_for(dir, extract_wait, name, args)
 	}
 	return app.answer(name, args)
 }

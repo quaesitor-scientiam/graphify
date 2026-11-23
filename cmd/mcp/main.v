@@ -45,6 +45,11 @@ struct Served {
 	layered bool
 }
 
+// root is the root of the graph served: the project's, when it is layered.
+fn (s Served) root() string {
+	return if s.layered { s.project.root } else { s.g.root }
+}
+
 // Config is how the server was started: the base graph, the store of project
 // graphs, and the source directory that stands in for the base's root.
 struct Config {
@@ -178,7 +183,7 @@ fn main() {
 		sess.remote = connect_daemon(cfg)
 	}
 	if isnil(sess.remote) {
-		sess.app = new_app(cfg, sess.here, &BaseCache{}) or {
+		sess.app = new_app(cfg, sess.here, sess.bases) or {
 			eprintln('graphify-mcp: ${err}')
 			exit(1)
 		}
@@ -264,6 +269,10 @@ mut:
 	// what the daemon sent after the last answer it read
 	pending []u8
 	app     &App = unsafe { nil }
+	// the base graphs this server reads itself, and the Apps of the folders its tool
+	// calls name (folder_of), when there is no daemon
+	bases   &BaseCache = &BaseCache{}
+	folders &Daemon    = unsafe { nil }
 	// the session's directory, from the client's roots (ask_roots): the latest only
 	dirs chan string = chan string{cap: 1}
 	// whether a 2026-07-28 client was asked for its roots, which it is once
@@ -321,8 +330,19 @@ fn (mut s Session) answer(name string, arguments string) (string, bool) {
 		eprintln('graphify-mcp: no daemon to answer; reading the graphs here')
 		s.remote = unsafe { nil }
 	}
+	folder := folder_of(arguments) or { return err.msg(), true }
+	if folder != '' {
+		if isnil(s.folders) {
+			s.folders = &Daemon{
+				cfg:   s.cfg
+				bases: s.bases
+			}
+		}
+		s.folders.drop_idle()
+		return s.folders.call(s.here, name, arguments)
+	}
 	if isnil(s.app) {
-		s.app = new_app(s.cfg, s.here, &BaseCache{}) or {
+		s.app = new_app(s.cfg, s.here, s.bases) or {
 			return 'graphify-mcp: ${err}', true
 		}
 	}
@@ -344,6 +364,41 @@ fn (mut app App) answer(name string, arguments string) (string, bool) {
 		text, is_error = tool_text(name, args, app.served)
 	}
 	return with_note(text, is_error, join_notes(app.wt.note(), app.note))
+}
+
+// answer_for is the answer for a tool call that names the folder whose graph is
+// rooted at `root`, this App's directory: that graph, a worktree's once the extract
+// running is done, for which it waits up to `timeout`, or an error; never another
+// root's graph, nor one from before a change it has seen in the worktree, which it
+// looks for once more after the wait and not again. The answer's first line is the
+// root of the graph.
+fn (mut app App) answer_for(root string, timeout time.Duration, name string, arguments string) (string, bool) {
+	app.used_at = time.now().unix()
+	app.refresh()
+	if app.wt.running && app.wait_extract(timeout) {
+		app.refresh()
+	}
+	if app.wt.running {
+		return 'folder: the graph of ${root} is still being extracted; call again', true
+	}
+	if app.wt.failed != '' {
+		return 'folder: the graph of ${root} could not be extracted: ${app.wt.failed}', true
+	}
+	if os.real_path(app.served.root()) != root {
+		return 'folder: the graph of ${root} could not be extracted or read; the server has that of ${app.served.root()}', true
+	}
+	args := (json2.decode[json2.Any](arguments) or { json2.null }).as_map()
+	text, is_error := tool_text(name, args, app.served)
+	noted, _ := with_note(text, is_error, app.note)
+	return with_folder(noted, is_error, root)
+}
+
+// with_folder puts which folder's graph it is before the tool's answer `text`.
+fn with_folder(text string, is_error bool, root string) (string, bool) {
+	if is_error {
+		return text, is_error
+	}
+	return '(folder: this is the graph of ${root})\n\n${text}', false
 }
 
 // wait_extract waits up to `timeout` for the worktree's extract to finish, and
@@ -540,6 +595,89 @@ fn notes(graph_path string, project_path string, served Served, cli string) stri
 	return sentences(out)
 }
 
+// folder_of is the `folder` a tool call's `arguments` name, '' when they name none, and
+// an error when it is no full path of a local directory. On Windows that is a drive, a
+// colon and a separator: every other form is relative to something of the server's, or
+// may be a network path, and only looking at one can send the user's credentials to it.
+fn folder_of(arguments string) !string {
+	args := (json2.decode[json2.Any](arguments) or { json2.null }).as_map()
+	folder := args['folder'] or { return '' }
+	if folder is json2.Null {
+		return ''
+	}
+	if folder !is string {
+		return error('folder: not a string; give a full path, or leave it out')
+	}
+	path := folder.str()
+	full := $if windows {
+		path.len > 2 && path[0].is_letter() && path[1] == `:` && path[2] in [`\\`, `/`]
+	} $else {
+		path.starts_with('/')
+	}
+	if !full {
+		return error('folder: `${path}` is not a full local path; give one, or leave it out')
+	}
+	return path
+}
+
+// covered_root is the root of the graph that answers for `folder`: the place of the
+// project's root, or the base's, in the worktree that holds it, or in their own
+// checkout. An error, which lists the roots there are, when the folder is not there,
+// none of them holds it, or a repository or worktree of its own does, that is none of
+// theirs or that git can't tell of, inside one that is.
+fn covered_root(cfg Config, folder string) !string {
+	if cfg.src_dir != '' {
+		return error('folder: this server answers from a shared graph, of no local folder')
+	}
+	if !os.is_dir(folder) {
+		return error('folder: ${folder} is not a directory; ${roots_text(cfg)}')
+	}
+	here := os.real_path(folder)
+	project := graphify.project_for(cfg.projects_dir, here, cfg.base_root) or { '' }
+	mut root := ''
+	if found := graphify.worktree_graph(cfg.projects_dir, here, project, cfg.graph_path, cfg.base_root) {
+		root = os.real_path(found.root)
+	} else if project != '' {
+		m := graphify.load_manifest(os.join_path(os.dir(project), 'manifest.json')) or {
+			graphify.Manifest{}
+		}
+		root = if m.root == '' { '' } else { os.real_path(m.root) }
+	} else if cfg.base_root != '' {
+		root = os.real_path(cfg.base_root)
+	}
+	if root == '' || !graphify.path_holds(root, here) {
+		return error('folder: no graph here is of ${folder}; ${roots_text(cfg)}')
+	}
+	mut dir := here
+	for dir.len > root.len {
+		if os.exists(os.join_path(dir, '.git')) {
+			return error('folder: ${dir} is a repository or worktree of its own, and no graph here is of it; ${roots_text(cfg)}')
+		}
+		dir = os.dir(dir)
+	}
+	return root
+}
+
+// roots_text says which roots a `folder` can be in.
+fn roots_text(cfg Config) string {
+	mut roots := []string{}
+	if cfg.base_root != '' {
+		roots << cfg.base_root
+	}
+	if cfg.projects_dir != '' {
+		for name in os.ls(cfg.projects_dir) or { []string{} } {
+			m := graphify.load_manifest(os.join_path(cfg.projects_dir, name, 'manifest.json')) or {
+				continue
+			}
+			if m.root != '' && m.root !in roots
+				&& os.exists(os.join_path(cfg.projects_dir, name, 'graph.json')) {
+				roots << m.root
+			}
+		}
+	}
+	return 'the graphs here are of these, and of their git worktrees: ${roots.join(', ')}'
+}
+
 // with_note puts `note` before the tool's answer `text`, when it is set.
 fn with_note(text string, is_error bool, note string) (string, bool) {
 	if is_error || note == '' {
@@ -671,14 +809,18 @@ fn prop(typ string, desc string) json2.Any {
 	})
 }
 
+// schema is a tool's input schema, with the `folder` each tool takes (folder_of).
 fn schema(props map[string]json2.Any, required []string) json2.Any {
+	mut all := props.clone()
+	all['folder'] = prop('string',
+		'full path of a folder, such as a git worktree, to answer from the graph of; that of the folder the session is in if left out')
 	mut req := []json2.Any{}
 	for r in required {
 		req << jstr(r)
 	}
 	return jobj({
 		'type':       jstr('object')
-		'properties': jobj(props)
+		'properties': jobj(all)
 		'required':   jarr(req)
 	})
 }
