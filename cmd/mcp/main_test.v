@@ -808,6 +808,54 @@ fn test_a_named_worktree_without_its_own_graph_is_an_error() {
 	}
 }
 
+fn test_a_wait_for_a_named_folder_longer_than_the_idle_time_keeps_its_app() {
+	fx := folder_fixture('longwait')
+	old := os.getenv('GRAPHIFY_DAEMON_IDLE')
+	defer {
+		os.setenv('GRAPHIFY_DAEMON_IDLE', old, true)
+		os.rmdir_all(fx.dir) or {}
+	}
+	os.setenv('GRAPHIFY_DAEMON_IDLE', '2', true)
+	mut d := &Daemon{
+		cfg: fx.cfg
+	}
+	key := os.real_path(fx.main)
+	mut app := new_app(fx.cfg, key, &BaseCache{}) or { panic(err) }
+	app.held = d.mu
+	app.wt = Worktree{
+		root:     fx.main
+		state:    graphify.worktree_state(fx.main)
+		state_at: time.now().unix()
+		running:  true
+		done:     chan string{cap: 1}
+	}
+	d.apps[key] = app
+	// used_at is set once the call, which asks git before it, has the App
+	app.used_at = 0
+	t := spawn d.call(fx.main, 'get_body', body_args(fx.main))
+	for _ in 0 .. 600 {
+		d.mu.lock()
+		begun := app.used_at > 0
+		d.mu.unlock()
+		if begun {
+			break
+		}
+		time.sleep(100 * time.millisecond)
+	}
+	time.sleep(3500 * time.millisecond)
+	d.drop_idle()
+	d.mu.lock()
+	kept := key in d.apps
+	d.mu.unlock()
+	app.wt.done <- ''
+	t.wait()
+	assert kept
+	// and it is idle again once the call is answered
+	time.sleep(2500 * time.millisecond)
+	d.drop_idle()
+	assert d.apps.len == 0
+}
+
 fn test_a_change_made_while_a_named_worktree_is_extracted_is_waited_for() {
 	fx := folder_fixture('during')
 	defer {
