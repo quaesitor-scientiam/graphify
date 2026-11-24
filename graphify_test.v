@@ -4,6 +4,8 @@ import os
 import time
 import x.json2
 
+fn C.LockFile(file voidptr, offset_low u32, offset_high u32, bytes_low u32, bytes_high u32) int
+
 const sample = 'module demo
 
 import os
@@ -2280,6 +2282,184 @@ fn test_atomic_replace_replaces_an_existing_destination_file() {
 	assert !os.exists(src)
 }
 
+// replace_pair makes files src and dst in `dir`, each with content that says which it is.
+fn replace_pair(dir string) (string, string) {
+	src := os.join_path(dir, 'src.txt')
+	dst := os.join_path(dir, 'dst.txt')
+	os.write_file(src, 'NEW') or { panic(err) }
+	os.write_file(dst, 'OLD') or { panic(err) }
+	return src, dst
+}
+
+fn test_atomic_replace_waits_for_a_reader_to_close_either_file() {
+	$if !windows {
+		return
+	}
+	// a reader of the new file, as a virus scanner is, gives another code (32) than
+	// one of the file replaced (5)
+	for held in ['dst.txt', 'src.txt'] {
+		dir := store_test_dir('atomic_replace_reader_${held}')
+		src, dst := replace_pair(dir)
+		mut f := os.open(os.join_path(dir, held)) or { panic(err) }
+		t := spawn fn (mut f os.File) {
+			time.sleep(500 * time.millisecond)
+			f.close()
+		}(mut f)
+		sw := time.new_stopwatch()
+		mut msg := ''
+		atomic_replace(src, dst) or { msg = err.msg() }
+		took := sw.elapsed()
+		t.wait()
+		assert msg == '', '${held}: ${msg}'
+		assert took >= 400 * time.millisecond, held // the reader was in the way at first
+		assert (os.read_file(dst) or { panic(err) }) == 'NEW', held
+		assert !os.exists(src), held
+	}
+}
+
+fn test_atomic_replace_fails_with_the_code_when_a_reader_never_closes_the_file() {
+	$if !windows {
+		return
+	}
+	src, dst := replace_pair(store_test_dir('atomic_replace_held'))
+	mut f := os.open(dst) or { panic(err) }
+	sw := time.new_stopwatch()
+	mut msg := ''
+	atomic_replace(src, dst) or { msg = err.msg() }
+	took := sw.elapsed()
+	f.close()
+	assert msg.contains('failed to publish ${dst}'), msg
+	assert msg.contains('error 5)'), msg
+	assert took >= 1900 * time.millisecond && took < 10 * time.second, took.str()
+	assert (os.read_file(dst) or { panic(err) }) == 'OLD'
+	assert os.exists(src)
+}
+
+fn test_atomic_replace_fails_at_once_when_waiting_cannot_help() {
+	$if !windows {
+		return
+	}
+	dir := store_test_dir('atomic_replace_gone')
+	_, dst := replace_pair(dir)
+	sw := time.new_stopwatch()
+	mut msg := ''
+	atomic_replace(os.join_path(dir, 'absent.txt'), dst) or { msg = err.msg() }
+	assert msg.contains('error 2)'), msg
+	assert sw.elapsed() < time.second
+	assert (os.read_file(dst) or { panic(err) }) == 'OLD'
+}
+
+fn test_a_program_started_while_a_graph_is_read_does_not_keep_it_open() {
+	// The MCP server reads a worktree's graph while it starts the extract that
+	// replaces it, so an extract that inherits the open file is in its own way. Three
+	// readers have it open nearly always, and the children start throughout many reads of a file that takes a while to read; it is
+	// no graph, so reading is all that is done. They run until the test ends them:
+	// what is in the way for a moment only, such as a virus scanner, is waited for.
+	$if !windows {
+		return
+	}
+	dir := store_test_dir('load_graph_inherit')
+	src, _ := replace_pair(dir)
+	path := os.join_path(dir, 'graph.json')
+	os.write_file(path, 'x'.repeat(64 * 1024 * 1024)) or { panic(err) }
+	stop := chan bool{}
+	mut readers := []thread int{}
+	for _ in 0 .. 3 {
+		readers << spawn fn (path string, stop chan bool) int {
+			mut n := 0
+			for !stop.closed {
+				load_graph(path) or {
+					n++
+					continue
+				}
+			}
+			return n
+		}(path, stop)
+	}
+	mut children := []&os.Process{}
+	for _ in 0 .. 12 {
+		time.sleep(20 * time.millisecond)
+		mut p := os.new_process(os.join_path(os.getenv('SystemRoot'), 'System32', 'PING.EXE'))
+		p.set_args(['-n', '300', '127.0.0.1'])
+		p.set_redirect_stdio() // what makes Windows hand the child the files it may inherit
+		p.run()
+		children << p
+	}
+	stop.close()
+	mut n := 0
+	for read in readers.wait() {
+		n += read
+	}
+	mut msg := ''
+	for _ in 0 .. 5 {
+		msg = ''
+		atomic_replace(src, path) or { msg = err.msg() }
+		if msg == '' {
+			break
+		}
+	}
+	mut alive := 0
+	for mut p in children {
+		if p.is_alive() {
+			alive++
+		}
+		p.signal_kill()
+		p.wait()
+		p.close()
+	}
+	assert alive == 12
+	assert n > 1, 'read ${n} times'
+	assert msg == '', msg
+	assert (os.read_file(path) or { panic(err) }) == 'NEW'
+}
+fn test_read_graph_file_reads_what_is_in_the_file() {
+	dir := store_test_dir('read_graph_file')
+	path := os.join_path(dir, 'graph.json')
+	for text in ['', 'a', 'one\r\ntwo\x1a\x00\u00e9\n'] {
+		os.write_file(path, text) or { panic(err) }
+		assert read_graph_file(path)! == text
+	}
+	if _ := read_graph_file(os.join_path(dir, 'absent.json')) {
+		assert false, 'a file that is not there was read'
+	}
+	// longer than what is read at once, with each part its own
+	mut long := []string{}
+	for i in 0 .. 30000 {
+		long << 'line ${i}'
+	}
+	os.write_file(path, long.join('\n')) or { panic(err) }
+	text := read_graph_file(path)!
+	assert text == long.join('\n')
+	// the byte after it is 0, as after any string that is read
+	assert unsafe { text.str[text.len] } == 0
+	// V has no size for a link on Windows
+	link := os.join_path(dir, 'link.json')
+	os.symlink(path, link) or {
+		eprintln('no link to read here: ${err}')
+		return
+	}
+	assert read_graph_file(link)! == long.join('\n')
+}
+
+fn test_read_graph_file_fails_when_the_file_is_not_read_to_its_end() {
+	$if !windows {
+		return
+	}
+	dir := store_test_dir('read_graph_file_locked')
+	path := os.join_path(dir, 'graph.json')
+	os.write_file(path, 'x'.repeat(300000)) or { panic(err) }
+	// a locked part of a file can't be read by another handle
+	mut f := os.open(path) or { panic(err) }
+	defer {
+		f.close()
+	}
+	$if windows {
+		assert C.LockFile(voidptr(C._get_osfhandle(f.fd)), 200000, 0, 10, 0) != 0
+	}
+	if text := read_graph_file(path) {
+		assert false, 'read ${text.len} bytes'
+	}
+}
 fn test_save_graph_works_when_the_target_already_exists() {
 	// Integration-level sanity check on top of the direct atomic_replace
 	// test above: a second save_graph to the same path (an ordinary repeat
