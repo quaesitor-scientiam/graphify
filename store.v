@@ -3,6 +3,7 @@ module graphify
 import os
 import x.json2
 import strings
+import time
 
 // save_graph writes the graph to `path` as JSON using a manual builder —
 // json2.encode's reflection is far too slow at graph scale (616s for vlang's
@@ -40,6 +41,14 @@ fn C.MoveFileExW(lp_existing_file_name &u16, lp_new_file_name &u16, dw_flags u32
 
 const move_file_replace_existing = 0x1
 
+// what MoveFileEx fails with while a program has the destination open, and while
+// one has the source open
+const error_access_denied = 5
+const error_sharing_violation = 32
+
+// how long atomic_replace waits for a reader to close either file
+const replace_wait = 2 * time.second
+
 // atomic_replace moves `src` onto `dst`, replacing any existing `dst`, as a
 // single filesystem operation — the whole point being that no reader of
 // `dst` can ever observe a state that is neither the old content nor the new
@@ -56,11 +65,25 @@ const move_file_replace_existing = 0x1
 // MoveFileEx with MOVEFILE_REPLACE_EXISTING, which — like POSIX rename — is
 // a single atomic filesystem operation when `src` and `dst` are on the same
 // volume, which they always are here (same output directory).
+//
+// MoveFileEx fails while any program has `dst` or `src` open as V opens a file to
+// read it, which POSIX rename() does not. A reader has it open for a moment, so
+// the move is tried again for replace_wait, for the codes an open file gives;
+// something else that gives one of them (a read-only `dst`) fails that much
+// later. A program that inherits the open file from a reader has it open for as
+// long as it runs, which no wait is long enough for: see read_graph_file.
 fn atomic_replace(src string, dst string) ! {
 	$if windows {
-		ok := C.MoveFileExW(src.to_wide(), dst.to_wide(), u32(move_file_replace_existing))
-		if ok == 0 {
-			return error('failed to publish ${dst} (MoveFileEx)')
+		wide_src := src.to_wide()
+		wide_dst := dst.to_wide()
+		waited := time.new_stopwatch()
+		for C.MoveFileExW(wide_src, wide_dst, u32(move_file_replace_existing)) == 0 {
+			code := int(C.GetLastError())
+			if code !in [error_access_denied, error_sharing_violation]
+				|| waited.elapsed() >= replace_wait {
+				return error('failed to publish ${dst} (MoveFileEx, error ${code})')
+			}
+			time.sleep(20 * time.millisecond)
 		}
 	} $else {
 		os.rename(src, dst)!
@@ -69,7 +92,7 @@ fn atomic_replace(src string, dst string) ! {
 
 // load_graph reads a graph previously written by save_graph.
 pub fn load_graph(path string) !Graph {
-	content := os.read_file(path)!
+	content := read_graph_file(path)!
 	mut g := json2.decode[Graph](content)!
 	// the source hashes the extract wrote beside it; a merged graph has none
 	// that match its files, so it has no check
@@ -82,6 +105,37 @@ pub fn load_graph(path string) !Graph {
 		}
 	}
 	return g
+}
+
+// read_graph_file reads the file at `path`, as os.read_file does. On Windows a
+// program started while a file is open inherits it, unless its mode has 'N', and
+// has it open for as long as it runs: the extract the MCP server starts while it
+// reads a graph could not replace that graph (atomic_replace). Elsewhere V opens a
+// file so that no program inherits it.
+fn read_graph_file(path string) !string {
+	$if windows {
+		fp := os.vfopen(path, 'rbN')!
+		defer {
+			C.fclose(fp)
+		}
+		// the size is only how much room to make: V has none for a link. The text stays
+		// where it is read to: a graph is too large to copy
+		mut text := []u8{cap: int(os.file_size(path)) + 1}
+		chunk := []u8{len: 64 * 1024}
+		for {
+			got := int(C.fread(chunk.data, 1, chunk.len, fp))
+			if got == 0 {
+				break
+			}
+			unsafe { text.push_many(chunk.data, got) }
+		}
+		if C.ferror(fp) != 0 {
+			return error('cannot read ${path} to its end')
+		}
+		text << 0
+		return unsafe { tos(text.data, text.len - 1) }
+	}
+	return os.read_file(path)!
 }
 
 // graph_to_json manually builds compact JSON for the graph. Every field write

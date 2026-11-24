@@ -1604,6 +1604,9 @@ plus the audit command, are all implemented:
   `MoveFileExW`/`MOVEFILE_REPLACE_EXISTING`, a genuine single-operation
   replace — `os.mv`'s fallback (copy then delete the source) would have
   reintroduced the exact torn-read window this exists to avoid.
+  It fails while a program has `graph.json` open, so a publish waits up to 2 s
+  for a reader, and a graph is opened so that a program started meanwhile (the
+  MCP server's extract) does not inherit it and block its own publish.
 - **A file that fails to parse now falls back to its last successful
   extraction, marked stale**, instead of silently vanishing from the graph.
   `CacheEntry` gained a `stale` flag; `stale_fallback_for`/`fresh_reuse_of`
