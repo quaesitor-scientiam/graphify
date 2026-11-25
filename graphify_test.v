@@ -2257,12 +2257,26 @@ fn test_shortest_path_returns_empty_for_unreachable_or_unknown_nodes() {
 	assert disjoint.shortest_path('demo.leaf_0', 'other.thing') == []
 }
 
-// store_test_dir returns a fresh scratch dir for one store.v test.
+const store_test_prefix = 'graphify_test_store_'
+
+// store_test_dir returns a fresh scratch dir for one store.v test, which testsuite_end removes.
 fn store_test_dir(name string) string {
-	dir := os.join_path(os.temp_dir(), 'graphify_test_store_${name}_${os.getpid()}')
+	dir := os.join_path(os.temp_dir(), '${store_test_prefix}${name}_${os.getpid()}')
 	os.rmdir_all(dir) or {}
 	os.mkdir_all(dir) or { panic(err) }
 	return dir
+}
+
+// testsuite_end removes what store_test_dir made, after a failed assert as well.
+fn testsuite_end() {
+	for name in os.ls(os.temp_dir()) or { []string{} } {
+		path := os.join_path(os.temp_dir(), name)
+		// os.rmdir_all would empty the folder a link leads to.
+		if name.starts_with(store_test_prefix) && name.ends_with('_${os.getpid()}')
+			&& !os.is_link(path) {
+			os.rmdir_all(path) or {}
+		}
+	}
 }
 
 fn test_atomic_replace_replaces_an_existing_destination_file() {
