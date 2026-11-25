@@ -23,6 +23,9 @@ repository.
 - `get_body(node)` / `body` — the source of ONE declaration (instead of reading its file)
 - `shortest_path(a, b)` / `path` — how two symbols connect
 
+Each MCP tool also takes `folder`, the full path of another tree, such as a git
+worktree: the answer is from that tree's graph and its first line says so.
+
 Workflow: map with `overview`/`query` → inspect with `get_node` → read only what
 you need with `get_body`. Refresh after code changes: `graphify extract .` or
 `/graphify`. Covers V (`.v`) files.
