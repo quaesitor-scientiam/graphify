@@ -991,12 +991,8 @@ fn test_merge_graphs_explicit_labels_override_defaults() {
 // one) and returns their Graphs, ready to merge. Callers must remove the
 // returned roots when done.
 fn merge_get_body_fixture() (Graph, Graph, string, string) {
-	root_a := os.join_path(os.temp_dir(), 'graphify_test_merge_a_${os.getpid()}')
-	root_b := os.join_path(os.temp_dir(), 'graphify_test_merge_b_${os.getpid()}')
-	os.rmdir_all(root_a) or {}
-	os.rmdir_all(root_b) or {}
-	os.mkdir_all(root_a) or { panic(err) }
-	os.mkdir_all(root_b) or { panic(err) }
+	root_a := scratch_dir('merge_a')
+	root_b := scratch_dir('merge_b')
 	os.write_file(os.join_path(root_a, 'demo.v'), 'fn greet_a() string {\n\treturn "hello from a"\n}\n') or {
 		panic(err)
 	}
@@ -1065,9 +1061,7 @@ fn test_get_body_unmerged_graph_still_uses_single_root() {
 // under a per-process temp root, so get_body reads real on-disk text at the
 // real symbols' line numbers. Callers must remove the returned root.
 fn body_fixture(src string) (Graph, string) {
-	root := os.join_path(os.temp_dir(), 'graphify_test_body_${os.getpid()}')
-	os.rmdir_all(root) or {}
-	os.mkdir_all(root) or { panic(err) }
+	root := scratch_dir('body')
 	os.write_file(os.join_path(root, 'demo.v'), src) or { panic(err) }
 	syms, edges := extract_v_text(src, 'demo.v')
 	mut g := Graph{
@@ -1989,10 +1983,7 @@ fn test_rel_path_is_case_insensitive() {
 // cache_test_dir returns a fresh scratch dir for one cache.v test, so
 // separate tests never share (or race on) the same .gf_cache.ndjson.
 fn cache_test_dir(name string) string {
-	dir := os.join_path(os.temp_dir(), 'graphify_test_cache_${name}_${os.getpid()}')
-	os.rmdir_all(dir) or {}
-	os.mkdir_all(dir) or { panic(err) }
-	return dir
+	return scratch_dir('cache_${name}')
 }
 
 fn test_cache_round_trips_when_binary_hash_matches() {
@@ -2257,26 +2248,83 @@ fn test_shortest_path_returns_empty_for_unreachable_or_unknown_nodes() {
 	assert disjoint.shortest_path('demo.leaf_0', 'other.thing') == []
 }
 
-const store_test_prefix = 'graphify_test_store_'
+// scratch_root is this test process's own folder in the temp folder, new when
+// the tests start. Every scratch folder is made inside it and testsuite_end
+// removes it, so no test removes a name in the shared temp folder that another
+// account could have put there.
+const scratch_root = new_scratch_root()
 
-// store_test_dir returns a fresh scratch dir for one store.v test, which testsuite_end removes.
-fn store_test_dir(name string) string {
-	dir := os.join_path(os.temp_dir(), '${store_test_prefix}${name}_${os.getpid()}')
+// new_scratch_root makes `graphify_test_<pid>_<clock>_<n>` in the temp folder,
+// open to this account only off Windows.
+fn new_scratch_root() string {
+	stem := os.join_path(os.temp_dir(), 'graphify_test_${os.getpid()}_${time.sys_mono_now()}')
+	dir := make_new_dir([]string{len: 8, init: '${stem}_${index}'}) or { panic(err) }
+	os.chmod(dir, 0o700) or { panic(err) }
+	return dir
+}
+
+// scratch_dir returns the folder `name` in scratch_root, new and empty.
+fn scratch_dir(name string) string {
+	dir := os.join_path(scratch_root, name)
 	os.rmdir_all(dir) or {}
 	os.mkdir_all(dir) or { panic(err) }
 	return dir
 }
 
-// testsuite_end removes what store_test_dir made, after a failed assert as well.
+// store_test_dir returns a fresh scratch dir for one store.v test.
+fn store_test_dir(name string) string {
+	return scratch_dir('store_${name}')
+}
+
+// testsuite_end removes every scratch folder, after a failed assert as well.
 fn testsuite_end() {
-	for name in os.ls(os.temp_dir()) or { []string{} } {
-		path := os.join_path(os.temp_dir(), name)
-		// os.rmdir_all would empty the folder a link leads to.
-		if name.starts_with(store_test_prefix) && name.ends_with('_${os.getpid()}')
-			&& !os.is_link(path) {
-			os.rmdir_all(path) or {}
+	os.rmdir_all(scratch_root) or {}
+}
+
+// plant_link makes `link` a link to the folder `target`: a junction on
+// Windows, which needs no privilege.
+fn plant_link(target string, link string) ! {
+	$if windows {
+		r := os.exec(['cmd', '/c', 'mklink', '/J', link, target])
+		if r.exit_code != 0 {
+			return error(r.output)
 		}
+	} $else {
+		os.symlink(target, link)!
 	}
+}
+
+// remove_planted removes what a test put at `path`: a link itself, never
+// what it leads to.
+fn remove_planted(path string) {
+	if os.is_link(path) {
+		$if windows {
+			// a junction or a link to a folder goes as a folder, a link to a file as a file
+			os.rmdir(path) or { os.rm(path) or {} }
+		} $else {
+			os.rm(path) or {}
+		}
+	} else if os.is_dir(path) {
+		os.rmdir_all(path) or {}
+	} else {
+		os.rm(path) or {}
+	}
+}
+
+fn test_every_scratch_folder_is_in_one_new_folder_of_this_process() {
+	name := os.file_name(scratch_root)
+	assert os.dir(scratch_root) == os.temp_dir()
+	assert name.starts_with('graphify_test_${os.getpid()}_')
+	assert os.is_dir(scratch_root) && !os.is_link(scratch_root)
+	$if !windows {
+		assert os.inode(scratch_root).bitmask() == 0o700
+	}
+	a := scratch_dir('one')
+	assert os.dir(a) == scratch_root
+	os.write_file(os.join_path(a, 'x.txt'), 'x') or { panic(err) }
+	// asked again, the same folder comes back empty
+	assert scratch_dir('one') == a
+	assert os.ls(a) or { ['?'] } == []
 }
 
 fn test_atomic_replace_replaces_an_existing_destination_file() {
@@ -2648,6 +2696,158 @@ fn test_extract_clean_file_has_no_parse_error() {
 	assert fr.symbols.map(it.name).contains('ok')
 }
 
+// text_dirs_of_this_process lists the temp folder's entries an extract of this
+// process names: `graphify_text_<pid>` and `graphify_text_<pid>_<n>`.
+fn text_dirs_of_this_process() []string {
+	own := 'graphify_text_${os.getpid()}'
+	return (os.ls(os.temp_dir()) or { []string{} }).filter(it == own
+		|| it.starts_with('${own}_'))
+}
+
+fn test_an_extract_through_a_temporary_file_leaves_nothing_in_the_temp_folder() {
+	// a folder of an earlier process with this id may be there already
+	before := text_dirs_of_this_process()
+	assert extract_v_text_result('module demo\n\nfn ok() {}\n', 'demo.v').parse_error == ''
+	assert text_dirs_of_this_process() == before
+	// one that fails to parse
+	assert extract_v_text_result('module demo\n\nfn bad( {\n', 'demo.v').parse_error != ''
+	assert text_dirs_of_this_process() == before
+	// a file with an `@[if]` guard is parsed through a copy as well
+	dir := scratch_dir('text_dir_file')
+	path := os.join_path(dir, 'demo.v')
+	os.write_file(path, 'module demo\n\n@[if debug]\nfn ok() {}\n') or { panic(err) }
+	fr := extract_v_file_result(path, 'demo.v')
+	assert fr.parse_error == ''
+	assert fr.symbols.map(it.name).contains('ok')
+	assert text_dirs_of_this_process() == before
+}
+
+fn test_a_new_folder_neither_uses_nor_removes_what_holds_a_name_it_tries() {
+	dir := scratch_dir('text_dir_taken')
+	target := os.join_path(dir, 'target')
+	os.mkdir_all(target) or { panic(err) }
+	keep := os.join_path(target, 'keep.txt')
+	os.write_file(keep, 'target') or { panic(err) }
+	gone := os.join_path(dir, 'gone')
+	// in the temp folder, where an extract makes its folders
+	first := os.join_path(os.temp_dir(), 'graphify_text_${os.getpid()}_taken_0')
+	second := os.join_path(os.temp_dir(), 'graphify_text_${os.getpid()}_taken_1')
+	for kind in ['folder', 'folder with a file', 'file', 'link', 'link to a file', 'link to nothing'] {
+		remove_planted(first)
+		remove_planted(second)
+		match kind {
+			'folder' {
+				os.mkdir(first) or { panic(err) }
+			}
+			'folder with a file' {
+				os.mkdir(first) or { panic(err) }
+				os.write_file(os.join_path(first, 'keep.txt'), 'planted') or { panic(err) }
+			}
+			'file' {
+				os.write_file(first, 'planted file') or { panic(err) }
+			}
+			'link' {
+				plant_link(target, first) or { panic(err) }
+			}
+			'link to a file' {
+				// Windows makes one only with the symbolic-link right or in Developer Mode
+				os.symlink(keep, first) or {
+					eprintln('no link to a file here: ${err}')
+					continue
+				}
+			}
+			else {
+				plant_link(gone, first) or { panic(err) }
+			}
+		}
+		got := make_new_dir([first, second]) or { panic('${kind}: ${err}') }
+		assert got == second, kind
+		assert os.is_dir(second) && !os.is_link(second), kind
+		// what was there is as it was
+		match kind {
+			'folder' {
+				assert os.is_dir(first) && (os.ls(first) or { ['?'] }) == []
+			}
+			'folder with a file' {
+				assert os.ls(first) or { [] } == ['keep.txt']
+				assert os.read_file(os.join_path(first, 'keep.txt')) or { '' } == 'planted'
+			}
+			'file' {
+				assert os.read_file(first) or { '' } == 'planted file'
+			}
+			'link' {
+				assert os.is_link(first)
+				assert os.ls(target) or { [] } == ['keep.txt']
+				assert os.read_file(keep) or { '' } == 'target'
+			}
+			'link to a file' {
+				assert os.is_link(first)
+				assert os.read_file(keep) or { '' } == 'target'
+			}
+			else {
+				assert os.is_link(first)
+				assert !os.exists(gone)
+			}
+		}
+	}
+	remove_planted(first)
+	remove_planted(second)
+}
+
+fn test_a_new_folder_with_every_name_taken_is_an_error_that_names_the_cause() {
+	mut planted := []string{}
+	for n in 0 .. 3 {
+		p := os.join_path(os.temp_dir(), 'graphify_text_${os.getpid()}_all_taken_${n}')
+		remove_planted(p)
+		os.write_file(p, 'planted ${n}') or { panic(err) }
+		planted << p
+	}
+	defer {
+		for p in planted {
+			remove_planted(p)
+		}
+	}
+	make_new_dir(planted) or {
+		assert err.msg().starts_with('3 names tried; the last: ')
+		assert err.msg().len > '3 names tried; the last: '.len
+		for n, p in planted {
+			assert os.read_file(p) or { '' } == 'planted ${n}'
+		}
+		return
+	}
+	assert false, 'a taken name was used'
+}
+
+fn test_an_extract_tries_several_names_for_its_folder() {
+	names := text_dir_names('stem')
+	assert names.len == text_dir_tries
+	assert text_dir_tries > 1
+	assert names == []string{len: text_dir_tries, init: 'stem_${index}'}
+}
+
+fn test_a_folder_an_extract_could_not_remove_does_not_block_a_later_one() {
+	// more calls than there are names to try, none of whose folders is removed
+	mut made := []string{}
+	defer {
+		for d in made {
+			os.rmdir(d) or {}
+		}
+	}
+	for _ in 0 .. text_dir_tries + 2 {
+		made << new_text_dir() or { panic(err) }
+	}
+	for d in made {
+		assert os.is_dir(d)
+		assert os.file_name(d).starts_with('graphify_text_${os.getpid()}_')
+	}
+	assert made.len == text_dir_tries + 2
+	mut seen := map[string]bool{}
+	for d in made {
+		seen[d] = true
+	}
+	assert seen.len == made.len
+}
+
 fn test_a_method_in_both_branches_of_a_top_level_comptime_if_is_no_parse_error() {
 	src := 'module demo\n\nstruct B {}\n\n\$if darwin {\n\tfn (b B) ready() bool {\n\t\treturn true\n\t}\n} \$else \$if windows {\n\tfn (b B) ready() bool {\n\t\treturn true\n\t}\n} \$else {\n\tfn (b B) ready() bool {\n\t\treturn false\n\t}\n}\n'
 	fr := extract_v_text_result(src, 'demo.v')
@@ -2782,8 +2982,7 @@ fn test_cache_round_trips_a_partial_results_parse_error() {
 // write_tree lays `files` (relative path -> source) out under a fresh temp dir
 // and returns its root.
 fn write_tree(name string, files map[string]string) string {
-	root := os.join_path(os.temp_dir(), 'graphify_test_${name}_${os.getpid()}')
-	os.rmdir_all(root) or {}
+	root := scratch_dir(name)
 	for rel, src in files {
 		path := os.join_path(root, rel)
 		os.mkdir_all(os.dir(path)) or { panic(err) }
@@ -6261,8 +6460,7 @@ pub struct Holder {
 }
 
 fn test_stale_note() {
-	dir := os.join_path(os.temp_dir(), 'graphify_stale_${os.getpid()}')
-	os.rmdir_all(dir) or {}
+	dir := scratch_dir('stale')
 	repo := os.join_path(dir, 'repo')
 	out := os.join_path(dir, 'out')
 	os.mkdir_all(repo) or { panic(err) }
@@ -10497,8 +10695,7 @@ fn check_crash_once(worker string, dir string) {
 fn test_a_worker_crash_is_recovered_from_on_both_paths() {
 	// one compile of the stand-in serves both cases; the directory they share is
 	// removed at the end
-	dir := os.join_path(os.temp_dir(), 'graphify_crash_worker_${os.getpid()}')
-	os.mkdir_all(dir) or { panic(err) }
+	dir := scratch_dir('crash_worker')
 	defer {
 		os.rmdir_all(dir) or {}
 	}
@@ -11154,8 +11351,7 @@ fn test_graph_json_has_a_library_section_only_when_it_reads_one() {
 		file: 'vlib/os/os.v'
 		line: 4
 	}
-	dir := os.join_path(os.temp_dir(), 'graphify_test_library_json_${os.getpid()}')
-	os.mkdir_all(dir) or { panic(err) }
+	dir := scratch_dir('library_json')
 	defer {
 		os.rmdir_all(dir) or {}
 	}
@@ -12018,8 +12214,7 @@ fn g() {
 }
 '
 	})
-	dir := os.join_path(os.temp_dir(), 'graphify_test_lines_${os.getpid()}')
-	os.mkdir_all(dir) or { panic(err) }
+	dir := scratch_dir('lines')
 	defer {
 		os.rmdir_all(dir) or {}
 	}
@@ -13789,7 +13984,7 @@ fn extract_text(g Graph, r ExtractReport) string {
 }
 
 fn test_what_an_extract_returns_outlives_the_arenas_it_ran_in() {
-	dir := os.join_path(os.temp_dir(), 'graphify_arena_worker_${os.getpid()}')
+	dir := scratch_dir('arena_worker')
 	tpl := os.join_path(dir, 'canned')
 	os.mkdir_all(tpl) or { panic(err) }
 	worker := compile_crash_worker(dir)
@@ -14052,8 +14247,7 @@ fn test_a_prealloc_extract_uses_nothing_it_has_freed() {
 	$if windows {
 		return
 	}
-	dir := os.join_path(os.temp_dir(), 'graphify_prealloc_cli_${os.getpid()}')
-	os.mkdir_all(dir) or { panic(err) }
+	dir := scratch_dir('prealloc_cli')
 	defer {
 		os.rmdir_all(dir) or {}
 	}
@@ -14100,8 +14294,7 @@ fn test_a_prealloc_extract_uses_nothing_it_has_freed() {
 // output and exit code, and the graph is there when it returns. One that can't be
 // started leaves the CLI to extract, on every OS.
 fn test_a_cli_hands_its_extract_to_the_extractor_built_with_it() {
-	dir := os.join_path(os.temp_dir(), 'graphify_handover_${os.getpid()}')
-	os.mkdir_all(dir) or { panic(err) }
+	dir := scratch_dir('handover')
 	defer {
 		os.rmdir_all(dir) or {}
 	}
@@ -14186,7 +14379,7 @@ fn test_a_cli_hands_its_extract_to_the_extractor_built_with_it() {
 // one with another key, or with none, parses again. The cache is edited by hand between
 // runs, so the graph says which happened.
 fn test_a_build_keeps_the_parse_cache_of_another_build_with_its_key() {
-	dir := os.join_path(os.temp_dir(), 'graphify_cache_key_${os.getpid()}')
+	dir := scratch_dir('cache_key')
 	os.mkdir_all(os.join_path(dir, 'proj')) or { panic(err) }
 	defer {
 		os.rmdir_all(dir) or {}
@@ -14246,7 +14439,7 @@ fn test_a_build_keeps_the_parse_cache_of_another_build_with_its_key() {
 // to a file compiled into the CLI, or to a header beside one, changes it, and a change to
 // a file it doesn't compile in, a test or the README, leaves it.
 fn test_the_updater_keys_the_parse_cache_on_what_is_compiled_in() {
-	top := os.join_path(os.temp_dir(), 'graphify_update_key_${os.getpid()}')
+	top := scratch_dir('update_key')
 	// named as a checkout is: V finds `import graphify` by the folder's name
 	dir := os.join_path(top, 'graphify')
 	os.mkdir_all(os.join_path(dir, 'cmd', 'cli')) or { panic(err) }
@@ -19683,8 +19876,7 @@ fn test_a_function_of_a_module_beside_a_program_is_not_its_own() {
 fn test_a_template_in_an_expression_sees_the_locals_it_names() {
 	// compiled: prints `hello Sss`. The parser writes the literal it lowers `$tmpl` to, and its
 	// capture list is no text of the file
-	dir := os.join_path(os.temp_dir(), 'graphify_tmpl_${os.getpid()}')
-	os.mkdir_all(dir) or { panic(err) }
+	dir := scratch_dir('tmpl')
 	defer {
 		os.rmdir_all(dir) or {}
 	}
@@ -19884,8 +20076,7 @@ fn test_a_template_whose_position_holds_fn_text_keeps_its_locals() {
 	// compiled: prints `hello Sss`. A lowered template's literal has a position in the text the parser
 	// generated, here byte 5 of the file: `fn first`, which is no literal, and `fn (r Zed) ...`, which
 	// could start one but doesn't end there.
-	dir := os.join_path(os.temp_dir(), 'graphify_tmpl_pos_${os.getpid()}')
-	os.mkdir_all(dir) or { panic(err) }
+	dir := scratch_dir('tmpl_pos')
 	defer {
 		os.rmdir_all(dir) or {}
 	}

@@ -1,6 +1,7 @@
 module graphify
 
 import os
+import time
 import v.flat
 import v.parser
 import v.pref
@@ -44,9 +45,18 @@ pub fn extract_v_text_result(source string, rel string) FileResult {
 // extract_v3_rewritten parses the rewritten copy; `real_path` is the file it
 // came from, if any, for resolving its imports.
 fn extract_v3_rewritten(source string, rel string, real_path string) FileResult {
-	dir := os.join_path(os.temp_dir(), 'graphify_text_${os.getpid()}')
-	os.mkdir_all(dir) or {}
+	dir := new_text_dir() or {
+		return FileResult{
+			parse_error: 'cannot make a temporary folder: ${err}'
+		}
+	}
 	path := os.join_path(dir, os.file_name(rel))
+	// The folder is new and this function's alone. If a removal fails (another
+	// program has the file open), the file or folder stays in the temp folder.
+	defer {
+		os.rm(path) or {}
+		os.rmdir(dir) or {}
+	}
 	// the extractor reads lines and slices from the `$match` rewrite, which
 	// adds text; blanking the `@[if]` guards adds none, and the original
 	// attribute lines stay visible to it
@@ -56,10 +66,42 @@ fn extract_v3_rewritten(source string, rel string, real_path string) FileResult 
 			parse_error: 'cannot write a temporary file: ${err}'
 		}
 	}
-	defer {
-		os.rm(path) or {}
-	}
 	return extract_v3(path, text, rel, real_path)
+}
+
+// text_dir_tries is how many names new_text_dir tries.
+const text_dir_tries = 8
+
+// new_text_dir makes a new, empty folder `graphify_text_<pid>_<clock>_<n>` in
+// the temp folder and returns its path. The monotonic clock is read once per
+// call, so a folder an earlier call could not remove blocks a later call only
+// if both read the same value.
+fn new_text_dir() !string {
+	return make_new_dir(text_dir_names(os.join_path(os.temp_dir(), 'graphify_text_${os.getpid()}_${time.sys_mono_now()}')))
+}
+
+// text_dir_names is the text_dir_tries names new_text_dir tries: `<stem>_<n>`.
+fn text_dir_names(stem string) []string {
+	return []string{len: text_dir_tries, init: '${stem}_${index}'}
+}
+
+// make_new_dir makes the first of `names` that is free, and returns it. A name
+// that is taken, by a folder, a file or a link (another process's, or a
+// left-over), is skipped and never written into or removed. Any other failure
+// to make a folder (no temp folder, no right to write in it) is tried the same
+// way. When no name is left it fails with the last name's error.
+fn make_new_dir(names []string) !string {
+	mut last := ''
+	for dir in names {
+		// os.mkdir fails when the name is taken: by a folder, a file, a link to a
+		// folder or a link to nothing (tested on Windows and Linux)
+		os.mkdir(dir) or {
+			last = err.msg()
+			continue
+		}
+		return dir
+	}
+	return error('${names.len} names tried; the last: ${last}')
 }
 
 // V3File is one parsed file and what the walk needs to read it.
